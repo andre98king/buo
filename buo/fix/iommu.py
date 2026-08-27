@@ -37,10 +37,22 @@ class IOMMUFix(LoggerMixin):
             return False
 
     def apply(self) -> Dict[str, Any]:
-        """Aggiunge iommu=off a GRUB_CMDLINE_LINUX_DEFAULT."""
+        """Aggiunge iommu=off ai parametri kernel (GRUB o ostree kargs)."""
         if self.mock and self.mock_hw is not None:
             ok = self.mock_hw.disable_iommu()
             return {"applied": ok, "needs_reboot": True}
+
+        # Bazzite/SteamOS (ostree): i parametri kernel si impostano con
+        # rpm-ostree kargs (il file /etc/default/grub è un no-op).
+        if os.path.exists("/run/ostree-booted"):
+            rc, out, err = run_command(
+                ["rpm-ostree", "kargs", "--append", "iommu=off"],
+                sudo=True, timeout=120)
+            if rc == 0:
+                return {"applied": True, "needs_reboot": True,
+                        "method": "ostree-kargs"}
+            return {"applied": False, "needs_reboot": False,
+                    "warning": f"rpm-ostree kargs fallito: {err[:120]}"}
 
         grub_paths = ["/etc/default/grub"]
         modified = False
@@ -75,9 +87,14 @@ class IOMMUFix(LoggerMixin):
                 "warning": "GRUB non modificato (serve root)"}
 
     def rollback(self) -> bool:
-        """Rimuove iommu=off e rigenera GRUB."""
+        """Rimuove iommu=off (ostree kargs o GRUB)."""
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.enable_iommu()
+        if os.path.exists("/run/ostree-booted"):
+            rc, _, _ = run_command(
+                ["rpm-ostree", "kargs", "--delete", "iommu=off"],
+                sudo=True, timeout=120, check=False)
+            return rc == 0
         self.logger.warning("Rollback IOMMU: rimuovere iommu=off da GRUB e "
                             "rigenerare la configurazione")
         return True
