@@ -147,15 +147,10 @@ class GovernorWrapper(LoggerMixin):
             return False
 
     def write_default_config(self) -> bool:
-        """Configurazione di default sicura (dal default-config.toml)."""
+        """Configurazione di default sicura (community 2026, flat 1000mV)."""
         defaults = [
-            {"freq": 500, "voltage": 700},
             {"freq": 1000, "voltage": 800},
-            {"freq": 1175, "voltage": 850},
             {"freq": 1500, "voltage": 900},
-            {"freq": 1600, "voltage": 910},
-            {"freq": 1700, "voltage": 920},
-            {"freq": 1850, "voltage": 930},
-            {"freq": 2000, "voltage": 960},
+            {"freq": 2000, "voltage": 1000},
         ]
         return self.write_config(defaults)

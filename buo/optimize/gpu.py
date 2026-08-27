@@ -29,16 +29,14 @@ from ..utils.logging import LoggerMixin
 class GPUUndervoltOptimizer(LoggerMixin):
     """Genera i safe-points della GPU (community-verified o mock)."""
 
-    # Tabella collaudata dal governor (default-config.toml, studio msg. 20)
+    # Tabella collaudata dal governor — community 2026 (elektricM/amd-bc250-docs):
+    # curva FLAT 1000mV in alto. Il vecchio default (2000 MHz @ 960mV) era
+    # troppo aggressivo e ha causato un crash GPU sotto stress sul campo
+    # (docs/BUGS.md #17). Ceiling 2000 MHz su raffreddamento stock.
     COMMUNITY_SAFE_POINTS: List[Dict[str, int]] = [
-        {"freq": 500, "voltage": 700},
         {"freq": 1000, "voltage": 800},
-        {"freq": 1175, "voltage": 850},
         {"freq": 1500, "voltage": 900},
-        {"freq": 1600, "voltage": 910},
-        {"freq": 1700, "voltage": 920},
-        {"freq": 1850, "voltage": 930},
-        {"freq": 2000, "voltage": 960},
+        {"freq": 2000, "voltage": 1000},
     ]
 
     FREQ_STEPS = [1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200]

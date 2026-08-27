@@ -48,6 +48,15 @@ class TestFailClosed(unittest.TestCase):
         for point in result["safe_points"]:
             self.assertLessEqual(point["voltage"], 1050)  # recommended max
 
+    def test_community_table_flat_1000mv_top(self):
+        """La tabella community NON deve scendere sotto 1000mV a 2000+ MHz
+        (bug #17: il vecchio 960mV crashava la GPU sotto stress)."""
+        for p in GPUUndervoltOptimizer.COMMUNITY_SAFE_POINTS:
+            if p["freq"] >= 2000:
+                self.assertGreaterEqual(
+                    p["voltage"], 1000,
+                    f"2000+ MHz a {p['voltage']}mV è troppo aggressivo")
+
     def test_gpu_table_clamped_to_max_voltage(self):
         opt = GPUUndervoltOptimizer(mock=False)
         result = opt.optimize(max_voltage=900)
