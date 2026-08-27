@@ -45,13 +45,21 @@ class BC250DetectWrapper(BaseWrapper):
         parsed: Dict[str, Any] = {
             "frequency": None,
             "scale": None,
+            "vid": None,
             "max_temperature": None,
             "success": False,
         }
-        m = re.search(r"Safe:\s*(\d+)\s*MHz\s*@\s*(-?\d+)", stdout)
+        # Formato reale osservato sull'hardware (bc250-detect 2026):
+        #   "Final Result: 3500 MHz @ 1087 mV using scale 0"
+        # Formato storico (documentazione):
+        #   "Safe: 3500 MHz @ 0"
+        m = re.search(r"(?:Final Result|Safe):\s*(\d+)\s*MHz\s*@\s*(-?\d+)"
+                      r"(?:\s*mV)?(?: using scale (-?\d+))?", stdout)
         if m:
             parsed["frequency"] = int(m.group(1))
-            parsed["scale"] = int(m.group(2))
+            parsed["vid"] = int(m.group(2))
+            if m.group(3) is not None:
+                parsed["scale"] = int(m.group(3))
             parsed["success"] = True
         m = re.search(r"max_temperature:\s*(\d+)", stdout)
         if m:

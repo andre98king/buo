@@ -87,15 +87,23 @@ class CPUUndervoltOptimizer(LoggerMixin):
                 f"Dettaglio: {detail}"
             )
 
-        # Converti scale SMU → VID approssimativo (formula della community)
+        # VID: usa quello reale riportato da bc250-detect se disponibile,
+        # altrimenti converti scale SMU → VID (formula della community)
         freq = parsed["frequency"]
-        scale = parsed["scale"]
-        vid = max(LIMITS.cpu.vid_min,
-                  min(max_vid, 1206 - scale * 8))
+        scale = parsed.get("scale")
+        if parsed.get("vid") is not None:
+            vid = parsed["vid"]
+        else:
+            vid = 1206 - (scale or 0) * 8
+        vid = max(LIMITS.cpu.vid_min, min(max_vid, vid))
 
-        vf_points = [{"freq": freq, "vid": vid, "scale": scale}]
-        self.logger.info("✅ Punto stabile trovato: %d MHz @ %d mV (scale %d)",
-                         freq, vid, scale)
+        point: Dict[str, Any] = {"freq": freq, "vid": vid}
+        if scale is not None:
+            point["scale"] = scale
+        vf_points = [point]
+        self.logger.info("✅ Punto stabile trovato: %d MHz @ %d mV%s",
+                         freq, vid,
+                         f" (scale {scale})" if scale is not None else "")
 
         return {
             "v_f_points": vf_points,
