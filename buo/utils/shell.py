@@ -20,6 +20,7 @@ def run_command(
     sudo: bool = False,
     check: bool = False,
     capture: bool = True,
+    cwd: Optional[str] = None,
 ) -> Tuple[int, str, str]:
     """
     Esegue un comando e restituisce (returncode, stdout, stderr).
@@ -30,6 +31,7 @@ def run_command(
         sudo: antepone `sudo -n` (non interattivo)
         check: se True, solleva FileNotFoundError-like su returncode != 0
         capture: se True cattura l'output
+        cwd: directory di lavoro del comando (default: ereditata)
 
     Raises:
         TimeoutError: se il comando supera il timeout
@@ -45,6 +47,7 @@ def run_command(
             capture_output=capture,
             text=capture,
             timeout=timeout,
+            cwd=cwd,
         )
     except subprocess.TimeoutExpired:
         raise TimeoutError(f"Timeout dopo {timeout}s: {' '.join(shlex.quote(c) for c in full_cmd)}")

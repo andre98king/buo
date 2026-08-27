@@ -21,6 +21,11 @@ from .base import BaseWrapper
 class BC250DetectWrapper(BaseWrapper):
     """Wrapper per bc250-detect (auto-tuning CPU)."""
 
+    # bc250-detect scrive 'overclock.conf' nella cwd: quando il processo
+    # gira via systemd (buo-resume) la cwd è "/" (read-only su ostree) →
+    # OSError Errno 30. Eseguiamo SEMPRE da una directory scrivibile.
+    WORK_DIR = "/tmp"
+
     def __init__(self, script_path: str = "/usr/local/bin/bc250-detect"):
         super().__init__(script_path, timeout=600)  # il test è lungo
 
@@ -39,7 +44,8 @@ class BC250DetectWrapper(BaseWrapper):
                 "-t", str(max_temp)]
         if keep:
             args.append("-k")
-        return self.run_with_output(args, check_returncode=False)
+        return self.run_with_output(args, check_returncode=False,
+                                    cwd=self.WORK_DIR)
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         parsed: Dict[str, Any] = {

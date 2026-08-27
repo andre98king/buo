@@ -60,6 +60,10 @@ After=multi-user.target
 
 [Service]
 Type=oneshot
+# La cwd di un servizio systemd è "/" (read-only su ostree):
+# gli script che scrivono file relativi (bc250-detect → overclock.conf)
+# devono girare da una directory scrivibile.
+WorkingDirectory=/tmp
 ExecStart=/usr/local/bin/{self.resume_command}
 RemainAfterExit=yes
 

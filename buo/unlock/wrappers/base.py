@@ -35,9 +35,16 @@ class BaseWrapper(LoggerMixin):
     def run(self, args: Optional[List[str]] = None,
             timeout: Optional[int] = None,
             check_returncode: bool = True,
-            sudo: bool = True) -> Tuple[int, str, str]:
+            sudo: bool = True,
+            cwd: Optional[str] = None) -> Tuple[int, str, str]:
         """
         Esegue lo script esterno.
+
+        Args:
+            cwd: directory di lavoro (default: ereditata). Importante per
+                 gli script che scrivono file relativi (es. bc250-detect
+                 scrive overclock.conf): via systemd la cwd è "/" che su
+                 ostree è read-only.
 
         Returns:
             (returncode, stdout, stderr)
@@ -51,7 +58,8 @@ class BaseWrapper(LoggerMixin):
 
         timeout = timeout or self.timeout
         cmd = [str(self.script_path)] + (args or [])
-        rc, stdout, stderr = run_command(cmd, timeout=timeout, sudo=sudo)
+        rc, stdout, stderr = run_command(cmd, timeout=timeout, sudo=sudo,
+                                         cwd=cwd)
 
         if check_returncode and rc != 0:
             raise ScriptError(self.script_path.name, rc, stdout, stderr)

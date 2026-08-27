@@ -70,6 +70,18 @@ class TestDetectParser(unittest.TestCase):
         self.assertEqual(result["v_f_points"][0]["vid"], 1087)
         self.assertEqual(result["v_f_points"][0]["scale"], 0)
 
+    def test_detect_runs_in_writable_cwd(self):
+        """bc250-detect scrive overclock.conf: cwd sempre scrivibile (/tmp),
+        altrimenti via systemd la cwd '/' è read-only (bug sul campo)."""
+        wrapper = BC250DetectWrapper()
+        self.assertEqual(wrapper.WORK_DIR, "/tmp")
+
+        from unittest import mock as umock
+        with umock.patch.object(wrapper, "run_with_output") as m:
+            wrapper.detect(3500, 1300)
+            kwargs = m.call_args.kwargs
+            self.assertEqual(kwargs.get("cwd"), "/tmp")
+
 
 if __name__ == "__main__":
     unittest.main()

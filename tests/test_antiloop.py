@@ -65,15 +65,25 @@ class TestAntiLoop(unittest.TestCase):
         orch.checkpoint.set_current_phase("fix")
 
         calls = self._count_reboots(orch, orch._phase_fix)
-        data = orch.results  # noqa: F841
-        # iommu NON deve essere ri-applicato: il primo reboot è per acpi
+        # iommu NON deve essere ri-applicato: il primo reboot è per acpi_fix
         self.assertEqual(len(calls), 1)
-        self.assertIn("acpi", calls[0])
+        self.assertIn("acpi_fix", calls[0])
 
-        # Verifica che il ledger ora contenga iommu E acpi
+        # Verifica che il ledger ora contenga iommu E acpi_fix
         steps = orch._applied_steps()
         self.assertIn("iommu", steps)
-        self.assertIn("acpi", steps)
+        self.assertIn("acpi_fix", steps)
+
+    def test_ledger_names_match_rollback_levels(self):
+        """I nomi del ledger devono coincidere con ROLLBACK_ORDER
+        (altrimenti il rollback automatico non ripristina nulla)."""
+        from buo.constants import ROLLBACK_ORDER
+        orch = self._make()
+        orch._phase_fix()
+        steps = orch._applied_steps()
+        for s in steps:
+            self.assertIn(s, ROLLBACK_ORDER,
+                          f"{s!r} non è un livello di rollback")
 
     def test_unlock_skips_cpu_already_done(self):
         """Se cpu_core_unlock è nel ledger, l'unlock non si ripete."""

@@ -521,13 +521,14 @@ class Orchestrator(LoggerMixin):
         done = self._applied_steps()
 
         fixers = [
+            # I nomi coincidono con i livelli del rollback (ROLLBACK_ORDER)
             ("iommu", self.fix_iommu, self.config.fix_iommu),
-            ("acpi", self.fix_acpi, self.config.fix_acpi),
-            ("tlb", self.fix_tlb, self.config.fix_tlb),
-            ("ace", self.fix_ace, self.config.fix_ace),
-            ("vram", self.fix_vram, self.config.fix_vram),
-            ("gtt", self.fix_gtt, self.config.fix_gtt),
-            ("fan", self.fix_fan, self.config.fix_fan),
+            ("acpi_fix", self.fix_acpi, self.config.fix_acpi),
+            ("tlb_fix", self.fix_tlb, self.config.fix_tlb),
+            ("ace_fix", self.fix_ace, self.config.fix_ace),
+            ("vram_config", self.fix_vram, self.config.fix_vram),
+            ("gtt_tuning", self.fix_gtt, self.config.fix_gtt),
+            ("fan_control", self.fix_fan, self.config.fix_fan),
         ]
 
         for name, fixer, enabled in fixers:
