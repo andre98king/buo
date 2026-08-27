@@ -26,6 +26,10 @@ class VRAMConfig(LoggerMixin):
         self.mock_hw = mock_hardware
         self.memcfg_path = memcfg_path  # eseguibile bc250_memcfg
 
+    def verify(self) -> bool:
+        """La configurazione VRAM non è verificabile in automatico: False."""
+        return False
+
     def apply(self, gpu_memory_gb: int = 8) -> Dict[str, Any]:
         """
         Imposta la VRAM dedicata.
