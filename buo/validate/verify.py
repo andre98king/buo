@@ -10,7 +10,7 @@ Metodi di verifica (dal design finale, messaggio 100):
     • 40-CU GPU       → num_cu da sysfs
     • TLB fix         → assenza di crash in carichi compute
     • ACE fix         → vkmark con compute (FPS >= baseline)
-    • IOMMU           → iommu=off in /proc/cmdline
+    • IOMMU           → attivo (iommu=off ASSENTE: è lo stato corretto)
     • ACPI fix        → tabelle SSDT*CST in /sys/firmware/acpi/tables
     • Governor        → systemctl is-active
 """
@@ -84,11 +84,14 @@ class FixVerifier(LoggerMixin):
 
     def _check_iommu(self):
         if self.mock and self.mock_hw is not None:
-            return self.mock_hw.state.iommu_off, "iommu=off (mock)"
+            ok = not self.mock_hw.state.iommu_off
+            return ok, "IOMMU attivo (mock)" if ok else "iommu=off (mock)"
         try:
             with open("/proc/cmdline") as f:
                 cmd = f.read()
-            return "iommu=off" in cmd, "iommu=off presente" if "iommu=off" in cmd else "IOMMU ancora attivo"
+            ok = "iommu=off" not in cmd and "iommu=pt" not in cmd
+            return ok, ("IOMMU attivo ✓" if ok
+                        else "iommu=off presente ⚠️ (rimuoverlo)")
         except Exception as e:
             return False, str(e)
 

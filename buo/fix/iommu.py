@@ -3,22 +3,37 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 BC-250 Community
 """
-IOMMU Disable — aggiunge `iommu=off` ai parametri kernel.
+IOMMU — nessuna modifica a livello kernel (fix BIOS manuale).
 
-Dallo studio: IOMMU instabile sulla BC-250 → crash e problemi di boot.
-La disabilitazione avviene nei parametri di GRUB (o EFI equivalenti).
+⚠️ CORREZIONE DA EVIDENZA DI CAMPO (docs/BUGS.md #2):
+    la community (elektricM/amd-bc250-docs) consiglia di DISABILITARE
+    L'IOMMU NEL BIOS per curare crash/black-screen della GPU
+    ("IOMMU is broken - causes display failures and crashes").
+
+    NOI avevamo applicato `iommu=off` come PARAMETRO KERNEL, che è un
+    metodo DIVERSO e SBAGLIATO su questa scheda: l'IOMMU viene
+    inizializzato dal BIOS e poi spento dal kernel, rompendo la interrupt
+    remapping → USB e scheda di rete morte (partial hang: schermo con
+    animazioni ma input/rete/console morti).
+
+    Distinzione fondamentale:
+      • disabilitare nel BIOS  → cura i crash GPU, NON tocca USB/rete
+      • iommu=off kernel param → rompe USB/rete (NON va mai usato)
+
+    BUO quindi NON tocca l'IOMMU a livello kernel. Se in futuro
+    comparissero crash/black-screen GPU, il rimedio corretto è il toggle
+    BIOS manuale (Advanced → AMD CBS → NBIO → IOMMU → Disabled).
+    Questo fix è un no-op: verifica che l'IOMMU sia attivo a livello
+    kernel e segnala se `iommu=off` è indebitamente presente.
 """
 
-import os
-import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..utils.logging import LoggerMixin
-from ..utils.shell import run_command
 
 
 class IOMMUFix(LoggerMixin):
-    """Disabilita l'IOMMU."""
+    """Verifica che l'IOMMU sia attivo; non applica alcuna modifica."""
 
     def __init__(self, mock: bool = False, mock_hardware=None):
         self.mock = mock
@@ -27,85 +42,42 @@ class IOMMUFix(LoggerMixin):
     # ------------------------------------------------------------------ #
 
     def verify(self) -> bool:
-        """True se iommu=off è già presente in /proc/cmdline."""
+        """True se l'IOMMU è nello stato corretto: ATTIVO (iommu=off assente)."""
         if self.mock and self.mock_hw is not None:
-            return self.mock_hw.state.iommu_off
+            return not self.mock_hw.state.iommu_off
         try:
             with open("/proc/cmdline") as f:
-                return "iommu=off" in f.read()
+                cmd = f.read()
+            return "iommu=off" not in cmd and "iommu=pt" not in cmd
         except Exception:
             return False
 
     def apply(self) -> Dict[str, Any]:
-        """Aggiunge iommu=off ai parametri kernel (GRUB o ostree kargs)."""
+        """Nessuna modifica: l'IOMMU va lasciato attivo (docs/BUGS.md #2)."""
         if self.mock and self.mock_hw is not None:
-            ok = self.mock_hw.disable_iommu()
-            return {"applied": ok, "needs_reboot": True}
-
-        # Bazzite/SteamOS (ostree): i parametri kernel si impostano con
-        # rpm-ostree kargs. ATTENZIONE (bug sul campo): se il demone
-        # rpm-ostree è occupato/bloccato (es. auto-update in corso), la
-        # chiamata resta appesa in D-state e non risponde ai timeout.
-        # Per non bloccare il pipeline, su ostree il fix è MANUALE con
-        # istruzioni precise (il reboot dell'ACPI lo riavvierà comunque).
-        if os.path.exists("/run/ostree-booted"):
             return {
                 "applied": False,
                 "needs_reboot": False,
                 "warning": (
-                    "IOMMU su Bazzite si disabilita manualmente: "
-                    "sudo rpm-ostree kargs --append=iommu=off && reboot. "
-                    "(BUO evita rpm-ostree in automatico: il demone può "
-                    "bloccarsi durante gli aggiornamenti.)"
+                    "IOMMU: nessuna modifica (mock). La fix per i crash GPU "
+                    "è il BIOS, non iommu=off (docs/BUGS.md #2)."
                 ),
             }
-
-        grub_paths = ["/etc/default/grub"]
-        modified = False
-        for path in grub_paths:
-            if not os.path.exists(path):
-                continue
-            try:
-                with open(path) as f:
-                    content = f.read()
-                if "iommu=off" not in content:
-                    new_content = re.sub(
-                        r'^(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*)"$',
-                        r'\1 iommu=off"',
-                        content,
-                        flags=re.M,
-                    )
-                    if new_content != content:
-                        # backup + scrittura (richiede root)
-                        rc, out, err = run_command(
-                            ["sh", "-c",
-                             f"cp {path} {path}.bak && printf '%s' "
-                             f"{shlex_quote(new_content)} > {path}"],
-                            sudo=True)
-                        modified = rc == 0
-            except Exception as e:
-                self.logger.error("Errore modifica %s: %s", path, e)
-
-        if modified:
-            run_command(["update-grub"], sudo=True, timeout=120)
-            return {"applied": True, "needs_reboot": True}
-        return {"applied": False, "needs_reboot": False,
-                "warning": "GRUB non modificato (serve root)"}
+        return {
+            "applied": False,
+            "needs_reboot": False,
+            "warning": (
+                "IOMMU: nessuna modifica a livello kernel. La community "
+                "consiglia di disabilitare l'IOMMU NEL BIOS per i crash GPU "
+                "(elektricM/amd-bc250-docs), ma il parametro kernel "
+                "`iommu=off` rompe USB e rete su BC-250 (docs/BUGS.md #2): "
+                "NON va usato. Se `iommu=off` è già presente, rimuovilo: "
+                "sudo rpm-ostree kargs --delete=iommu=off && reboot. "
+                "Per i crash GPU usa il toggle BIOS manuale "
+                "(Advanced → AMD CBS → NBIO → IOMMU → Disabled)."
+            ),
+        }
 
     def rollback(self) -> bool:
-        """Rimuove iommu=off (ostree kargs o GRUB)."""
-        if self.mock and self.mock_hw is not None:
-            return self.mock_hw.enable_iommu()
-        if os.path.exists("/run/ostree-booted"):
-            rc, _, _ = run_command(
-                ["rpm-ostree", "kargs", "--delete", "iommu=off"],
-                sudo=True, timeout=120, check=False)
-            return rc == 0
-        self.logger.warning("Rollback IOMMU: rimuovere iommu=off da GRUB e "
-                            "rigenerare la configurazione")
+        """Nessuna modifica da ripristinare."""
         return True
-
-
-def shlex_quote(s: str) -> str:
-    import shlex
-    return shlex.quote(s)

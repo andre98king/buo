@@ -151,10 +151,15 @@ Cosa farà BUO in sequenza (vedrai ogni fase nel terminale):
   KWIN_DRM_DEVICES=/dev/dri/card1 KWIN_DRM_NO_AMS=1
   ```
 
-- **IOMMU**: BUO aggiunge `iommu=off` a GRUB. Su Bazzite/ostree i
-  parametri kernel si impostano con:
+- **IOMMU**: ⚠️ **MAI usare `iommu=off` come parametro kernel**: su BC-250
+  rompe la interrupt remapping e causa USB + rete morte (partial hang,
+  verificato sul campo — vedi `docs/BUGS.md` #2). La community consiglia di
+  disabilitare l'IOMMU **nel BIOS** (Advanced → AMD CBS → NBIO → IOMMU →
+  Disabled) per curare eventuali crash/black-screen della **GPU** — è un
+  toggle firmware manuale, non un comando da OS. Se trovi `iommu=off` in
+  `/proc/cmdline`, rimuovilo con:
   ```bash
-  sudo rpm-ostree kargs --append="iommu=off"
+  sudo rpm-ostree kargs --delete=iommu=off && reboot
   ```
 
 - **Fix kernel (TLB/ACE)**: richiedono la compilazione dei sorgenti

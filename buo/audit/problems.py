@@ -8,7 +8,7 @@ della BC-250 (dall'analisi approfondita della chat, messaggi 90-94):
 
     • kernel < 6.11 o versioni con regressioni note
     • Mesa < 25.1
-    • IOMMU attivo (va disabilitato)
+    • IOMMU disattivato (iommu=off rompe USB/rete — docs/BUGS.md #2)
     • tabelle ACPI C-State mancanti
     • governor non installato/attivo
     • modulo amdgpu non patchato (40-CU)
@@ -32,7 +32,7 @@ class ProblemDetector(LoggerMixin):
         "kernel_old",
         "kernel_regression",
         "mesa_old",
-        "iommu_enabled",
+        "iommu_disabled",
         "acpi_cst_missing",
         "governor_missing",
         "amdgpu_not_patched",
@@ -84,12 +84,15 @@ class ProblemDetector(LoggerMixin):
             })
 
         iommu = audit.get("iommu", {})
-        if iommu.get("enabled", False):
+        if not iommu.get("enabled", True):
             problems.append({
-                "id": "iommu_enabled",
+                "id": "iommu_disabled",
                 "severity": "alta",
-                "title": "IOMMU attivo — instabile sulla BC-250",
-                "detail": "Aggiungere iommu=off ai parametri kernel",
+                "title": "iommu=off nel kernel — rompe USB/rete su BC-250",
+                "detail": "Rimuovere il parametro kernel iommu=off "
+                          "(rpm-ostree kargs --delete=iommu=off). "
+                          "La fix per i crash GPU è il BIOS, non il kernel "
+                          "(docs/BUGS.md #2).",
                 "fix": "iommu",
             })
 
@@ -174,7 +177,7 @@ class ProblemDetector(LoggerMixin):
         out = []
         for p in problems:
             pid = p["id"]
-            if pid == "iommu_enabled" and hw.state.iommu_off:
+            if pid == "iommu_disabled" and not hw.state.iommu_off:
                 continue
             if pid == "acpi_cst_missing" and hw.state.is_acpi_fixed:
                 continue

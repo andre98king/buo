@@ -174,7 +174,7 @@ class Doctor:
                    f"GPU {temps.get('gpu_temp')}°C | "
                    f"amb {temps.get('ambient')}°C")
         iommu = hw.get("iommu", {})
-        out.append(f"IOMMU: {'attivo ⚠️' if iommu.get('enabled') else 'off ✓'}")
+        out.append(f"IOMMU: {'attivo ✓' if iommu.get('enabled') else 'off ⚠️ (rompe USB/rete)'}")
         gov = hw.get("governor", {})
         out.append(f"Governor: {'attivo' if gov.get('active') else 'non attivo'}")
 

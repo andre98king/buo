@@ -55,8 +55,9 @@ class TestAntiLoop(unittest.TestCase):
         orch = self._make()
         calls = self._count_reboots(orch, orch._phase_fix)
         self.assertEqual(len(calls), 1, f"reboot schedulati: {calls}")
-        # il primo fix che richiede reboot è iommu
-        self.assertIn("iommu", calls[0])
+        # IOMMU è un no-op (verify già attivo): il primo fix che richiede
+        # reboot è acpi_fix (docs/BUGS.md #2)
+        self.assertIn("acpi_fix", calls[0])
 
     def test_fix_phase_skips_applied_steps_on_resume(self):
         """Resume: i fix già nel ledger vengono saltati (niente loop)."""

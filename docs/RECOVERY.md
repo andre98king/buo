@@ -61,7 +61,7 @@ ssh utente@IP_DI_RETE   # se preferisci da remoto
 
 | Passo | Comando manuale |
 |:---|:---|
-| IOMMU off | `sudo rpm-ostree kargs --append=iommu=off && reboot` |
+| IOMMU (crash GPU) | disabilita **nel BIOS** (Advanced → AMD CBS → NBIO → IOMMU → Disabled); **NON** `iommu=off` kernel |
 | ACPI C-State | metodo della community (`bazzite-bc-250-toolkit`) |
 | 40-CU GPU | `sudo rpm-ostree install kernel-devel && reboot`, poi `sudo buo unleash` |
 | Governor | COPR/script community (`cyan-skillfish-governor-smu`) |
