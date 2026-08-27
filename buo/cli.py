@@ -169,7 +169,8 @@ def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
 # ----------------------- comandi fase standalone ---------------------- #
 
 def _run_phase_command(name: str, phase: str, mock: bool, dry_run: bool,
-                       interactive: bool, verbose: bool, sudo_hint: bool) -> None:
+                       interactive: bool, verbose: bool, sudo_hint: bool,
+                       config: Optional[BUOConfig] = None) -> None:
     """Helper per i comandi che eseguono una singola fase."""
     from .orchestrator import Orchestrator
     from .config import BUOConfig
@@ -178,7 +179,8 @@ def _run_phase_command(name: str, phase: str, mock: bool, dry_run: bool,
     if sudo_hint:
         console.print("[dim]⚠️  Esegui con sudo: modifica l'hardware "
                       f"({name})[/]\n")
-    config = BUOConfig.load()
+    if config is None:
+        config = BUOConfig.load()
     orchestrator = _make_orchestrator(mock, dry_run, interactive, verbose,
                                       config=config)
     exit_code = orchestrator.run(start_phase=phase, stop_after=phase)
@@ -190,8 +192,13 @@ def _run_phase_command(name: str, phase: str, mock: bool, dry_run: bool,
 @click.option("--verbose", "-v", is_flag=True, help="Log dettagliato")
 def probe(mock: bool, verbose: bool) -> None:
     """🔍 Solo discovery hardware e rilevamento problemi (nessuna modifica)."""
+    from .config import BUOConfig
+    # probe = sola analisi: niente benchmark (quelli sono di unleash)
+    config = BUOConfig.load()
+    config.benchmark_enabled = False
     _run_phase_command("probe", "pre_audit", mock, dry_run=True,
-                       interactive=False, verbose=verbose, sudo_hint=False)
+                       interactive=False, verbose=verbose, sudo_hint=False,
+                       config=config)
 
 
 @cli.command()
