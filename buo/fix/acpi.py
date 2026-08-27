@@ -82,8 +82,24 @@ class ACPIFix(LoggerMixin):
             return self._install_dracut(aml_cst)
         if self.distro.initramfs_tool == "mkinitcpio":
             return self._install_mkinitcpio(aml_cst)
-        if self.distro.initramfs_tool in ("initramfs-tools", "ostree"):
+        if self.distro.initramfs_tool == "initramfs-tools":
             return self._install_cpio(aml_cst)
+        if self.distro.initramfs_tool == "ostree":
+            # ⚠️ CRITICO (bug trovato sul campo): scrivere SSDT_ACPI.cpio
+            # su /boot di un sistema ostree (Bazzite/SteamOS) ha causato
+            # un BOOT FAILURE (scheda irraggiungibile). Su ostree l'ACPI
+            # fix è MANUALE, con il metodo corretto della community.
+            return {
+                "applied": False,
+                "needs_reboot": False,
+                "warning": (
+                    "ACPI fix su Bazzite/ostree: NON automatizzabile in "
+                    "sicurezza (un cpio scritto su /boot può rompere il "
+                    "boot). Metodo manuale della community: consulta "
+                    "docs/HARDWARE_SETUP.md oppure i repo bc250-acpi-fix / "
+                    "bazzite-bc-250-toolkit."
+                ),
+            }
         return {"applied": False, "error": f"distro non supportata: {self.distro.id}"}
 
     # ------------------------- metodi distro ------------------------- #
