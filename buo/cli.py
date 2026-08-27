@@ -681,6 +681,32 @@ def install_deps(only_check: bool) -> None:
                   "eseguire: sudo buo unleash[/]")
 
 
+# ------------------------------ doctor -------------------------------- #
+
+@cli.command()
+@click.option("--json-output", is_flag=True, help="Output JSON")
+@click.option("--mock", is_flag=True, help="Usa hardware simulato")
+def doctor(json_output: bool, mock: bool) -> None:
+    """
+    🩺 Diagnostica completa in un solo comando (sola lettura).
+
+    Raccoglie: ambiente, distro, kernel/Mesa, core/CU, temperature,
+    problemi noti, tool della community, config, log. Per il supporto:
+    esegui `buo doctor` e incolla tutto l'output.
+    """
+    from .diagnose import Doctor
+    from .utils.mock import MockHardware
+
+    show_header()
+    doctor_ = Doctor(mock=mock, mock_hardware=MockHardware() if mock else None)
+    report = doctor_.diagnose()
+
+    if json_output:
+        console.print(Doctor.to_json(report))
+    else:
+        console.print(doctor_.to_text(report))
+
+
 # ====================================================================== #
 
 def main() -> int:
