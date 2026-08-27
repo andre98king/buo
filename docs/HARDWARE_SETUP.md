@@ -140,10 +140,11 @@ Cosa farà BUO in sequenza (vedrai ogni fase nel terminale):
 
 ## 📝 5. Note specifiche per Bazzite
 
-- **ACPI fix**: BUO usa il metodo **initrd override (cpio)** su Bazzite
-  (`SSDT_ACPI.cpio` in `/boot`). Dopo `sudo buo install-deps` trova i
-  `.aml` da solo — nessun parametro necessario. (Solo C-State: i
-  P-State "doesn't work" su questa scheda.)
+- **ACPI fix**: ⚠️ Su Bazzite/ostree è **MANUALE**: BUO NON scrive più
+  `SSDT_ACPI.cpio` su `/boot` (verificato sul campo: può rompere il
+  boot). Metodo corretto della community: consulta il repo
+  `bc250-acpi-fix` o `bazzite-bc-250-toolkit` (solo C-State: i
+  P-State "doesn't work" su questa scheda).
 
 - **Black screen desktop**: se il desktop resta nero, aggiungi nel boot:
   ```
