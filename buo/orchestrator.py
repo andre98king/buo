@@ -207,6 +207,12 @@ class Orchestrator(LoggerMixin):
         if current not in PHASES or current == "complete":
             current = "init"
 
+        # Un run completo NUOVO (da init) azzera il ledger delle modifiche:
+        # i fix ripartono da zero. In caso di RIPRESA (fase intermedia)
+        # il ledger resta e impedisce loop di reboot.
+        if current == "init" and not self.dry_run:
+            self.checkpoint.set("applied_steps", [])
+
         try:
             while current != "complete":
                 if self.safety_violation:
@@ -445,14 +451,17 @@ class Orchestrator(LoggerMixin):
         """FASE 1 — SBLOCCHI: CPU 8-core, GPU 40-CU, health test, maschera."""
         self.logger.info("🔓 SBLOCCHI: CPU + GPU")
         results: Dict[str, Any] = {}
+        done = self._applied_steps()
 
         # 1. CPU 8-core (volatile)
-        if self.config.probe_cpu_unlock:
+        if self.config.probe_cpu_unlock and "cpu_core_unlock" not in done:
             try:
                 cpu = self.cpu_unlock.unlock()
                 results["cpu"] = cpu
                 if cpu.get("changed", True):
                     self.results["applied_fixes"].append("cpu_core_unlock")
+                    # MARCATO PRIMA del reboot: al resume non si ripete
+                    self._mark_step("cpu_core_unlock")
                     if cpu.get("needs_reboot"):
                         self._schedule_reboot("CPU unlock — reboot richiesto")
                 else:
@@ -460,15 +469,18 @@ class Orchestrator(LoggerMixin):
             except Exception as e:
                 self.logger.warning("Unlock CPU non eseguito: %s", e)
                 results["cpu"] = {"unlocked": False, "error": str(e)}
+        elif "cpu_core_unlock" in done:
+            self.logger.info("CPU: unlock già eseguito (checkpoint) — salto")
 
         # 2. GPU 40-CU
-        if self.config.probe_gpu_unlock:
+        if self.config.probe_gpu_unlock and "gpu_40cu" not in done:
             try:
                 was_enabled = self.gpu_unlock.is_enabled()
                 gpu = self.gpu_unlock.apply()
                 results["gpu"] = gpu
                 if not was_enabled and gpu.get("applied"):
                     self.results["applied_fixes"].append("gpu_40cu")
+                    self._mark_step("gpu_40cu")  # prima del reboot
                     if gpu.get("needs_reboot"):
                         self._schedule_reboot("GPU 40-CU — reboot richiesto")
                 elif was_enabled:
@@ -476,6 +488,8 @@ class Orchestrator(LoggerMixin):
             except Exception as e:
                 self.logger.warning("Unlock GPU non eseguito: %s", e)
                 results["gpu"] = {"applied": False, "error": str(e)}
+        elif "gpu_40cu" in done:
+            self.logger.info("GPU: unlock 40-CU già eseguito (checkpoint) — salto")
 
         # 3. Health test CU (se abilitato)
         if self.config.probe_health_test:
@@ -483,9 +497,10 @@ class Orchestrator(LoggerMixin):
                 health = self.health_test.run()
                 results["health"] = health
                 defective = health.get("defective", [])
-                if defective:
+                if defective and "gpu_mask" not in self._applied_steps():
                     results["mask"] = self.cu_mask.apply(defective_cu=defective)
                     self.results["applied_fixes"].append("gpu_mask")
+                    self._mark_step("gpu_mask")
             except Exception as e:
                 self.logger.warning("Health test non eseguito: %s", e)
                 results["health"] = {"error": str(e)}
@@ -493,9 +508,17 @@ class Orchestrator(LoggerMixin):
         return results
 
     def _phase_fix(self) -> Dict[str, Any]:
-        """FASE 1b — FIX: TLB, ACE, IOMMU, ACPI, VRAM, GTT, ventole."""
+        """FASE 1b — FIX: TLB, ACE, IOMMU, ACPI, VRAM, GTT, ventole.
+
+        ANTI-LOOP: ogni fix è registrato nel ledger `applied_steps` PRIMA
+        del reboot; al resume i fix già eseguiti (o già attivi via verify)
+        vengono saltati, e per ogni rientro di fase scatta AL MASSIMO UN
+        reboot. Senza questo, un fix che richiede reboot faceva rientrare
+        la fase all'infinito (bug trovato sul campo: loop di riavvii).
+        """
         self.logger.info("🔧 FIX di sistema")
         results: Dict[str, Any] = {}
+        done = self._applied_steps()
 
         fixers = [
             ("iommu", self.fix_iommu, self.config.fix_iommu),
@@ -510,16 +533,29 @@ class Orchestrator(LoggerMixin):
         for name, fixer, enabled in fixers:
             if not enabled:
                 continue
+            if name in done:
+                self.logger.info("Fix %s: già eseguito (checkpoint) — salto",
+                                 name)
+                results[name] = {"applied": True, "skipped_checkpoint": True}
+                continue
             try:
                 if self.dry_run:
                     results[name] = {"applied": True, "dry_run": True}
-                else:
-                    result = fixer.apply()
-                    results[name] = result
-                    if result.get("applied"):
-                        self.results["applied_fixes"].append(name)
-                        if result.get("needs_reboot"):
-                            self._schedule_reboot(f"{name} — reboot richiesto")
+                    continue
+                if fixer.verify():
+                    self.logger.info("Fix %s: già attivo — salto", name)
+                    self._mark_step(name)
+                    results[name] = {"applied": True, "skipped_verified": True}
+                    continue
+                result = fixer.apply()
+                results[name] = result
+                if result.get("applied"):
+                    self.results["applied_fixes"].append(name)
+                    # Registra PRIMA del reboot: il resume non deve ripeterlo
+                    self._mark_step(name)
+                    if result.get("needs_reboot"):
+                        self._schedule_reboot(f"{name} — reboot richiesto")
+                        break  # al massimo UN reboot per rientro di fase
             except Exception as e:
                 self.logger.warning("Fix %s non applicato: %s", name, e)
                 results[name] = {"applied": False, "error": str(e)}
@@ -696,6 +732,17 @@ class Orchestrator(LoggerMixin):
         from .state.reboot import RebootManager
         RebootManager().schedule(reason=reason, delay=5)
         sys.exit(EXIT_REBOOT)
+
+    def _applied_steps(self) -> set:
+        """Ledger delle modifiche già eseguite (persistito nel checkpoint)."""
+        return set(self.checkpoint.get("applied_steps", []) or [])
+
+    def _mark_step(self, name: str) -> None:
+        """Registra una modifica come eseguita (PRIMA di eventuali reboot)."""
+        steps = self._applied_steps()
+        steps.add(name)
+        if not self.dry_run:
+            self.checkpoint.set("applied_steps", sorted(steps))
 
     def _safety_abort(self, reason: str) -> None:
         self.safety_violation = True
