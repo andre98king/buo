@@ -109,6 +109,29 @@ class TestAntiLoop(unittest.TestCase):
         self.assertNotIn("acpi", steps)          # vecchio passo azzerato
         self.assertIn("cpu_core_unlock", steps)  # applicato nel run nuovo
 
+    def test_resume_restores_before_and_problems(self):
+        """Ripresa dopo reboot: before/problemi/fix applicati devono essere
+        ricaricati dal checkpoint (bug #12: report vuoto dopo resume)."""
+        orch = self._make(dry_run=False)
+        # Simula uno stato di checkpoint lasciato da un run interrotto
+        # dopo pre_audit (es. reboot per unlock CPU): il processo "resume"
+        # riparte da "fix" e pre_audit NON viene rieseguito.
+        orch.checkpoint.set_phase(
+            "pre_audit",
+            {"audit": {"cpu": {"cores": 12}}, "problems": [{"id": "tlb_fault"}]},
+            completed=True,
+        )
+        orch.checkpoint.set("applied_steps", ["cpu_core_unlock"])
+        orch.checkpoint.set_current_phase("fix")
+
+        orch._restore_results_from_checkpoint()
+
+        self.assertTrue(orch.results["before"],
+                        "before non ripristinato dal checkpoint")
+        self.assertTrue(orch.results["problems"],
+                        "problems non ripristinati dal checkpoint")
+        self.assertIn("cpu_core_unlock", orch.results["applied_fixes"])
+
     def test_complete_cleanups_resume_service(self):
         """A run completato il servizio buo-resume deve essere rimosso
         (altrimenti al prossimo boot riparte da init → reboot → loop)."""

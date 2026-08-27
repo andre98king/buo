@@ -213,6 +213,12 @@ class Orchestrator(LoggerMixin):
         if current == "init" and not self.dry_run:
             self.checkpoint.set("applied_steps", [])
 
+        # RIPRESA (fase > init): ricarica i dati delle fasi già completate
+        # dal checkpoint (before/problemi/fix applicati), altrimenti il
+        # report finale risulta vuoto (bug #12).
+        if not self.dry_run and current != "init":
+            self._restore_results_from_checkpoint()
+
         try:
             while current != "complete":
                 if self.safety_violation:
@@ -750,6 +756,21 @@ class Orchestrator(LoggerMixin):
     def _applied_steps(self) -> set:
         """Ledger delle modifiche già eseguite (persistito nel checkpoint)."""
         return set(self.checkpoint.get("applied_steps", []) or [])
+
+    def _restore_results_from_checkpoint(self) -> None:
+        """Ripresa dopo reboot: ricarica i dati in-memory delle fasi già
+        completate dal checkpoint. Senza questo, il report finale perde
+        "before", "problems" e "applied_fixes" (bug #12 — docs/BUGS.md)."""
+        pa = self.checkpoint.get_phase("pre_audit")
+        if pa.get("completed"):
+            data = pa.get("data", {}) or {}
+            if data.get("audit"):
+                self.results["before"] = data["audit"]
+            if data.get("problems"):
+                self.results["problems"] = data["problems"]
+        steps = self._applied_steps()
+        if steps:
+            self.results["applied_fixes"] = sorted(steps)
 
     def _mark_step(self, name: str) -> None:
         """Registra una modifica come eseguita (PRIMA di eventuali reboot)."""
