@@ -96,7 +96,7 @@ class TestPhaseCommandsWithOrchestrator(unittest.TestCase):
         from buo.orchestrator import Orchestrator
         cfg = BUOConfig()
         cfg.benchmark_enabled = False
-        orch = Orchestrator(config=cfg, mock=True, dry_run=True)
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False)
         orch.checkpoint.clear()
         rc = orch.run(start_phase="pre_audit", stop_after="pre_audit")
         self.assertEqual(rc, 0)
@@ -109,7 +109,7 @@ class TestPhaseCommandsWithOrchestrator(unittest.TestCase):
         from buo.orchestrator import Orchestrator
         cfg = BUOConfig()
         cfg.benchmark_enabled = False
-        orch = Orchestrator(config=cfg, mock=True, dry_run=True)
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False)
         orch.checkpoint.clear()
         rc = orch.run(start_phase="optimize", stop_after="apply")
         self.assertEqual(rc, 0)

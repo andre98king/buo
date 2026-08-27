@@ -21,18 +21,20 @@ class TestOrchestrator(unittest.TestCase):
         os.environ.pop("BUO_STATE_DIR", None)
         self._tmp.cleanup()
 
-    def _make(self):
+    def _make(self, dry_run=True):
         hw = MockHardware(seed=42)
         cfg = BUOConfig()
         cfg.validation_stress_duration = 0
         cfg.benchmark_enabled = True
-        orch = Orchestrator(config=cfg, mock=True, dry_run=True,
+        orch = Orchestrator(config=cfg, mock=True, dry_run=dry_run,
                             mock_hardware=hw)
         orch.checkpoint.clear()  # parte da zero
         return orch
 
     def test_full_run_success(self):
-        orch = self._make()
+        # run reale simulato (mock): il checkpoint viene scritto,
+        # i reboot sono simulati, tutte le fasi vengono eseguite
+        orch = self._make(dry_run=False)
         rc = orch.run()
         self.assertEqual(rc, 0)
 

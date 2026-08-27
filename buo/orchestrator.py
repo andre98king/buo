@@ -197,8 +197,14 @@ class Orchestrator(LoggerMixin):
         # Esecuzione parziale (comando fase standalone)?
         self._partial_run = start_phase is not None
 
-        current = start_phase or self.checkpoint.get_current_phase()
-        if current not in PHASES:
+        # Il dry-run è pura simulazione: NON tocca lo stato persistente.
+        # Un run reale con checkpoint "complete" (run precedente finita)
+        # riparte da init: la ripresa serve solo per esecuzioni interrotte.
+        if self.dry_run:
+            current = start_phase or "init"
+        else:
+            current = start_phase or self.checkpoint.get_current_phase()
+        if current not in PHASES or current == "complete":
             current = "init"
 
         try:
@@ -217,12 +223,16 @@ class Orchestrator(LoggerMixin):
 
                 try:
                     data = self._execute_phase(current)
-                    self.checkpoint.set_phase(current, data, completed=True)
+                    # Il checkpoint viene scritto SOLO nei run reali:
+                    # il dry-run non deve inquinare lo stato persistente.
+                    if not self.dry_run:
+                        self.checkpoint.set_phase(current, data, completed=True)
                     if stop_after and current == stop_after:
                         current = "complete"
                     else:
                         current = self._next_phase(current)
-                        self.checkpoint.set_current_phase(current)
+                        if not self.dry_run:
+                            self.checkpoint.set_current_phase(current)
                 except SafetyViolation as e:
                     self.logger.error("🚨 SAFETY VIOLATION: %s", e)
                     self.safety_reason = str(e)
@@ -651,7 +661,8 @@ class Orchestrator(LoggerMixin):
             self.logger.info("✅ Fase/i richiesta/e completata/e")
         else:
             self.logger.info("✅ OTTIMIZZAZIONE COMPLETATA!")
-        self.checkpoint.set_phase("complete", {"done": True}, completed=True)
+        if not self.dry_run:
+            self.checkpoint.set_phase("complete", {"done": True}, completed=True)
 
     def _handle_safety_violation(self) -> None:
         self.logger.error("🛑 Esecuzione interrotta per safety violation")
@@ -672,10 +683,15 @@ class Orchestrator(LoggerMixin):
 
     def _schedule_reboot(self, reason: str) -> None:
         """Salva checkpoint e programma il reboot (auto-ripresa)."""
+        if self.dry_run:
+            self.logger.info("♻️ [DRY-RUN] reboot richiesto: %s", reason)
+            return
+        if self.mock:
+            self.checkpoint.increment_reboot_count()
+            self.logger.info("♻️ [MOCK] reboot simulato: %s", reason)
+            return
         self.checkpoint.increment_reboot_count()
         self.logger.info("♻️ Reboot programmato: %s", reason)
-        if self.dry_run:
-            return
         # In produzione: crea buo-resume.service e reboot
         from .state.reboot import RebootManager
         RebootManager().schedule(reason=reason, delay=5)
