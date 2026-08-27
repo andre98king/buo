@@ -1,0 +1,10 @@
+Documentazione di BUO — licenza CC BY-SA 4.0
+
+I file di DOCUMENTAZIONE del progetto (README.md, PROJECT_STATUS.md,
+CONTRIBUTING.md, docs/, config/buo.yaml commenti) sono rilasciati sotto
+Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0).
+
+Testo completo: https://creativecommons.org/licenses/by-sa/4.0/legalcode
+
+Il CODICE (directory buo/) è invece rilasciato sotto GPL-3.0-or-later
+(vedi file LICENSE).

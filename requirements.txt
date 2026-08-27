@@ -1,0 +1,9 @@
+click>=8.0
+rich>=13.0
+pyyaml>=6.0
+
+# Opzionali
+# textual>=0.60        # TUI cockpit interattivo (buo tui)
+# scikit-learn>=1.0   # modello ML per la stima VRAM
+# numpy>=1.24         # calibrazione VRAM e ML
+# onnxruntime         # benchmark AI/ML

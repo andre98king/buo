@@ -1,0 +1,73 @@
+# BUO — configurazione default (personalizzabile dall'utente)
+# Gli HARD LIMITS (vid_absolute_max, gpu_voltage_absolute_max...) NON
+# sono sovrascrivibili: vivono in buo/constants.py e sono immutabili.
+version: "1.0"
+mode: "adaptive"              # adaptive | efficiency | performance | custom
+
+hardware:
+  psu_wattage: 350            # W — alimentatore dichiarato
+  cooling_type: "push-pull"   # passive | push-pull | custom
+
+safety:
+  cpu_vid_recommended_max: 1300   # mV (hard limit immutabile: 1325)
+  cpu_temp_max: 90                # °C
+  cpu_freq_max: 4000              # MHz
+  gpu_voltage_recommended_max: 1050  # mV (hard limit immutabile: 1100)
+  gpu_temp_max: 85                # °C
+  gpu_freq_max: 2200              # MHz
+  power_budget: 300               # W (margine per PSU 350W)
+
+vram_estimation:
+  enabled: true
+  alpha: 0.45                # accoppiamento termico GPU→VRAM
+  beta: 0.04                 # °C per watt GPU
+  tau: 5.0                   # costante di tempo smoothing (s)
+  warning_threshold: 82      # °C
+  critical_threshold: 92     # °C
+
+phases:
+  probe:
+    cpu_unlock: true
+    gpu_unlock: true
+    health_test: true
+    health_reboot_max: 25
+  fix:
+    tlb: true                # patch kernel TLB fault (AI/ML)
+    ace: true                # fix compute queue (kernel+Mesa)
+    iommu: true              # iommu=off
+    acpi: true               # SSDT C-State
+    vram: true               # bc250_memcfg (split VRAM)
+    gtt: true                # ttm.pages_limit
+    fan: true                # sensori/ventole NCT6686
+  undervolt:
+    cpu_start_freq: 3500     # MHz
+    cpu_step: 100            # MHz
+    cpu_test_duration: 30    # s
+    gpu_start_freq: 1200     # MHz
+    gpu_step: 50             # MHz
+    gpu_test_duration: 30    # s
+  overclock:
+    enable: true
+    power_budget: 300        # W
+    target: "max"            # max | balanced
+  validation:
+    stress_duration: 30      # minuti
+    abort_on_error: true
+
+benchmark:
+  enabled: true
+  gpu_duration: 60           # s (furmark/glmark2)
+  cpu_duration: 60           # s (stress-ng)
+  compute_duration: 30       # s (vkmark)
+
+deps:
+  auto_install: true         # BUO scarica da solo i tool mancanti al primo avvio
+  auto_install_governor: false  # il governor resta manuale (servizio distro)
+
+logging:
+  level: "info"              # debug | info | warn | error
+  file: "/var/log/buo/buo.log"
+
+report:
+  format: "markdown"         # markdown | json
+  output: "/var/lib/buo/report.md"

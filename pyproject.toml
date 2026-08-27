@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buo"
+version = "1.0.0"
+description = "BC-250 Ultimate Orchestrator — ottimizzazione automatica per ASRock BC-250"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "BC-250 Community" }]
+keywords = ["bc250", "asrock", "amd", "undervolt", "overclock", "orchestrator"]
+
+dependencies = [
+    "click>=8.0",
+    "rich>=13.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+tui = ["textual>=0.60"]
+ml = ["numpy>=1.24", "scikit-learn>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+buo = "buo.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["buo*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

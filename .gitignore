@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+venv/
+.venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ambiente
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+
+# Dati locali BUO (se creati durante test senza root)
+.buo_write_test
