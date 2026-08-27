@@ -80,9 +80,11 @@ class CPUUndervoltOptimizer(LoggerMixin):
 
         parsed = result.get("parsed_output", {})
         if not parsed.get("success"):
+            stderr = (result.get("stderr", "") or "").strip()
+            detail = stderr[-300:] if stderr else "(nessun output)"
             raise ConfigurationError(
                 "bc250-detect non ha trovato una configurazione stabile. "
-                f"stdout: {result.get('stdout', '')[:200]}"
+                f"Dettaglio: {detail}"
             )
 
         # Converti scale SMU → VID approssimativo (formula della community)

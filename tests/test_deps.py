@@ -64,8 +64,35 @@ class TestDeps(unittest.TestCase):
             self.skipTest(f"nessuna rete: {entry.get('detail', '')}")
 
         self.assertEqual(entry["status"], "ok")
-        self.assertTrue((Path(self._bin_tmp.name) / "bc250-detect").exists())
-        self.assertTrue((Path(self._bin_tmp.name) / "bc250-apply").exists())
+        bin_dir = Path(self._bin_tmp.name)
+        self.assertTrue((bin_dir / "bc250-detect").exists())
+        self.assertTrue((bin_dir / "bc250-apply").exists())
+        # libreria e helper necessari a bc250-detect (bug trovato sul campo)
+        self.assertTrue((bin_dir / "bc250_smu" / "api.py").exists())
+        self.assertTrue((bin_dir / "stress_helper.py").exists())
+
+    def test_stress_wrapper_created_when_missing(self):
+        """Se manca `stress` ma c'è `stress-ng`, viene creato il wrapper."""
+        original_stress = deps_module.which
+        deps_module.which = lambda tool: (
+            "/usr/bin/stress-ng" if tool == "stress-ng" else None)
+        try:
+            status = self.manager._ensure_stress(sudo=False)
+            self.assertEqual(status["status"], "ok")
+            wrapper = Path(self._bin_tmp.name) / "stress"
+            self.assertTrue(wrapper.exists())
+            self.assertIn("stress-ng", wrapper.read_text())
+        finally:
+            deps_module.which = original_stress
+
+    def test_stress_error_when_neither_available(self):
+        original_stress = deps_module.which
+        deps_module.which = lambda tool: None
+        try:
+            status = self.manager._ensure_stress(sudo=False)
+            self.assertEqual(status["status"], "failed")
+        finally:
+            deps_module.which = original_stress
 
     def test_check_after_install(self):
         """Dopo l'installazione, check() rileva la dipendenza presente."""

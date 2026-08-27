@@ -47,6 +47,13 @@ DEPS: List[Dict[str, Any]] = [
         "files": [
             {"src": "bc250_detect.py", "dest": "bc250-detect", "exec": True},
             {"src": "bc250_apply.py", "dest": "bc250-apply", "exec": True},
+            # bc250_detect importa stress_helper e la libreria bc250_smu:
+            # senza di loro lo script fallisce subito (bug trovato sul campo)
+            {"src": "bc250_limits.py", "dest": "bc250_limits.py", "exec": False},
+            {"src": "stress_helper.py", "dest": "stress_helper.py", "exec": False},
+        ],
+        "copy_dirs": [
+            {"src": "bc250_smu", "dest": "bc250_smu"},
         ],
     },
     {
@@ -114,6 +121,10 @@ class DependencyManager(LoggerMixin):
         if dep["type"] == "scripts":
             missing = [f["dest"] for f in dep["files"]
                        if not (self.bin_dir / f["dest"]).exists()]
+            # Anche le directory di supporto (es. libreria bc250_smu)
+            for d in dep.get("copy_dirs", []):
+                if not (self.bin_dir / d["dest"]).exists():
+                    missing.append(f"{d['dest']}/")
             present = not missing
             return {
                 "present": present,
@@ -169,7 +180,45 @@ class DependencyManager(LoggerMixin):
 
             result[dep["name"]] = self._install_one(dep, sudo=sudo)
 
+        # Fallback `stress → stress-ng`: bc250-detect usa il binario
+        # `stress` (via stress_helper); se assente ma c'è stress-ng
+        # (compatibile), installiamo un wrapper — niente reboot ostree.
+        result["system"] = self._ensure_stress(sudo=sudo)
+
         return result
+
+    def _ensure_stress(self, sudo: bool) -> Dict[str, Any]:
+        """Wrapper `stress` → `stress-ng` se il primo manca."""
+        if which("stress") is not None:
+            return {"status": "ok", "detail": "stress presente"}
+        stress_ng = which("stress-ng")
+        if stress_ng is None:
+            return {"status": "failed",
+                    "detail": "né stress né stress-ng disponibili "
+                              "(serve uno dei due per il test di stabilità)"}
+        wrapper = (
+            "#!/bin/sh\n"
+            "# Wrapper BUO: stress mancante -> stress-ng (compatibile)\n"
+            f'exec {stress_ng} "$@"\n'
+        )
+        dest = self.bin_dir / "stress"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if self._writable(self.bin_dir):
+                dest.write_text(wrapper, encoding="utf-8")
+            else:
+                tmp = Path("/tmp") / "buo-stress-wrapper"
+                tmp.write_text(wrapper, encoding="utf-8")
+                rc, _, err = run_command(
+                    ["install", "-m", "755", str(tmp), str(dest)], sudo=sudo)
+                if rc != 0:
+                    return {"status": "failed", "detail": err[:120]}
+            dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP |
+                       stat.S_IXOTH)
+            return {"status": "ok",
+                    "detail": f"wrapper stress -> {stress_ng} creato"}
+        except Exception as e:
+            return {"status": "failed", "detail": str(e)}
 
     def _install_one(self, dep: Dict[str, Any], sudo: bool) -> Dict[str, Any]:
         checkout = self.base_dir / dep["name"]
@@ -213,6 +262,30 @@ class DependencyManager(LoggerMixin):
                                stat.S_IXOTH)
             except Exception as e:
                 failures.append(f"{f['dest']}: {e}")
+
+        # Copia le directory di supporto (es. la libreria bc250_smu)
+        for d in dep.get("copy_dirs", []):
+            src_dir = checkout / d["src"]
+            if not src_dir.is_dir():
+                failures.append(f"{d['src']} (dir) non trovata nel checkout")
+                continue
+            dest_dir = self.bin_dir / d["dest"]
+            try:
+                if dest_dir.exists():
+                    shutil.rmtree(dest_dir)
+                if self._writable(self.bin_dir):
+                    shutil.copytree(src_dir, dest_dir)
+                else:
+                    tmp = Path("/tmp") / d["dest"]
+                    if tmp.exists():
+                        shutil.rmtree(tmp)
+                    shutil.copytree(src_dir, tmp)
+                    rc, _, err = run_command(
+                        ["cp", "-r", str(tmp), str(self.bin_dir)], sudo=sudo)
+                    if rc != 0:
+                        failures.append(f"{dest_dir}: {err[:120]}")
+            except Exception as e:
+                failures.append(f"{d['dest']}: {e}")
 
         if failures:
             return {"status": "failed", "detail": "; ".join(failures)}
