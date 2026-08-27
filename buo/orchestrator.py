@@ -700,6 +700,12 @@ class Orchestrator(LoggerMixin):
             self.logger.info("✅ OTTIMIZZAZIONE COMPLETATA!")
         if not self.dry_run:
             self.checkpoint.set_phase("complete", {"done": True}, completed=True)
+            # Cleanup anti-loop: a ciclo completato il servizio di ripresa
+            # va rimosso, altrimenti al prossimo boot `buo resume` vede
+            # "complete" → riparte da init → riesegue tutto → reboot → loop
+            # (bug trovato sul campo: riavvii ripetuti a ogni accensione).
+            from .state.reboot import RebootManager
+            RebootManager().cleanup()
 
     def _handle_safety_violation(self) -> None:
         self.logger.error("🛑 Esecuzione interrotta per safety violation")
@@ -708,6 +714,8 @@ class Orchestrator(LoggerMixin):
         if not self.dry_run:
             self.rollback.rollback(reason=self.safety_reason,
                                    applied=self._applied_steps())
+            from .state.reboot import RebootManager
+            RebootManager().cleanup()
         self.results["notes"].append(
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
@@ -719,6 +727,8 @@ class Orchestrator(LoggerMixin):
             self.rollback.rollback(from_phase=None,
                                    reason=f"errore in {phase}: {error}",
                                    applied=self._applied_steps())
+            from .state.reboot import RebootManager
+            RebootManager().cleanup()
         self.results["notes"].append(f"Errore in {phase}: {error}")
 
     def _schedule_reboot(self, reason: str) -> None:

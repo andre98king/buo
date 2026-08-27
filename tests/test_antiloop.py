@@ -109,6 +109,29 @@ class TestAntiLoop(unittest.TestCase):
         self.assertNotIn("acpi", steps)          # vecchio passo azzerato
         self.assertIn("cpu_core_unlock", steps)  # applicato nel run nuovo
 
+    def test_complete_cleanups_resume_service(self):
+        """A run completato il servizio buo-resume deve essere rimosso
+        (altrimenti al prossimo boot riparte da init → reboot → loop)."""
+        import tempfile
+        from pathlib import Path
+        from buo.state.reboot import RebootManager
+        orch = self._make(dry_run=False)
+        # Patch del percorso del servizio verso una dir temporanea
+        # (non possiamo scrivere in /etc/systemd/system senza root).
+        tmp = tempfile.TemporaryDirectory()
+        svc = Path(tmp.name) / "buo-resume.service"
+        svc.write_text("[Service]\nExecStart=/usr/local/bin/buo resume\n")
+        original = RebootManager.SERVICE_PATH
+        RebootManager.SERVICE_PATH = svc
+        try:
+            orch.checkpoint.set_current_phase("complete")
+            orch._finalize()
+            self.assertFalse(svc.exists(),
+                             "buo-resume.service non rimosso a fine run")
+        finally:
+            RebootManager.SERVICE_PATH = original
+            tmp.cleanup()
+
 
 if __name__ == "__main__":
     unittest.main()
