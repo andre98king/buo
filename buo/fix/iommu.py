@@ -43,16 +43,22 @@ class IOMMUFix(LoggerMixin):
             return {"applied": ok, "needs_reboot": True}
 
         # Bazzite/SteamOS (ostree): i parametri kernel si impostano con
-        # rpm-ostree kargs (il file /etc/default/grub è un no-op).
+        # rpm-ostree kargs. ATTENZIONE (bug sul campo): se il demone
+        # rpm-ostree è occupato/bloccato (es. auto-update in corso), la
+        # chiamata resta appesa in D-state e non risponde ai timeout.
+        # Per non bloccare il pipeline, su ostree il fix è MANUALE con
+        # istruzioni precise (il reboot dell'ACPI lo riavvierà comunque).
         if os.path.exists("/run/ostree-booted"):
-            rc, out, err = run_command(
-                ["rpm-ostree", "kargs", "--append", "iommu=off"],
-                sudo=True, timeout=120)
-            if rc == 0:
-                return {"applied": True, "needs_reboot": True,
-                        "method": "ostree-kargs"}
-            return {"applied": False, "needs_reboot": False,
-                    "warning": f"rpm-ostree kargs fallito: {err[:120]}"}
+            return {
+                "applied": False,
+                "needs_reboot": False,
+                "warning": (
+                    "IOMMU su Bazzite si disabilita manualmente: "
+                    "sudo rpm-ostree kargs --append=iommu=off && reboot. "
+                    "(BUO evita rpm-ostree in automatico: il demone può "
+                    "bloccarsi durante gli aggiornamenti.)"
+                ),
+            }
 
         grub_paths = ["/etc/default/grub"]
         modified = False
