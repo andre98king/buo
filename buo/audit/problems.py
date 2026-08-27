@@ -64,12 +64,16 @@ class ProblemDetector(LoggerMixin):
                 "fix": "kernel_upgrade",
             })
         release = kernel.get("release", "")
-        if "6.15" in release:
+        # Regressioni note segnalate dalla community (elektricM/amd-bc250-docs):
+        #   • 6.15.0–6.15.6   → Broadcast TLB invalidation rompe il dispositivo
+        #   • 6.17.8–6.17.10  → il driver GPU fallisce (black screen)
+        bad = _kernel_in_bad_range(release)
+        if bad:
             problems.append({
                 "id": "kernel_regression",
                 "severity": "alta",
-                "title": "Kernel 6.15-rc1 con regressione nota",
-                "detail": "Broadcast TLB invalidation rompe il dispositivo",
+                "title": f"Kernel {release.split('-')[0]} con regressione nota",
+                "detail": bad,
                 "fix": "kernel_upgrade",
             })
 
@@ -203,3 +207,25 @@ class ProblemDetector(LoggerMixin):
         for p in problems:
             lines.append(f"  • [{p['severity'].upper()}] {p['title']} — {p['detail']}")
         return "\n".join(lines)
+
+
+def _kernel_in_bad_range(release: str) -> str:
+    """Ritorna una descrizione se il kernel rientra in un range con
+    regressioni note sulla BC-250 (community: elektricM/amd-bc250-docs).
+
+    - 6.15.0–6.15.6  → Broadcast TLB invalidation rompe il dispositivo
+    - 6.17.8–6.17.10 → il driver GPU fallisce (black screen/crash)
+    """
+    import re
+    m = re.match(r"(\d+)\.(\d+)\.(\d+)", release)
+    if not m:
+        return ""
+    major, minor, patch = (int(x) for x in m.groups())
+
+    if (major, minor) == (6, 15) and patch <= 6:
+        return ("Broadcast TLB invalidation rompe il dispositivo "
+                "(evitare 6.15.0–6.15.6)")
+    if (major, minor) == (6, 17) and 8 <= patch <= 10:
+        return ("il driver GPU fallisce su questo range "
+                "(evitare 6.17.8–6.17.10)")
+    return ""

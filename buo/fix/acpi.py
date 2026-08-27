@@ -8,9 +8,13 @@ ACPI Fix — tabelle SSDT per C-State/P-State.
 Dallo studio (messaggi 2, 24):
     • NON esistono install.sh/uninstall.sh: l'installazione è manuale
     • repo: bc250-collective/bc250-acpi-fix (SSDT-CST.aml, SSDT-PST.aml)
-    • il README è vuoto e P-State "doesn't work": BUO installa SOLO
-      le tabelle C-State (CST), come previsto dal design finale
     • metodi per distro: ostree (cpio), arch (mkinitcpio), fedora (dracut)
+
+AGGIORNAMENTO (ricerca community, elektricM/amd-bc250-docs):
+    • SSDT-CST (C-States): abilita C1/C2/C3 idle (confermato)
+    • SSDT-PST (P-States): abilita il frequency scaling 800→3200 MHz via
+      cpufreq — CONFERMATO FUNZIONANTE su kernel 6.19.8 (in passato era
+      ritenuto "doesn't work"; l'informazione è superata).
 """
 
 import shutil

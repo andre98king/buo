@@ -55,6 +55,25 @@ class TestMesaDetection(unittest.TestCase):
         ids = [p["id"] for p in det.detect(audit)]
         self.assertIn("mesa_old", ids)
 
+    def test_detector_kernel_regression_bad_ranges(self):
+        """Kernel nei range difettosi (6.15.0-6.15.6, 6.17.8-6.17.10)
+        → kernel_regression segnalato (community: docs/COMMUNITY_NOTES.md)."""
+        det = ProblemDetector(mock=True)
+        for rel in ["6.15.0-generic", "6.15.6-arch1", "6.17.8-ba29.fc43",
+                    "6.17.10-cachyos"]:
+            audit = {"kernel": {"release": rel, "meets_minimum": True}}
+            ids = [p["id"] for p in det.detect(audit)]
+            self.assertIn("kernel_regression", ids, f"atteso per {rel}")
+
+    def test_detector_kernel_ok_not_flagged(self):
+        """Kernel fuori dai range difettosi → nessun kernel_regression."""
+        det = ProblemDetector(mock=True)
+        for rel in ["6.15.7-generic", "6.17.7-ba29.fc43",
+                    "6.17.11-cachyos", "6.18.18-lts"]:
+            audit = {"kernel": {"release": rel, "meets_minimum": True}}
+            ids = [p["id"] for p in det.detect(audit)]
+            self.assertNotIn("kernel_regression", ids, f"non atteso per {rel}")
+
 
 class TestRollbackAppliedOnly(unittest.TestCase):
     def test_only_applied_levels_executed(self):

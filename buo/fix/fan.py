@@ -5,10 +5,13 @@
 """
 Fan Control — driver SuperIO NCT6686/NCT6687 per sensori e ventole.
 
-Dallo studio:
-    • chip Nuvoton NCT6686D: serve `modprobe nct6683 force=true`
-    • driver out-of-tree nct6687 (Fred78290/nct6687d) per PWM ventole
-    • kernel 6.15+ ha supporto nativo per temperature GPU via nct6683
+Dalla community (elektricM/amd-bc250-docs, sezione Sensors):
+    • chip Nuvoton NCT6686D
+    • `nct6683` (in-kernel): SOLO lettura sensori (temp/volt/ventole),
+      NON controlla il PWM — richiede `force=true` (non auto-detectato)
+    • `nct6687` (out-of-tree, Fred78290/nct6687d): lettura + SCRITTURA
+      PWM per il controllo ventole software — richiede build del modulo
+    • entrambi riportano i sensori come `nct6686-isa-0a20`
 """
 
 from typing import Any, Dict, Optional
