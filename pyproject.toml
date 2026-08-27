@@ -29,5 +29,8 @@ buo = "buo.cli:main"
 [tool.setuptools.packages.find]
 include = ["buo*"]
 
+[tool.setuptools.package-data]
+buo = ["data/*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
