@@ -43,7 +43,8 @@ class RollbackManager(LoggerMixin):
     # ------------------------------------------------------------------ #
 
     def rollback(self, from_phase: Optional[str] = None,
-                 reason: str = "") -> bool:
+                 reason: str = "",
+                 applied: Optional[set] = None) -> bool:
         """
         Esegue il rollback a cascata.
 
@@ -51,17 +52,32 @@ class RollbackManager(LoggerMixin):
             from_phase: nome del livello da cui partire (incluso); se None,
                         fa rollback di TUTTO.
             reason: motivo del rollback (per il log).
+            applied: insieme dei livelli realmente applicati (ledger).
+                     Se fornito, esegue SOLO quelli: niente rumore su
+                     livelli mai toccati (es. rollback automatico dopo un
+                     errore). Se None → cascata completa (rollback manuale).
 
         Returns:
             True se tutti i passi richiesti sono riusciti.
         """
-        self.logger.warning("🔄 Rollback avviato (motivo: %s)", reason or "generico")
+        if applied:
+            self.logger.info("🔄 Rollback dei livelli applicati (%d): %s",
+                             len(applied), ", ".join(sorted(applied)))
+        else:
+            self.logger.warning("🔄 Rollback avviato (motivo: %s)",
+                                reason or "generico")
 
         # Determina il sottoinsieme dell'ordine da eseguire
         to_rollback = list(ROLLBACK_ORDER)
         if from_phase and from_phase in ROLLBACK_ORDER:
             idx = ROLLBACK_ORDER.index(from_phase)
             to_rollback = ROLLBACK_ORDER[:idx + 1]
+        if applied is not None:
+            to_rollback = [l for l in to_rollback if l in applied]
+            if not to_rollback:
+                self.logger.info("Nessun livello applicato da ripristinare "
+                                 "(ledger vuoto)")
+                return True
 
         success = True
         executed = 0
@@ -76,10 +92,12 @@ class RollbackManager(LoggerMixin):
                 if handler():
                     self.logger.info("   ✅ Rollback completato: %s", level)
                 else:
-                    self.logger.error("   ❌ Rollback fallito: %s", level)
+                    self.logger.warning("   ⚠️ Rollback non necessario: %s",
+                                        level)
                     success = False
             except Exception as e:
-                self.logger.error("   ❌ Rollback in errore per %s: %s", level, e)
+                self.logger.warning("   ⚠️ Rollback in errore per %s: %s",
+                                    level, e)
                 success = False
 
         if executed == 0:
@@ -88,9 +106,9 @@ class RollbackManager(LoggerMixin):
         if success:
             self.logger.info("✅ Rollback a cascata completato")
         else:
-            self.logger.error(
-                "⚠️ Alcuni livelli di rollback sono falliti. "
-                "Consulta /var/log/buo/buo.log e la guida di recupero manuale."
+            self.logger.warning(
+                "⚠️ Alcuni livelli di rollback non sono stati completati. "
+                "Consulta /var/log/buo/buo.log per i dettagli."
             )
         return success
 

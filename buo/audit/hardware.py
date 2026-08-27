@@ -168,15 +168,30 @@ class HardwareAudit(LoggerMixin):
             return tuple(int(x) for x in m.groups())
         return None
 
+    @staticmethod
+    def _parse_mesa_string(out: str) -> Optional[str]:
+        """
+        Estrae la versione MESA da glxinfo.
+
+        ATTENZIONE (bug trovato sul campo): la stringa reale è
+        "OpenGL version string: 4.6 (Compatibility Profile) Mesa 25.2.4"
+        — il primo numero (4.6) è la versione OpenGL, NON Mesa.
+        Va cercato il token "Mesa X.Y(.Z)".
+        """
+        m = re.search(r"Mesa\s+(\d+\.\d+(?:\.\d+)?)", out)
+        if m:
+            return m.group(1)
+        m = re.search(r"OpenGL version string:\s*(\S+)", out)
+        if m:
+            return m.group(1)
+        return None
+
     def _detect_mesa_raw(self) -> Optional[str]:
         try:
             import subprocess
             r = subprocess.run(["glxinfo", "-B"], capture_output=True,
                                text=True, timeout=10)
-            if r.returncode == 0:
-                m = re.search(r"OpenGL version string: (.+)", r.stdout)
-                if m:
-                    return m.group(1)
+            return self._parse_mesa_string(r.stdout or "")
         except Exception:
             pass
         return None

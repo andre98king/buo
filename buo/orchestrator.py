@@ -705,7 +705,8 @@ class Orchestrator(LoggerMixin):
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
         if not self.dry_run:
-            self.rollback.rollback(reason=self.safety_reason)
+            self.rollback.rollback(reason=self.safety_reason,
+                                   applied=self._applied_steps())
         self.results["notes"].append(
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
@@ -714,7 +715,9 @@ class Orchestrator(LoggerMixin):
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
         if not self.dry_run:
-            self.rollback.rollback(from_phase=None, reason=f"errore in {phase}: {error}")
+            self.rollback.rollback(from_phase=None,
+                                   reason=f"errore in {phase}: {error}",
+                                   applied=self._applied_steps())
         self.results["notes"].append(f"Errore in {phase}: {error}")
 
     def _schedule_reboot(self, reason: str) -> None:
