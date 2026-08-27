@@ -57,6 +57,10 @@ class BUOConfig:
         self.power_budget: int = int(
             safety.get("power_budget", LIMITS.power.power_budget)
         )
+        # Tetto globale ai reboot per run (difesa in profondità contro i
+        # boot loop; vedi docs/BUGS.md #14). Un ciclo completo legittimo
+        # richiede al massimo ~4 reboot (CPU, GPU, ACPI, IOMMU non-ostree).
+        self.max_reboots: int = max(1, int(safety.get("max_reboots", 5)))
 
         # Vincoli di sicurezza: mai oltre gli hard limits
         self.cpu_vid_recommended_max = min(self.cpu_vid_recommended_max,
@@ -181,6 +185,7 @@ class BUOConfig:
                     "freq_max": self.gpu_freq_max,
                 },
                 "power_budget": self.power_budget,
+                "max_reboots": self.max_reboots,
             },
             "vram_estimation": {
                 "enabled": self.vram_estimation_enabled,

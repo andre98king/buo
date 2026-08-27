@@ -207,11 +207,12 @@ class Orchestrator(LoggerMixin):
         if current not in PHASES or current == "complete":
             current = "init"
 
-        # Un run completo NUOVO (da init) azzera il ledger delle modifiche:
-        # i fix ripartono da zero. In caso di RIPRESA (fase intermedia)
-        # il ledger resta e impedisce loop di reboot.
+        # Un run completo NUOVO (da init) azzera il ledger delle modifiche
+        # e il contatore dei reboot (per-run): i fix ripartono da zero.
+        # In caso di RIPRESA (fase intermedia) restano e impediscono loop.
         if current == "init" and not self.dry_run:
             self.checkpoint.set("applied_steps", [])
+            self.checkpoint.set("reboot_count", 0)
 
         # RIPRESA (fase > init): ricarica i dati delle fasi già completate
         # dal checkpoint (before/problemi/fix applicati), altrimenti il
@@ -745,6 +746,17 @@ class Orchestrator(LoggerMixin):
         if self.mock:
             self.checkpoint.increment_reboot_count()
             self.logger.info("♻️ [MOCK] reboot simulato: %s", reason)
+            return
+        # Tetto globale anti-boot-loop (difesa in profondità, docs/BUGS.md
+        # #14): oltre il limite il pipeline si FERMA invece di riavviare
+        # ancora, evitando loop infiniti causati da bug futuri.
+        count = self.checkpoint.get_reboot_count()
+        if count >= self.config.max_reboots:
+            msg = (f"Tetto globale reboot raggiunto ({count}/"
+                   f"{self.config.max_reboots}) — interruzione per evitare "
+                   f"boot loop (ultimo reboot richiesto da: {reason})")
+            self.logger.error("🚨 %s", msg)
+            self._safety_abort(msg)
             return
         self.checkpoint.increment_reboot_count()
         self.logger.info("♻️ Reboot programmato: %s", reason)

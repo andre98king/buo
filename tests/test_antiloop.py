@@ -132,6 +132,33 @@ class TestAntiLoop(unittest.TestCase):
                         "problems non ripristinati dal checkpoint")
         self.assertIn("cpu_core_unlock", orch.results["applied_fixes"])
 
+    def test_global_reboot_cap_aborts(self):
+        """Tetto globale reboot: oltre safety.max_reboots il pipeline si
+        ferma (safety_violation) invece di riavviare ancora (bug #14)."""
+        orch = self._make(dry_run=False)
+        orch.config.max_reboots = 3
+        orch.checkpoint.set("reboot_count", 3)
+        # _schedule_reboot in mock non raggiunge il ramo reale; usiamo un
+        # orchestratore reale ma con reboot_count già al limite, così il
+        # ramo reale si ferma PRIMA di toccare RebootManager/sys.exit.
+        orch.mock = False
+        orch.dry_run = False
+        orch._schedule_reboot("test-cap")
+        self.assertTrue(orch.safety_violation,
+                        "oltre il tetto il pipeline deve abortire")
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 3,
+                         "il contatore non deve incrementare oltre il tetto")
+
+    def test_global_reboot_cap_allows_below_limit(self):
+        """Sotto il tetto, il reboot è consentito (contatore incrementa).
+        NOTA: qui si ferma al mock per non riavviare davvero."""
+        orch = self._make(dry_run=False)
+        orch.config.max_reboots = 5
+        orch.checkpoint.set("reboot_count", 0)
+        # mock=True: il ramo mock incrementa e non riavvia davvero
+        orch._schedule_reboot("test-ok")
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 1)
+
     def test_complete_cleanups_resume_service(self):
         """A run completato il servizio buo-resume deve essere rimosso
         (altrimenti al prossimo boot riparte da init → reboot → loop)."""
