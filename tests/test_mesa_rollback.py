@@ -9,6 +9,7 @@ e del rollback "solo applicati" (niente rumore su livelli mai toccati).
 import unittest
 
 from buo.audit.hardware import HardwareAudit
+from buo.audit.problems import ProblemDetector
 from buo.state.rollback import RollbackManager
 from buo.constants import ROLLBACK_ORDER
 
@@ -38,6 +39,21 @@ class TestMesaDetection(unittest.TestCase):
 
     def test_empty_returns_none(self):
         self.assertIsNone(HardwareAudit._parse_mesa_string(""))
+
+    def test_detector_no_mesa_old_when_version_none(self):
+        """Bug #13: sessione headless → version=None non è 'vecchia',
+        non deve comparire il problema mesa_old."""
+        det = ProblemDetector(mock=True)
+        audit = {"mesa": {"version": None, "meets_minimum": False}}
+        ids = [p["id"] for p in det.detect(audit)]
+        self.assertNotIn("mesa_old", ids)
+
+    def test_detector_mesa_old_when_version_old(self):
+        """Mesa leggibile ma vecchia → mesa_old segnalato."""
+        det = ProblemDetector(mock=True)
+        audit = {"mesa": {"version": "24.3", "meets_minimum": False}}
+        ids = [p["id"] for p in det.detect(audit)]
+        self.assertIn("mesa_old", ids)
 
 
 class TestRollbackAppliedOnly(unittest.TestCase):

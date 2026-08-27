@@ -74,7 +74,11 @@ class ProblemDetector(LoggerMixin):
             })
 
         mesa = audit.get("mesa", {})
-        if not mesa.get("meets_minimum", True):
+        # Solo se la versione è LEGGIBILE: in sessione headless (SSH senza
+        # display) glxinfo fallisce e version=None → non è "vecchia", è
+        # solo indecifrabile (bug #13). Allineato al preflight, che già
+        # usa `mesa.get("version")`.
+        if mesa.get("version") and not mesa.get("meets_minimum", True):
             problems.append({
                 "id": "mesa_old",
                 "severity": "alta",
