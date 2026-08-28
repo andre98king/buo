@@ -284,20 +284,52 @@ def safety_monitor(mock: bool) -> None:
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 def status(mock: bool) -> None:
     """Mostra lo stato corrente dell'hardware e delle ottimizzazioni."""
+    from .safety.reader import RealHardwareReader
+
     show_header()
 
-    orchestrator = _make_orchestrator(mock=mock, dry_run=True,
+    # C1: mai valori fittizi in produzione. `status` è sola lettura:
+    # dry_run=False (niente MockHardware come effetto del dry-run) e,
+    # senza --mock, letture REALI via RealHardwareReader (hwmon); ogni
+    # sensore non leggibile → None → "non rilevabile" (fail-soft, mai
+    # inventare valori). Con --mock resta la simulazione invariata.
+    orchestrator = _make_orchestrator(mock=mock, dry_run=False,
                                       interactive=False, verbose=False)
     info = orchestrator.status()
 
+    # Fase/Reboot: dallo state dir corretto (state_dir(): /var/lib/buo
+    # se root, home altrimenti). Non-root: il valore letto è quello della
+    # home (non lo stato reale) — avviso chiaro, fail-soft, mai crash.
+    if not mock and os.geteuid() != 0:
+        console.print("[yellow]⚠️ Stato dalla home (non root): esegui "
+                      "`sudo buo status` per lo stato reale[/]")
     console.print(f"[dim]Fase corrente: {info['current_phase']} | "
                   f"Reboot: {info['reboot_count']}[/]\n")
 
-    hardware = info.get("hardware")
+    if mock:
+        hardware = info.get("hardware")
+    else:
+        hardware = RealHardwareReader().get_system_info()
     if hardware is None:
         console.print("[yellow]⚠️ Nessun hardware rilevato "
                       "(usa --mock per simulare)[/]")
         return
+
+    def _fmt(value, suffix=""):
+        """Fail-soft C1: None → 'non rilevabile', mai valori inventati."""
+        return f"{value}{suffix}" if value is not None else "non rilevabile"
+
+    def _status_ge(value, threshold, ok_text, ko_text):
+        """Stato rispetto a una soglia; None → neutro (non rilevabile)."""
+        if value is None:
+            return "—"
+        return ok_text if value >= threshold else ko_text
+
+    def _status_lt(value, limit, ok_text, crit_text):
+        """Stato sotto un limite; None → neutro (non rilevabile)."""
+        if value is None:
+            return "—"
+        return ok_text if value < limit else crit_text
 
     table = Table(title="📊 STATO HARDWARE", border_style="blue",
                   header_style="bold cyan", show_lines=True)
@@ -305,25 +337,31 @@ def status(mock: bool) -> None:
     table.add_column("Valore", style="green")
     table.add_column("Stato", style="bold")
 
-    table.add_row("CPU Core",
-                  f"{hardware.get('cpu_cores', '?')}/8",
-                  "✅ OK" if hardware.get("cpu_cores", 0) >= 8 else "⚠️ Parziale")
-    table.add_row("CPU Freq", f"{hardware.get('cpu_freq', '?')} MHz", "✅ OK")
-    table.add_row("CPU Temp",
-                  f"{hardware.get('cpu_temp', '?')}°C",
-                  "✅ OK" if hardware.get("cpu_temp", 0) < LIMITS.cpu.temp_max
-                  else "🔴 CRITICA")
-    table.add_row("GPU CU",
-                  f"{hardware.get('gpu_cu', '?')}/40",
-                  "✅ OK" if hardware.get("gpu_cu", 0) >= 24 else "⚠️ Ridotte")
-    table.add_row("GPU Temp",
-                  f"{hardware.get('gpu_temp', '?')}°C",
-                  "✅ OK" if hardware.get("gpu_temp", 0) < LIMITS.gpu.temp_max
-                  else "🔴 CRITICA")
-    table.add_row("Potenza", f"{hardware.get('total_power', '?')} W", "✅ OK")
-    table.add_row("40-CU",
-                  "✅ Attive" if hardware.get("is_40cu_enabled") else "💤 Stock",
-                  "✅" if hardware.get("is_40cu_enabled") else "—")
+    cpu_cores = hardware.get("cpu_cores")
+    gpu_cu = hardware.get("gpu_cu")
+    cpu_temp = hardware.get("cpu_temp")
+    gpu_temp = hardware.get("gpu_temp")
+    total_power = hardware.get("total_power")
+    is_40cu = hardware.get("is_40cu_enabled")
+
+    table.add_row("CPU Core", _fmt(cpu_cores, "/8"),
+                  _status_ge(cpu_cores, 8, "✅ OK", "⚠️ Parziale"))
+    table.add_row("CPU Freq", _fmt(hardware.get("cpu_freq"), " MHz"), "—")
+    table.add_row("CPU Temp", _fmt(cpu_temp, "°C"),
+                  _status_lt(cpu_temp, LIMITS.cpu.temp_max,
+                             "✅ OK", "🔴 CRITICA"))
+    table.add_row("GPU CU", _fmt(gpu_cu, "/40"),
+                  _status_ge(gpu_cu, 24, "✅ OK", "⚠️ Ridotte"))
+    table.add_row("GPU Temp", _fmt(gpu_temp, "°C"),
+                  _status_lt(gpu_temp, LIMITS.gpu.temp_max,
+                             "✅ OK", "🔴 CRITICA"))
+    table.add_row("Potenza", _fmt(total_power, " W"), "—")
+    if is_40cu is None:
+        table.add_row("40-CU", "non rilevabile", "—")
+    else:
+        table.add_row("40-CU",
+                      "✅ Attive" if is_40cu else "💤 Stock",
+                      "✅" if is_40cu else "—")
     table.add_row("Fix", ", ".join(info["applied_fixes"]) or "nessuno", "—")
 
     console.print(table)

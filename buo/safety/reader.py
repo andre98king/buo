@@ -16,7 +16,7 @@ legge i sensori veri (hwmon: k10temp/amdgpu). Ogni valore NON leggibile
 """
 
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from ..utils.logging import get_logger
 
@@ -84,3 +84,35 @@ class RealHardwareReader:
         misura CPU NON si dichiara un totale (sottostimare sarebbe
         pericoloso per il budget check) → None = non verificabile."""
         return None
+
+    def get_system_info(self) -> Dict[str, Any]:
+        """Riepilogo per `buo status`: valori REALI o None (mai fittizi).
+
+        Stessa forma di MockHardware.get_system_info(); i campi che hwmon
+        non espone (core mask, core CPU, frequenze, CU GPU, potenza
+        totale) sono None → la CLI mostra "non rilevabile" (fail-soft
+        C1: mai inventare valori).
+        """
+        return {
+            "core_mask": None,
+            "cpu_cores": None,
+            "cpu_freq": None,
+            "cpu_vid": self.get_cpu_vid(),
+            "cpu_temp": self.get_cpu_temp(),
+            "gpu_cu": None,
+            "gpu_freq": None,
+            "gpu_voltage": self.get_gpu_voltage(),
+            "gpu_temp": self.get_gpu_temp(),
+            "gpu_power": self.get_gpu_power(),
+            "total_power": self.get_total_power(),
+            "ambient_temp": None,
+            "fan_speed": None,
+            "is_undervolted": None,
+            "is_overclocked": None,
+            "is_40cu_enabled": None,
+            "is_acpi_fixed": None,
+            "is_tlb_fixed": None,
+            "is_ace_fixed": None,
+            "iommu_off": None,
+            "reboot_count": None,
+        }
