@@ -49,6 +49,29 @@ sudo buo unleash --dry-run           # vedi il piano
 sudo buo unleash --interactive       # esecuzione guidata
 ```
 
+Al termine di un run riuscito, BUO salva automaticamente il **profilo
+macchina** (punti undervolt/overclock, fix applicati). Il profilo si
+esporta/importa e permette il ripristino completo:
+
+```bash
+sudo buo profile export --output profilo.json   # backup del profilo
+sudo buo profile import profilo.json            # ripristina il profilo
+```
+
+## 5. Ripristino dopo un format (o un aggiornamento ostree)
+
+Reinstalla BUO come sopra, poi:
+
+```bash
+sudo buo restore                # riporta la macchina allo stato salvato
+sudo buo restore --profile profilo.json   # da un profilo esportato
+sudo buo restore --validate     # esegue anche lo stress test
+```
+
+`restore` riapplica in sicurezza: toolchain, fix ACPI (initramfs
+concatenato su ostree), unlock CPU (8 core) e 40 CU, undervolt
+persistente e governor — **senza rilanciare l'auto-tuning**.
+
 ## Bazzite/ostree (immutabile)
 
 Usa un venv (vedi [HARDWARE_SETUP.md](HARDWARE_SETUP.md)):

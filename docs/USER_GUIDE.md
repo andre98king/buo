@@ -36,6 +36,30 @@ sudo buo unleash --dry-run
 | `sudo buo recover` | Riprende dopo un reboot durante l'esecuzione |
 | `buo tui` | Cockpit live a schermo intero (richiede textual) |
 | `buo safety-test` | Verifica la sicurezza del sistema |
+| `sudo buo profile export` | Backup del profilo macchina (JSON) |
+| `sudo buo profile import` | Ripristina il profilo da file |
+| `sudo buo restore` | Riporta la macchina allo stato salvato (dopo format/aggiornamento) |
+
+## ♻️ Dopo un format o un aggiornamento
+
+BUO salva automaticamente il **profilo macchina** a ogni run riuscito:
+punti undervolt/overclock validati, fix applicati. Per tornare allo
+stato ottimale:
+
+```bash
+# 1. reinstalla BUO (vedi INSTALL.md)
+# 2. ripristina tutto in un comando
+sudo buo restore
+
+# con un profilo esportato altrove
+sudo buo restore --profile /path/profilo.json
+```
+
+Il ripristino è **sicuro e idempotente**: applica toolchain, fix ACPI
+(su Bazzite con il metodo initramfs concatenato, senza toccare
+l'initramfs originale), sblocca CPU 8 core e 40 CU (con auto-riparazione
+del servizio se manca), rende l'undervolt persistente al boot e
+configura il governor. Nessun passaggio manuale.
 
 ## 🛡️ Sicurezza per l'utente
 
