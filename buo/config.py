@@ -121,14 +121,10 @@ class BUOConfig:
         self.overclock_power_budget: int = int(
             overclock.get("power_budget", self.power_budget)
         )
-        self.overclock_target: str = str(overclock.get("target", "max"))
 
         validation = phases.get("validation", {})
         self.validation_stress_duration: int = int(
             validation.get("stress_duration", 30)
-        )
-        self.validation_abort_on_error: bool = bool(
-            validation.get("abort_on_error", True)
         )
 
         benchmark = data.get("benchmark", {})
@@ -151,9 +147,7 @@ class BUOConfig:
         self.log_level: str = str(logging_cfg.get("level", "info"))
         self.log_file: str = str(logging_cfg.get("file", "/var/log/buo/buo.log"))
 
-        report = data.get("report", {})
-        self.report_format: str = str(report.get("format", "markdown"))
-        self.report_output: str = str(report.get("output", "/var/lib/buo/report.md"))
+
 
     # ------------------------------------------------------------------ #
 
@@ -233,11 +227,9 @@ class BUOConfig:
                 "overclock": {
                     "enable": self.overclock_enable,
                     "power_budget": self.overclock_power_budget,
-                    "target": self.overclock_target,
                 },
                 "validation": {
                     "stress_duration": self.validation_stress_duration,
-                    "abort_on_error": self.validation_abort_on_error,
                 },
             },
             "benchmark": {
@@ -251,7 +243,6 @@ class BUOConfig:
                 "auto_install_governor": self.deps_auto_install_governor,
             },
             "logging": {"level": self.log_level, "file": self.log_file},
-            "report": {"format": self.report_format, "output": self.report_output},
         }
 
     def save(self, path: Optional[Path] = None) -> None:

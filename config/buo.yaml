@@ -49,10 +49,8 @@ phases:
   overclock:
     enable: true
     power_budget: 300        # W
-    target: "max"            # max | balanced
   validation:
     stress_duration: 30      # minuti
-    abort_on_error: true
 
 benchmark:
   enabled: true
@@ -68,6 +66,4 @@ logging:
   level: "info"              # debug | info | warn | error
   file: "/var/log/buo/buo.log"
 
-report:
-  format: "markdown"         # markdown | json
-  output: "/var/lib/buo/report.md"
+
