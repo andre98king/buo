@@ -105,6 +105,10 @@ class DistroInfo:
 
         if self.pkg_manager == "dnf":
             return run_command(["dnf", "install", "-y", package], sudo=sudo, timeout=600)
+        if self.pkg_manager == "rpm-ostree":
+            # Layering ostree: non interattivo, attivo al prossimo reboot
+            return run_command(["rpm-ostree", "install", package],
+                               sudo=sudo, timeout=900)
         if self.pkg_manager == "pacman":
             return run_command(["pacman", "-S", "--noconfirm", package],
                                sudo=sudo, timeout=600)

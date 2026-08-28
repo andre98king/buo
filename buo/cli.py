@@ -644,8 +644,9 @@ def install_deps(only_check: bool) -> None:
     📥 Scarica e installa i tool della community (repo mancanti).
 
     Clona e installa: bc250_smu_oc (undervolt CPU), bc250-40cu-unlock
-    (GPU 40-CU/health/mask), bc250-acpi-fix (tabelle ACPI). Per il
-    governor mostra le istruzioni distro-specifiche.
+    (GPU 40-CU/health/mask), bc250-acpi-fix (tabelle ACPI). Il governor
+    (cyan-skillfish-governor-smu) e umr vengono installati come pacchetti
+    dal package manager della distro (COPR/AUR), mai da installer esterni.
     """
     show_header()
     from .install.deps import DependencyManager

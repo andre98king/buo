@@ -39,9 +39,11 @@ class TestAutoDeps(unittest.TestCase):
 
     def test_config_default_auto_install(self):
         self.assertTrue(BUOConfig().deps_auto_install)
-        self.assertFalse(BUOConfig().deps_auto_install_governor)
+        self.assertTrue(BUOConfig().deps_auto_install_governor)
         cfg = BUOConfig({"deps": {"auto_install": False}})
         self.assertFalse(cfg.deps_auto_install)
+        cfg2 = BUOConfig({"deps": {"auto_install_governor": False}})
+        self.assertFalse(cfg2.deps_auto_install_governor)
 
     def test_no_download_in_mock(self):
         orch = self._orchestrator(mock=True)
@@ -92,6 +94,71 @@ class TestAutoDeps(unittest.TestCase):
         finally:
             deps_module.DependencyManager.check = original_check
             deps_module.DependencyManager.install = original_install
+
+    def test_governor_in_auto_install_by_default(self):
+        """Il governor è nel giro automatico di default (tutto automatico)."""
+        import unittest.mock as mock
+        orch = self._orchestrator()
+        original_check = deps_module.DependencyManager.check
+        original_install = deps_module.DependencyManager.install
+        called = []
+
+        def fake_check(self, deps=None):
+            return {d["name"]: {"present": False, "type": d["type"]}
+                    for d in deps_module.DEPS}
+
+        def fake_install(self, deps=None, sudo=True):
+            called.append(deps)
+            return {d["name"]: {"status": "ok"} for d in deps_module.DEPS}
+
+        deps_module.DependencyManager.check = fake_check
+        deps_module.DependencyManager.install = fake_install
+        with mock.patch.object(orch, "_configure_installed_governor"):
+            try:
+                orch._ensure_dependencies()
+            finally:
+                deps_module.DependencyManager.check = original_check
+                deps_module.DependencyManager.install = original_install
+        self.assertTrue(any("cyan-skillfish-governor" in (d or [])
+                            for d in called),
+                        "il governor deve essere installato in automatico")
+
+    def test_governor_excluded_when_disabled(self):
+        """auto_install_governor=false → il governor resta fuori dal giro."""
+        orch = self._orchestrator()
+        orch.config.deps_auto_install_governor = False
+        original_check = deps_module.DependencyManager.check
+        original_install = deps_module.DependencyManager.install
+        called = []
+
+        def fake_check(self, deps=None):
+            return {d["name"]: {"present": False, "type": d["type"]}
+                    for d in deps_module.DEPS}
+
+        def fake_install(self, deps=None, sudo=True):
+            called.append(deps)
+            return {d["name"]: {"status": "ok"} for d in deps_module.DEPS}
+
+        deps_module.DependencyManager.check = fake_check
+        deps_module.DependencyManager.install = fake_install
+        try:
+            orch._ensure_dependencies()
+        finally:
+            deps_module.DependencyManager.check = original_check
+            deps_module.DependencyManager.install = original_install
+        # il governor NON deve essere nel giro
+        for d in called:
+            self.assertNotIn("cyan-skillfish-governor", d or [])
+
+    def test_governor_config_written_after_install(self):
+        """Dopo l'install il governor viene configurato (config default)."""
+        import unittest.mock as mock
+        orch = self._orchestrator()
+        gov = {"status": "ok"}
+        with mock.patch.object(orch.governor, "write_default_config",
+                               return_value=True) as wdc:
+            orch._configure_installed_governor(gov)
+        wdc.assert_called_once()
 
 
 if __name__ == "__main__":

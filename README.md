@@ -102,11 +102,20 @@ buo status --mock
 
 ### Primo avvio: BUO si occupa di tutto
 
-Al primo `sudo buo unleash` su hardware reale, BUO **scarica da solo**
-i tool della community mancanti (bc250_smu_oc, bc250-40cu-unlock,
-bc250-acpi-fix) — nessun passo manuale. Puoi disattivare questo
-comportamento in `/etc/buo/buo.yaml` (`deps.auto_install: false`) o
-pre-installare tutto con:
+Al primo `sudo buo unleash` su hardware reale, BUO **cerca ogni tool nel
+sistema e, se manca, lo scarica/installa e lo configura da solo**:
+
+| Tool | Come lo installa BUO |
+|:---|:---|
+| bc250_smu_oc, bc250-40cu-unlock, bc250-acpi-fix | clone shallow da GitHub → script in `/usr/local/bin` |
+| cyan-skillfish-governor | **pacchetto distro**: COPR `filippor/bazzite` (Fedora/Bazzite) o AUR (Arch) → poi config di default sicura scritta automaticamente |
+| umr | **pacchetto distro** (`rpm-ostree install umr` su ostree) — attivo al prossimo reboot |
+| stress/stress-ng | wrapper automatico se manca `stress` |
+
+Nessun installer di terze parti viene mai eseguito: solo repo note e
+pacchetti ufficiali del package manager della distro. Puoi disattivare
+questo comportamento in `/etc/buo/buo.yaml` (`deps.auto_install: false`,
+`deps.auto_install_governor: false`) o pre-installare tutto con:
 
 ```bash
 sudo buo install-deps       # scarica e installa i tool ora
@@ -190,8 +199,8 @@ esplicita solo dove serve. Nessuna modifica parte senza verifiche:
 | Unlock 8 core **senza** fix ACPI (SSDT-CST/PST) | ⛔ **BLOCCATO** (fail-closed): l'unlock CPU non parte; istruzioni per e-tho/bc250-acpi-fix. In `--interactive` puoi confermare il rischio |
 | 8 core + 40 CU con PSU < 350W | ⚠️ Avviso budget di potenza (picco FurMark 250-320W); consigliati undervolt + cap GPU 1500 MHz |
 | 40 CU attive via runtime UMR (ostree) | 💾 Avviso: restano **volatili** al reboot; in `--interactive` BUO chiede se persisterle (install-service + write-service-table) |
-| Toolchain 40-CU mancante (`umr`, live-manager) | ⚠️ Avviso con istruzioni (`sudo buo install-deps` / `rpm-ostree install umr`) |
-| Governor GPU non attivo | ⚠️ Problema `governor_missing` nel pre-audit |
+| Toolchain 40-CU mancante (`umr`, live-manager) | 📥 **Auto-install** dal package manager (rpm-ostree/dnf) + avviso se serve reboot |
+| Governor GPU non attivo | 📥 **Auto-install** (COPR/AUR) + config di default sicura; altrimenti problema `governor_missing` nel pre-audit |
 
 Tutti gli avvisi compaiono nel log di esecuzione e nel report finale.
 
@@ -209,6 +218,10 @@ hardware:
 safety:
   cpu_temp_max: 90        # °C — soglie consigliate
   power_budget: 300       # W
+
+deps:
+  auto_install: true            # scarica/installa i tool mancanti da solo
+  auto_install_governor: true   # installa il governor (COPR/AUR) da solo
 
 phases:
   fix:

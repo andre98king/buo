@@ -18,6 +18,7 @@ benchmark, report, models.
 """
 
 import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from .audit.hardware import HardwareAudit
@@ -469,6 +470,11 @@ class Orchestrator(LoggerMixin):
 
         missing = [n for n, s in manager.check().items()
                    if not s.get("present") and s.get("type") != "instruct"]
+        # Il governor è un pacchetto distro-specifico: entra nel giro
+        # automatico solo se autorizzato (default: sì — tutto automatico,
+        # installato dal COPR/AUR ufficiali, niente installer di terze parti).
+        if not self.config.deps_auto_install_governor:
+            missing = [n for n in missing if n != "cyan-skillfish-governor"]
         if not missing:
             self.logger.info("✅ Tool della community presenti")
             return
@@ -486,7 +492,9 @@ class Orchestrator(LoggerMixin):
             except EOFError:
                 pass
 
-        result = manager.install()
+        # Installa SOLO ciò che manca (e che è abilitato): senza il filtro,
+        # il governor disabilitato verrebbe installato comunque.
+        result = manager.install(deps=missing)
         if "_error" in result:
             raise ConfigurationError(
                 f"Download automatico non possibile: {result['_error']}"
@@ -499,6 +507,42 @@ class Orchestrator(LoggerMixin):
                 "oppure esegui manualmente: sudo buo install-deps"
             )
         self.logger.info("✅ Tool scaricati e installati automaticamente")
+
+        # Governor appena installato (COPR/AUR): scrivi la config di default
+        # sicura (flat 1000mV, template vendored) e avvisa se serve un
+        # reboot per l'attivazione (rpm-ostree layering su Bazzite).
+        gov = result.get("cyan-skillfish-governor", {})
+        if gov.get("status") == "ok":
+            self._configure_installed_governor(gov)
+        umr = result.get("umr", {})
+        if umr.get("status") == "ok" and umr.get("needs_reboot"):
+            self.logger.warning(
+                "💾 umr installato: ATTIVO al prossimo reboot "
+                "(necessario per le 40 CU via runtime UMR)")
+
+    def _configure_installed_governor(self, gov: Dict[str, Any]) -> None:
+        """Configura il governor appena installato (config di default).
+
+        NON sovrascrive una config.toml esistente (rispetta le scelte
+        dell'utente); su ostree il servizio parte al prossimo reboot.
+        """
+        from .constants import GOVERNOR_CONFIG
+        cfg = Path(GOVERNOR_CONFIG)
+        if cfg.exists():
+            self.logger.info(
+                "Governor: config.toml esistente — non sovrascritta")
+        else:
+            ok = self.governor.write_default_config()
+            if ok:
+                self.logger.info(
+                    "Governor: config di default scritta (flat 1000mV)")
+            else:
+                self.logger.warning(
+                    "Governor: impossibile scrivere la config di default")
+        if gov.get("needs_reboot"):
+            self.logger.warning(
+                "♻️ Governor installato: sarà ATTIVO al prossimo reboot "
+                "(rpm-ostree layering)")
 
     def _phase_pre_audit(self) -> Dict[str, Any]:
         """FASE 0 — PRE-AUDIT: discovery, problemi, benchmark before."""

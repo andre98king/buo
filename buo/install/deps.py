@@ -12,15 +12,20 @@ posizioni attese:
     • bc250_smu_oc          → bc250-detect, bc250-apply   (undervolt CPU)
     • bc250-40cu-unlock     → bc250-enable-40cu.sh, health, mask  (GPU)
     • bc250-acpi-fix        → SSDT-CST.aml               (ACPI C-State)
-    • cyan-skillfish-governor → solo istruzioni (servizio distro-specifico)
+    • cyan-skillfish-governor → pacchetto distro (COPR/AUR) — installato
+      automaticamente col package manager, nessun installer di terze parti
+    • umr                   → pacchetto distro (runtime UMR su ostree)
 
 SICUREZZA:
     • clona SOLO repo note e fisse (nessun codice arbitrario)
     • copia SOLO gli script (nessun installer di terze parti eseguito)
+    • i pacchetti (governor/umr) si installano SOLO dal package manager
+      della distro (COPR/AUR ufficiali), mai da script
     • se il download/installazione fallisce → stato "failed" chiaro;
       l'orchestratore resta fail-closed (non procede senza i tool)
 """
 
+import os
 import stat
 import shutil
 from pathlib import Path
@@ -68,7 +73,15 @@ def _40cu_files() -> List[Dict[str, Any]]:
 
 
 def _build_deps() -> List[Dict[str, Any]]:
-    """Catalogo delle dipendenze (con selezione distro-aware per la 40-CU)."""
+    """Catalogo delle dipendenze (con selezione distro-aware per la 40-CU).
+
+    Tipi:
+        scripts   — clone repo + copia script in /usr/local/bin
+        aml       — clone repo + tabelle ACPI (restano nel checkout)
+        package   — installazione con il package manager della distro
+                    (governor, umr): nessun clone, nessun installer di
+                    terze parti — pacchetto ufficiale della distro/COPR/AUR
+    """
     return [
         {
             "name": "bc250_smu_oc",
@@ -116,15 +129,43 @@ def _build_deps() -> List[Dict[str, Any]]:
         },
         {
             "name": "cyan-skillfish-governor",
-            "repo": "https://github.com/filippor/cyan-skillfish-governor",
-            "type": "instruct",
+            "type": "package",
             "required_for": "governor GPU dinamico (SMU)",
-            "files": [],
+            "check_bins": ["cyan-skillfish-governor-smu"],
+            "check_files": [
+                "/usr/lib/systemd/system/cyan-skillfish-governor-smu.service",
+            ],
+            "pkg_map": {
+                "fedora": "cyan-skillfish-governor-smu",
+                "bazzite": "cyan-skillfish-governor-smu",
+                "ostree": "cyan-skillfish-governor-smu",
+                "arch": "cyan-skillfish-governor-smu",
+            },
+            "copr": "filippor/bazzite",  # Fedora/Bazzite (non-ostree: dnf)
+            "aur": True,                  # Arch: via yay/paru (AUR)
             "note": (
-                "Servizio distro-specifico: su Fedora/Bazzite usa il COPR o "
-                "lo script di evdokim/bazzite-bc-250-governor, su Arch l'AUR "
-                "cyan-skillfish-governor-smu. BUO lo clona ma non esegue "
-                "installer di terze parti senza conferma."
+                "Pacchetto ufficiale: COPR filippor/bazzite su Fedora/Bazzite, "
+                "AUR cyan-skillfish-governor-smu su Arch. BUO abilita il repo "
+                "e installa da solo (niente installer di terze parti). Su "
+                "ostree l'installazione è attiva al prossimo reboot."
+            ),
+        },
+        {
+            "name": "umr",
+            "type": "package",
+            "required_for": "runtime UMR 40-CU su ostree "
+                           "(bc250-cu-live-manager legge i registri via umr)",
+            "check_bins": ["umr"],
+            "pkg_map": {
+                "fedora": "umr",
+                "bazzite": "umr",
+                "ostree": "umr",
+            },
+            "only_ostree": True,  # non richiesto sul flusso kernel-patch
+            "note": (
+                "umr (AMD Userspace Register): necessario per le 40 CU via "
+                "runtime UMR. Su Bazzite: rpm-ostree install umr (attivo al "
+                "prossimo reboot)."
             ),
         },
     ]
@@ -182,6 +223,28 @@ class DependencyManager(LoggerMixin):
                 "missing": [] if aml.exists() else ["SSDT-CST.aml"],
                 "checkout": str(checkout) if checkout.exists() else None,
             }
+        if dep["type"] == "package":
+            # Presente = binari del pacchetto trovati nel PATH (oppure un
+            # file di riferimento, es. l'unit systemd del governor — il
+            # binario può avere un nome diverso dal servizio). Su distro
+            # dove il pacchetto NON è richiesto (only_ostree su non-ostree),
+            # risulta presente (non serve installarlo).
+            bins = dep.get("check_bins", [])
+            files = dep.get("check_files", [])
+            present = any(which(b) is not None for b in bins) or any(
+                os.path.exists(f) for f in files)
+            if dep.get("only_ostree") and not os.path.exists("/run/ostree-booted"):
+                present = True
+                bins = []  # non richiesto: nessun binario da segnalare
+            missing = [b for b in bins if which(b) is None]
+            return {
+                "present": present,
+                "type": dep["type"],
+                "required_for": dep["required_for"],
+                "missing": missing,
+                "detail": "binari: " + ", ".join(bins),
+                "note": dep.get("note", ""),
+            }
         # instruct: presente = checkout clonato
         return {
             "present": checkout.exists(),
@@ -201,7 +264,16 @@ class DependencyManager(LoggerMixin):
         Returns:
             {name: {"status": "ok"|"skipped"|"failed", "detail": str}}
         """
-        if which("git") is None:
+        # git serve SOLO per le dipendenze clonate (scripts/aml): i
+        # package (governor, umr) si installano col package manager della
+        # distro e non devono essere bloccati da un git assente.
+        needs_git = any(
+            dep["type"] in ("scripts", "aml")
+            and not self._check_one(dep)["present"]
+            for dep in DEPS
+            if deps is None or dep["name"] in deps
+        )
+        if needs_git and which("git") is None:
             return {"_error": "git non trovato: installalo con il package "
                               "manager della distro"}
 
@@ -261,6 +333,11 @@ class DependencyManager(LoggerMixin):
             return {"status": "failed", "detail": str(e)}
 
     def _install_one(self, dep: Dict[str, Any], sudo: bool) -> Dict[str, Any]:
+        # I pacchetti si installano col package manager della distro
+        # (nessun clone, nessun installer di terze parti).
+        if dep["type"] == "package":
+            return self._install_package(dep, sudo=sudo)
+
         checkout = self.base_dir / dep["name"]
         try:
             # Clone shallow (solo il ramo default)
@@ -336,6 +413,61 @@ class DependencyManager(LoggerMixin):
 
         return {"status": "ok", "detail": "installata",
                 "checkout": str(checkout)}
+
+    def _install_package(self, dep: Dict[str, Any], sudo: bool) -> Dict[str, Any]:
+        """Installa un pacchetto con il package manager della distro.
+
+        Supporta (senza installer di terze parti):
+            • Fedora non-ostree: dnf + COPR filippor/bazzite (governor)
+            • Bazzite/ostree: rpm-ostree install (richiede reboot per
+              l'attivazione — lo segnala con needs_reboot=True)
+            • Arch: AUR via yay/paru (governor)
+            • Debian: pacchetti non ufficiali → istruzioni chiare
+        """
+        from ..utils.distro import detect_distro
+        distro = detect_distro()
+        pkg = dep.get("pkg_map", {}).get(distro.id)
+        if not pkg:
+            return {
+                "status": "failed",
+                "detail": f"nessun pacchetto per {distro.id}: "
+                          f"{dep.get('note', '')}",
+            }
+
+        # Fedora e Bazzite: il governor vive nel COPR filippor/bazzite.
+        # Su Bazzite il COPR enable scrive in /etc/yum.repos.d (funziona
+        # anche su ostree) e va fatto PRIMA di rpm-ostree install.
+        if dep.get("copr") and distro.id in ("fedora", "bazzite"):
+            rc, _, err = run_command(
+                ["dnf", "copr", "enable", "-y", dep["copr"]],
+                sudo=sudo, timeout=120)
+            if rc != 0:
+                return {"status": "failed",
+                        "detail": f"COPR enable fallito: {err[:150]}"}
+
+        # Arch: il governor è nell'AUR (yay/paru)
+        if dep.get("aur") and distro.id == "arch":
+            helper = which("yay") or which("paru")
+            if helper is None:
+                return {"status": "failed",
+                        "detail": "serve yay o paru per l'AUR "
+                                  "(cyan-skillfish-governor-smu)"}
+            rc, _, err = run_command(
+                [helper, "-S", "--noconfirm", pkg], sudo=sudo, timeout=600)
+            if rc != 0:
+                return {"status": "failed", "detail": err[:150]}
+            return {"status": "ok", "detail": f"{pkg} installato (AUR)"}
+
+        rc, _, err = distro.install_package(pkg, sudo=sudo)
+        if rc != 0:
+            return {"status": "failed", "detail": err[:200] or f"{pkg} fallito"}
+        needs_reboot = distro.pkg_manager == "rpm-ostree"
+        return {
+            "status": "ok",
+            "detail": f"{pkg} installato"
+                      + (" (attivo al prossimo reboot)" if needs_reboot else ""),
+            "needs_reboot": needs_reboot,
+        }
 
     @staticmethod
     def _writable(path: Path) -> bool:

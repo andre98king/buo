@@ -138,7 +138,7 @@ class BUOConfig:
         deps = data.get("deps", {})
         self.deps_auto_install: bool = bool(deps.get("auto_install", True))
         self.deps_auto_install_governor: bool = bool(
-            deps.get("auto_install_governor", False)
+            deps.get("auto_install_governor", True)
         )
 
         # ----- Logging / Report -----
