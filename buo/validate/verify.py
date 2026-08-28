@@ -41,6 +41,9 @@ class FixVerifier(LoggerMixin):
             "acpi_fix": self._check_acpi,
             "governor": self._check_governor,
             "gpu_mask": self._check_gpu_mask,
+            "gtt_tuning": self._check_gtt,
+            "fan_control": self._check_fan,
+            "vram_config": self._check_vram,
         }
         for fix in applied_fixes:
             checker = checkers.get(fix)
@@ -121,3 +124,36 @@ class FixVerifier(LoggerMixin):
         if mask.exists():
             return True, f"{mask.name} presente"
         return False, "nessuna maschera installata"
+
+    def _check_gtt(self):
+        """GTT tuning attivo: file modprobe presente o ttm.pages_limit nel
+        cmdline (o mock risolto)."""
+        if self.mock and self.mock_hw is not None:
+            return True, "gtt tuning (mock)"
+        try:
+            with open("/proc/cmdline") as f:
+                if "ttm.pages_limit" in f.read():
+                    return True, "ttm.pages_limit nel cmdline"
+            conf = Path("/etc/modprobe.d/buo-gtt.conf")
+            if conf.exists():
+                return True, f"{conf.name} presente"
+            return False, "gtt tuning non attivo"
+        except Exception as e:
+            return False, str(e)
+
+    def _check_fan(self):
+        """Sensori SuperIO attivi: modulo nct6683 caricato (mock risolto)."""
+        if self.mock and self.mock_hw is not None:
+            return True, "modulo nct6683 (mock)"
+        rc, out, _ = run_command(["lsmod"], check=False)
+        if rc == 0 and "nct668" in out:
+            return True, "nct6683 caricato"
+        return False, "nct6683 non caricato"
+
+    def _check_vram(self):
+        """VRAM config: verificabile solo se bc250_memcfg è stato applicato
+        (nessun marker affidabile → non verificabile automaticamente)."""
+        if self.mock and self.mock_hw is not None:
+            return True, "vram config (mock)"
+        # Nessun metodo affidabile: il fix è manuale (bc250_memcfg).
+        return None, "vram config manuale (bc250_memcfg) — non verificabile"
