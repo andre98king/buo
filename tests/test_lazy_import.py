@@ -9,6 +9,9 @@ verificare che `import buo.constants` non richieda dipendenze CLI.
 import subprocess
 import sys
 import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestLazyImport(unittest.TestCase):
@@ -25,7 +28,7 @@ class TestLazyImport(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, "-S", "-c", code],
             capture_output=True, text=True, timeout=60,
-            cwd="/home/utente/buo",
+            cwd=str(REPO_ROOT),
         )
         self.assertEqual(result.returncode, 0,
                          msg=f"stdout={result.stdout!r} stderr={result.stderr!r}")
@@ -51,7 +54,7 @@ class TestLazyImport(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True, text=True, timeout=60,
-            cwd="/home/utente/buo",
+            cwd=str(REPO_ROOT),
         )
         self.assertEqual(result.returncode, 0,
                          msg=f"stdout={result.stdout!r} stderr={result.stderr!r}")
