@@ -907,6 +907,9 @@ class Orchestrator(LoggerMixin):
         )
         results["undervolt_gpu"] = uv_gpu
 
+        # Log dedicato dell'undervolt (leggibile anche con sudo)
+        self._write_undervolt_log(uv_cpu, uv_gpu)
+
         # Overclock power-limited
         if self.config.overclock_enable:
             oc_cpu = self.oc.optimize_cpu(
@@ -921,6 +924,26 @@ class Orchestrator(LoggerMixin):
             results["overclock_gpu"] = oc_gpu
 
         return results
+
+    def _write_undervolt_log(self, cpu: Dict[str, Any],
+                             gpu: Dict[str, Any]) -> None:
+        """Scrive l'esito dell'undervolt in un file JSON dedicato (in home),
+        così il risultato è leggibile anche quando BUO gira con sudo."""
+        import json
+        from datetime import datetime
+        from .utils.paths import undervolt_log_file
+        payload = {
+            "timestamp": datetime.now().isoformat(),
+            "cpu": cpu,
+            "gpu": gpu,
+        }
+        try:
+            path = undervolt_log_file()
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False,
+                                       default=str), encoding="utf-8")
+            self.logger.info("📝 Undervolt log scritto: %s", path)
+        except Exception as e:
+            self.logger.warning("Scrittura undervolt log fallita: %s", e)
 
     def _phase_apply(self) -> Dict[str, Any]:
         """Applica la configurazione finale (governor + overclock)."""

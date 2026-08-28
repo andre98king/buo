@@ -89,3 +89,11 @@ def report_file_json() -> Path:
 
 def log_file() -> Path:
     return log_dir() / "buo.log"
+
+
+def undervolt_log_file() -> Path:
+    """Log dedicato dell'undervolt, SEMPRE in home (leggibile anche quando
+    BUO gira con sudo, che altrimenti scriverebbe in /var/log/buo)."""
+    p = Path.home() / ".local" / "state" / "buo" / "undervolt.log"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
