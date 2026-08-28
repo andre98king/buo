@@ -56,6 +56,18 @@
 | Efficienza (FPS/W) | 0.175 | **0.255** | +46% |
 | Temperatura GPU | 80°C | **67°C** | −13°C |
 
+### ✅ Validato sul campo (28/08/2026)
+
+| Risorsa | Risultato reale |
+|:---|:---|
+| CPU | **8 core / 16 thread** attivi e sani (mask 0xFF, test-cores 16/16, 0 MCE) — primo caso documentato su Bazzite/GRUB-BLS |
+| GPU | **40/40 CU** attive (runtime UMR, persistente al boot) |
+| Display | **144Hz** su Steam Gaming Mode (fix EDID/gamescope, BUGS #23) |
+| Gaming | Marvel Rivals **picco 120 FPS** (era 60-70 bloccati); GPU max 86°C, CPU max 85°C in partita |
+| UV GPU | attivo (curva SMU 800/900/1000mV @ 1/1.5/2GHz + throttle 85°C) |
+
+Dettagli: [PROJECT_STATUS.md](PROJECT_STATUS.md), [docs/BUGS.md](docs/BUGS.md), [docs/COMMUNITY_NOTES.md](docs/COMMUNITY_NOTES.md).
+
 ---
 
 ## 📋 Requisiti
