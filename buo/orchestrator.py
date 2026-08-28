@@ -525,6 +525,12 @@ class Orchestrator(LoggerMixin):
         if rc == 0 and out.strip() == "enabled":
             self.logger.info("✅ Servizio 40-CU: %s.service abilitato", unit)
             return
+        # G4: auto-riparazione (solo run reali) — "BUO si occupa di tutto"
+        if not self.mock and not self.dry_run:
+            if self._repair_40cu_service(unit):
+                self.logger.info(
+                    "✅ Servizio 40-CU RIPARATO automaticamente (G4)")
+                return
         self.logger.warning(
             "⚠️ BUGS #24: %s.service mancante/disabilitato — le 40 CU "
             "torneranno a 24 CU al prossimo riavvio. Recovery (quirk: "
@@ -536,6 +542,49 @@ class Orchestrator(LoggerMixin):
             "  rm /tmp/bc250-cu-live-manager\n"
             "  sudo /usr/local/bin/bc250-cu-live-manager --yes apply-service",
             unit)
+
+    def _repair_40cu_service(self, unit: str) -> bool:
+        """G4: ripara l'unità systemd 40-CU (BUGS #24).
+
+        1) unità esistente ma disabilitata → `systemctl enable`;
+        2) unità ASSENTE → reinstall tramite copia in /tmp (quirk:
+           /usr/local è un symlink su ostree) + install-service +
+           apply-service, poi pulizia del temporaneo.
+        """
+        import os as _os
+        import shutil as _shutil
+        from .utils.shell import run_command
+
+        rc2, _, _ = run_command(["systemctl", "cat", unit], check=False)
+        if rc2 == 0:  # unità presente ma non abilitata
+            rc3, _, err = run_command(["systemctl", "enable", unit],
+                                      sudo=True, check=False)
+            if rc3 == 0:
+                return True
+            self.logger.warning("enable %s fallito: %s", unit, err)
+            return False
+        # unità assente → reinstall (quirk symlink /usr/local)
+        lm = "/usr/local/bin/bc250-cu-live-manager"
+        if not _os.path.exists(lm):
+            self.logger.warning("live-manager assente: %s", lm)
+            return False
+        tmp = "/tmp/bc250-cu-live-manager"
+        try:
+            _shutil.copy2(lm, tmp)
+        except Exception as e:
+            self.logger.warning("copia live-manager fallita: %s", e)
+            return False
+        try:
+            r1 = run_command([tmp, "--yes", "install-service"],
+                             sudo=True, check=False)
+            r2 = run_command([tmp, "--yes", "apply-service"],
+                             sudo=True, check=False)
+            return r1[0] == 0 and r2[0] == 0
+        finally:
+            try:
+                _os.remove(tmp)
+            except Exception:
+                pass
 
     def _ensure_dependencies(self) -> None:
         """
