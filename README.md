@@ -134,6 +134,18 @@ sudo buo install-deps       # scarica e installa i tool ora
 buo install-deps --check    # verifica cosa c'è e cosa manca
 ```
 
+**Senza rete?** Esporta un **bundle offline** su una macchina connessa e
+importalo sulla BC-250 (contiene solo i checkout pinnati e verificati,
+non i pacchetti distro):
+
+```bash
+sudo buo install-deps --export-bundle buo-bundle.tar.gz      # macchina CON rete
+sudo buo install-deps --offline /percorso/buo-bundle.tar.gz  # BC-250 SENZA rete
+```
+
+`sudo buo unleash --offline-bundle <file>` (o `deps.offline_bundle` in
+`buo.yaml`) importa il bundle da solo prima dell'auto-install.
+
 ---
 
 ## 🎮 Utilizzo
