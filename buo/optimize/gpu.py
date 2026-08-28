@@ -45,9 +45,8 @@ class GPUUndervoltOptimizer(LoggerMixin):
         self.mock = mock
         self.mock_hw = mock_hardware
 
-    def optimize(self, start_freq: int = 1200, step: int = 50,
-                 max_voltage: Optional[int] = None,
-                 test_duration: int = 30) -> Dict[str, Any]:
+    def optimize(self, start_freq: int = 1200,
+                 max_voltage: Optional[int] = None) -> Dict[str, Any]:
         """
         Restituisce i safe-points della GPU.
 

@@ -897,17 +897,13 @@ class Orchestrator(LoggerMixin):
 
         # CPU undervolt
         uv_cpu = self.uv_cpu.optimize(
-            start_freq=self.config.undervolt_cpu_start_freq,
-            step=self.config.undervolt_cpu_step,
             max_freq=self.config.cpu_freq_max,
-            test_duration=self.config.undervolt_cpu_test_duration,
         )
         results["undervolt_cpu"] = uv_cpu
 
         # GPU undervolt
         uv_gpu = self.uv_gpu.optimize(
             start_freq=self.config.undervolt_gpu_start_freq,
-            test_duration=self.config.undervolt_gpu_test_duration,
         )
         results["undervolt_gpu"] = uv_gpu
 

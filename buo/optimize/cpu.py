@@ -25,7 +25,7 @@ from ..utils.logging import LoggerMixin
 
 
 class CPUUndervoltOptimizer(LoggerMixin):
-    """Trova la V/F curve ottimale della CPU."""
+    """Trova il punto stabile (frequenza/VID) della CPU."""
 
     def __init__(self, mock: bool = False, mock_hardware=None,
                  use_wrapper: bool = True):
@@ -35,12 +35,10 @@ class CPUUndervoltOptimizer(LoggerMixin):
         self.detect_wrapper = BC250DetectWrapper() if use_wrapper and not mock \
             else None
 
-    def optimize(self, start_freq: int = 3500, step: int = 100,
-                 max_freq: Optional[int] = None,
-                 max_vid: Optional[int] = None,
-                 test_duration: int = 30) -> Dict[str, Any]:
+    def optimize(self, max_freq: Optional[int] = None,
+                 max_vid: Optional[int] = None) -> Dict[str, Any]:
         """
-        Trova la V/F curve stabile per la CPU.
+        Trova il punto stabile per la CPU.
 
         - mock: binary search simulato con MockHardware
         - reale: delega a bc250-detect (test di stabilità reale)

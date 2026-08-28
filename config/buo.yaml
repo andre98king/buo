@@ -39,11 +39,7 @@ phases:
     gtt: true                # ttm.pages_limit
     fan: true                # sensori/ventole NCT6686
   undervolt:
-    cpu_start_freq: 3500     # MHz
-    cpu_step: 100            # MHz
-    cpu_test_duration: 30    # s
     gpu_start_freq: 1200     # MHz
-    gpu_test_duration: 30    # s
   overclock:
     enable: true
     power_budget: 300        # W

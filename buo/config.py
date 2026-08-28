@@ -102,15 +102,7 @@ class BUOConfig:
         self.fix_fan: bool = bool(fix.get("fan", True))
 
         undervolt = phases.get("undervolt", {})
-        self.undervolt_cpu_start_freq: int = int(undervolt.get("cpu_start_freq", 3500))
-        self.undervolt_cpu_step: int = int(undervolt.get("cpu_step", 100))
-        self.undervolt_cpu_test_duration: int = int(
-            undervolt.get("cpu_test_duration", 30)
-        )
         self.undervolt_gpu_start_freq: int = int(undervolt.get("gpu_start_freq", 1200))
-        self.undervolt_gpu_test_duration: int = int(
-            undervolt.get("gpu_test_duration", 30)
-        )
 
         overclock = phases.get("overclock", {})
         self.overclock_enable: bool = bool(overclock.get("enable", True))
@@ -205,11 +197,7 @@ class BUOConfig:
                     "fan": self.fix_fan,
                 },
                 "undervolt": {
-                    "cpu_start_freq": self.undervolt_cpu_start_freq,
-                    "cpu_step": self.undervolt_cpu_step,
-                    "cpu_test_duration": self.undervolt_cpu_test_duration,
                     "gpu_start_freq": self.undervolt_gpu_start_freq,
-                    "gpu_test_duration": self.undervolt_gpu_test_duration,
                 },
                 "overclock": {
                     "enable": self.overclock_enable,
