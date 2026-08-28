@@ -64,9 +64,13 @@ class BUOConfig:
         # richiede al massimo ~4 reboot (CPU, GPU, ACPI, IOMMU non-ostree).
         self.max_reboots: int = max(1, int(safety.get("max_reboots", 5)))
 
-        # Vincoli di sicurezza: mai oltre gli hard limits
-        self.cpu_vid_recommended_max = min(self.cpu_vid_recommended_max,
-                                           self.cpu_vid_absolute_max)
+        # Vincoli di sicurezza: mai oltre gli hard limits e mai sotto il
+        # minimo sicuro (un VID troppo basso farebbe testare a bc250-detect
+        # una tensione instabile).
+        self.cpu_vid_recommended_max = max(
+            LIMITS.cpu.vid_min,
+            min(self.cpu_vid_recommended_max, self.cpu_vid_absolute_max),
+        )
         self.gpu_voltage_recommended_max = min(self.gpu_voltage_recommended_max,
                                                self.gpu_voltage_absolute_max)
         self.power_budget = min(self.power_budget, LIMITS.power.psu_max)

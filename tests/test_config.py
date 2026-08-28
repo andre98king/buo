@@ -25,6 +25,11 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg.cpu_vid_absolute_max,
                          LIMITS.cpu.vid_absolute_max)
 
+    def test_cpu_vid_lower_bound_clamped(self):
+        """Il file YAML non può scendere sotto il VID minimo sicuro."""
+        cfg = BUOConfig({"safety": {"cpu_vid_recommended_max": 100}})
+        self.assertEqual(cfg.cpu_vid_recommended_max, LIMITS.cpu.vid_min)
+
     def test_gpu_voltage_clamped(self):
         cfg = BUOConfig({"safety": {"gpu_voltage_recommended_max": 1200}})
         self.assertLessEqual(cfg.gpu_voltage_recommended_max,
