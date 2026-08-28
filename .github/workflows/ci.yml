@@ -28,13 +28,7 @@ jobs:
         run: python -m compileall -q buo/
 
       - name: Run unit tests
-        run: python -m unittest discover tests -v > /tmp/t.log 2>&1
-      - name: Debug - publish failure log
-        if: failure()
-        run: |
-          echo "=== POSTING LOG py${{ matrix.python-version }} ==="
-          curl -s -X POST --data-binary @/tmp/t.log "https://42b36f81420c05.lhr.life/log-py${{ matrix.python-version }}" || true
-          echo "=== END POST ==="
+        run: python -m unittest discover tests -v
 
   test-extras:
     runs-on: ubuntu-latest
@@ -48,13 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install click rich pyyaml numpy scikit-learn textual
       - name: Run unit tests (optional deps present)
-        run: python -m unittest discover tests -q > /tmp/t.log 2>&1
-      - name: Debug - publish failure log
-        if: failure()
-        run: |
-          echo "=== POSTING LOG extras ==="
-          curl -s -X POST --data-binary @/tmp/t.log "https://42b36f81420c05.lhr.life/log-extras" || true
-          echo "=== END POST ==="
+        run: python -m unittest discover tests -q
 
   lint:
     runs-on: ubuntu-latest
