@@ -11,13 +11,13 @@
   (`"<Make> <Model>:<W>x<H>@<refresh> <broadcast>"`, letto da gamescope al
   boot per gli schermi esterni — verificato in `get_saved_mode()`
   DRMBackend.cpp). Risultato: Marvel Rivals da 60-70 a **picco 120 FPS**.
-  Documentato in BUGS.md #23 e COMMUNITY_NOTES.md §2d.
+  Documentato (bug #23).
 - 🟠 **`bc250-cu-live-manager` riabilitato**: l'unità systemd era sparita
   dopo un cambio deployment (binario+config intatti → 24 CU attive invece
   di 40). Reinstallato con `install-service` + `apply-service` → 40/40 CU,
   `enabled`+`active`. Quirk documentato: eseguire `install-service` da una
   COPIA dello script (da `/usr/local/bin`, symlink, `install` fallisce con
-  "stesso file" e lo script esce senza scrivere l'unità). BUGS.md #24.
+  "stesso file" e lo script esce senza scrivere l'unità). Bug #24.
 
 ### Validato sul campo (28/08 sera)
 - **Gaming**: Marvel Rivals picco 120 FPS con 144Hz; monitoraggio partita
@@ -67,7 +67,7 @@
 - Dashboard HTML autonoma del report (nessuna dipendenza)
 - CI GitHub Actions (test su Python 3.10/3.12)
 - Documentazione completa (README, USER_GUIDE, INSTALL, ARCHITECTURE, FAQ,
-  HARDWARE_SETUP, PROJECT_STATUS, CONTRIBUTING)
+  HARDWARE_SETUP, CONTRIBUTING)
 
 ### Sicurezza
 - Corretto: l'undervolt in modalità reale non testava la stabilità (ora fail-closed)

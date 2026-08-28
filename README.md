@@ -62,11 +62,9 @@
 |:---|:---|
 | CPU | **8 core / 16 thread** attivi e sani (mask 0xFF, test-cores 16/16, 0 MCE) — primo caso documentato su Bazzite/GRUB-BLS |
 | GPU | **40/40 CU** attive (runtime UMR, persistente al boot) |
-| Display | **144Hz** su Steam Gaming Mode (fix EDID/gamescope, BUGS #23) |
+| Display | **144Hz** su Steam Gaming Mode (fix EDID/gamescope) |
 | Gaming | Marvel Rivals **picco 120 FPS** (era 60-70 bloccati); GPU max 86°C, CPU max 85°C in partita |
 | UV GPU | attivo (curva SMU 800/900/1000mV @ 1/1.5/2GHz + throttle 85°C) |
-
-Dettagli: [PROJECT_STATUS.md](PROJECT_STATUS.md), [docs/BUGS.md](docs/BUGS.md), [docs/COMMUNITY_NOTES.md](docs/COMMUNITY_NOTES.md).
 
 ---
 
@@ -325,9 +323,7 @@ buo/
 ## 📚 Documentazione
 
 - **[Setup su hardware reale](docs/HARDWARE_SETUP.md)** — guida passo-passo per Bazzite + BIOS mod
-- **[PROJECT_STATUS.md](PROJECT_STATUS.md)** — stato e roadmap del progetto
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — guida per contribuire
-- **`reference/`** — la conversazione completa di progettazione (114 messaggi, con catene di pensiero)
 
 ---
 

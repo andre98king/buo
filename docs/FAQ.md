@@ -57,7 +57,6 @@ giochi presentano a 60. Verifica:
 `sudo cat /sys/kernel/debug/dri/1/state | grep mode:`.
 Fix: Steam → Impostazioni → Display → "Automatically Set Resolution" →
 OFF → seleziona 1920x1080@144 (la scelta si salva e persiste).
-Dettagli: docs/COMMUNITY_NOTES.md §2d e docs/BUGS.md #23.
 
 **D: `buo unleash` si ferma con "bc250-detect non trovato"**
 R: È il fail-closed che funziona: manca il tool di undervolt. Esegui

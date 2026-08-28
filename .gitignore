@@ -30,5 +30,13 @@ htmlcov/
 # Conversazione di progettazione (solo locale)
 reference/
 
+# Documentazione interna (solo locale, non pubblica)
+research/
+PROJECT_STATUS.md
+docs/BUGS.md
+docs/COMMUNITY_NOTES.md
+docs/8CORE_PLAN.md
+docs/TEST_PLAN.md
+
 # Script temporanei di monitoraggio
 /tmp-*.sh

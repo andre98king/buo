@@ -14,7 +14,7 @@ Cosa fa questa PR e perché.
 
 - [ ] `python -m unittest discover tests` passa
 - [ ] Ho aggiunto/aggiornato i test per il comportamento modificato
-- [ ] Ho aggiornato `docs/BUGS.md` se è un bug di campo
+- [ ] Ho documentato il bug di campo (journal interno) se applicabile
 - [ ] Ho aggiornato la documentazione pertinente (README, docs/)
 
 ## Rischi

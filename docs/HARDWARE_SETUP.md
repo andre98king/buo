@@ -153,7 +153,7 @@ Cosa farà BUO in sequenza (vedrai ogni fase nel terminale):
 
 - **IOMMU**: ⚠️ **MAI usare `iommu=off` come parametro kernel**: su BC-250
   rompe la interrupt remapping e causa USB + rete morte (partial hang,
-  verificato sul campo — vedi `docs/BUGS.md` #2). La community consiglia di
+  verificato sul campo — bug #2). La community consiglia di
   disabilitare l'IOMMU **nel BIOS** (Advanced → AMD CBS → NBIO → IOMMU →
   Disabled) per curare eventuali crash/black-screen della **GPU** — è un
   toggle firmware manuale, non un comando da OS. Se trovi `iommu=off` in

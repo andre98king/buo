@@ -37,4 +37,4 @@ Reale: …
 
 ## Note
 
-Hai già consultato `docs/BUGS.md` e `docs/RECOVERY.md`? (sì/no)
+Hai già consultato `docs/RECOVERY.md`? (sì/no)

@@ -8,14 +8,14 @@
 
 BUO è in fase **pre-alpha**: lo usi sulla tua scheda a tuo rischio.
 È progettato per **modificare parametri hardware** (SMU, frequenze,
-voltaggi, moduli kernel). Leggi sempre `docs/BUGS.md` e `docs/RECOVERY.md`
+voltaggi, moduli kernel). Leggi sempre `docs/RECOVERY.md`
 prima di eseguirlo su hardware reale.
 
 ## ⚠️ Avvertenze di sicurezza fondamentali
 
 1. **BUO esegue modifiche hardware reali** (undervolt/overclock, modprobe,
    unlock CPU/GPU). Un uso scorretto può causare instabilità, crash o
-   boot failure (vedi `docs/BUGS.md`).
+   boot failure.
 2. **Su Bazzite/ostree**: BUO **non** scrive mai `/boot` e non modifica
    l'initramfs. Ma installa **automaticamente** i pacchetti dal package
    manager della distro: `rpm-ostree install umr` su ostree, `dnf` + COPR
@@ -48,5 +48,5 @@ Fornisci: versione BUO, distro (Bazzite/Arch/Fedora), output di
   e 3.12.
 - Le modifiche che toccano `fix/`, `unlock/` o `state/` richiedono test
   dedicati e revisione.
-- Ogni bug di campo va documentato in `docs/BUGS.md` con causa e
+- Ogni bug di campo va documentato (journal interno) con causa e
   prevenzione.
