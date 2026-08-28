@@ -21,7 +21,7 @@ Analisi dallo studio:
 """
 
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..utils.logging import LoggerMixin
 from .wrappers.bc250_40cu import BC25040CUWrapper

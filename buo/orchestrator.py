@@ -18,7 +18,6 @@ benchmark, report, models.
 """
 
 import sys
-from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from .audit.hardware import HardwareAudit
@@ -26,8 +25,7 @@ from .audit.problems import ProblemDetector
 from .benchmark.runner import BenchmarkRunner
 from .config import BUOConfig
 from .constants import (EXIT_ERROR, EXIT_REBOOT, EXIT_SAFETY_VIOLATION,
-                        EXIT_SUCCESS, LIMITS, PHASES, ROLLBACK_ORDER,
-                        STATE_DIR)
+                        EXIT_SUCCESS, LIMITS, PHASES)
 from .exceptions import ConfigurationError, SafetyViolation
 from .fix.ace import ACEComputeFix
 from .fix.acpi import ACPIFix
@@ -50,7 +48,7 @@ from .unlock.dxe import DXECoreUnlock
 from .unlock.gpu import GPU40CUUnlock
 from .unlock.health import CUHealthTest
 from .unlock.mask import CUMask
-from .utils.logging import LoggerMixin, get_logger, setup_logging
+from .utils.logging import LoggerMixin, setup_logging
 from .utils.mock import MockHardware
 from .validate.stress import StressTest
 from .validate.verify import FixVerifier

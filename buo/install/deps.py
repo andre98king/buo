@@ -21,7 +21,6 @@ SICUREZZA:
       l'orchestratore resta fail-closed (non procede senza i tool)
 """
 
-import os
 import stat
 import shutil
 from pathlib import Path

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..utils.logging import LoggerMixin
-from ..utils.shell import run_command, which
+from ..utils.shell import run_command
 
 
 class FixVerifier(LoggerMixin):
