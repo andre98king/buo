@@ -39,7 +39,9 @@ class ReportGenerator(LoggerMixin):
                  fixes: Optional[Dict[str, Dict[str, Any]]] = None,
                  benchmarks: Optional[Dict[str, Any]] = None,
                  applied_fixes: Optional[list] = None,
-                 notes: Optional[list] = None) -> Path:
+                 notes: Optional[list] = None,
+                 fix_summary: Optional[Dict[str, Any]] = None,
+                 fix_results: Optional[Dict[str, Dict[str, Any]]] = None) -> Path:
         """Genera e salva il report; restituisce il percorso .md."""
         report = {
             "generated_at": datetime.now().isoformat(),
@@ -47,6 +49,8 @@ class ReportGenerator(LoggerMixin):
             "after": after,
             "problems_found": problems or [],
             "fixes_verification": fixes or {},
+            "fix_summary": fix_summary or {},
+            "fix_results": fix_results or {},
             "applied_fixes": applied_fixes or [],
             "benchmarks": benchmarks or {},
             "performance_gain": self._compute_gains(before, after, benchmarks),
@@ -130,6 +134,24 @@ class ReportGenerator(LoggerMixin):
                              f"{p.get('title', p.get('id'))}")
         else:
             lines.append("- ✅ Nessun problema noto rilevato")
+
+        lines += ["", "## 🔧 Esito Fix (applicazione)", ""]
+        fix_results = report.get("fix_results") or {}
+        status_icon = {
+            "applied": "✅ applicato",
+            "manual": "⚠️ manuale",
+            "failed": "❌ fallito",
+        }
+        if fix_results:
+            lines.append("| Fix | Stato | Dettaglio |")
+            lines.append("|:---|:---|:---|")
+            for name, v in fix_results.items():
+                icon = status_icon.get(v.get("status"), "❓ sconosciuto")
+                detail = (v.get("note") or v.get("detail")
+                          or v.get("warning") or v.get("error") or "")
+                lines.append(f"| {name} | {icon} | {detail} |")
+        else:
+            lines.append("- Nessun fix eseguito in questa fase")
 
         lines += ["", "## ✅ Verifica Fix", ""]
         if report["fixes_verification"]:

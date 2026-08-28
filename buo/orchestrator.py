@@ -456,6 +456,43 @@ class Orchestrator(LoggerMixin):
                     "rpm-ostree install umr (poi reboot).")
             else:
                 self.logger.info("✅ Toolchain 40-CU pronta (umr + live-manager)")
+            # BUGS #24: l'unità systemd può sparire dopo un cambio deployment
+            # (binario+config intatti) → la GPU torna silenziosamente a 24 CU.
+            self._check_40cu_service_enabled()
+
+    def _check_40cu_service_enabled(self) -> None:
+        """BUGS #24: verifica che il servizio 40-CU sia ENABLED su ostree.
+
+        Il servizio `bc250-cu-live-manager.service` può sparire dopo un cambio
+        deployment ostree pur con binario `/usr/local/bin/bc250-cu-live-manager`
+        e config intatti: la GPU torna silenziosamente a 24 CU. Avviso NON
+        bloccante (fail-closed è compito dell'unlock, non di questo check):
+        logga chiaramente il problema e la ricetta di recovery.
+        """
+        from .utils.shell import run_command
+        unit = "bc250-cu-live-manager"
+        try:
+            rc, out, _ = run_command(
+                ["systemctl", "is-enabled", unit], check=False)
+        except Exception as e:  # mai bloccare l'unlock per questo check
+            self.logger.warning(
+                "⚠️ BUGS #24: verifica servizio 40-CU non riuscita (%s) — "
+                "controlla manualmente `systemctl is-enabled %s`.", e, unit)
+            return
+        if rc == 0 and out.strip() == "enabled":
+            self.logger.info("✅ Servizio 40-CU: %s.service abilitato", unit)
+            return
+        self.logger.warning(
+            "⚠️ BUGS #24: %s.service mancante/disabilitato — le 40 CU "
+            "torneranno a 24 CU al prossimo riavvio. Recovery (quirk: "
+            "`install-service` da /usr/local/bin fallisce con 'same file' "
+            "perché /usr/local è un symlink; eseguirlo da una copia in "
+            "path NON-symlink):\n"
+            "  sudo cp /usr/local/bin/bc250-cu-live-manager /tmp/\n"
+            "  sudo /tmp/bc250-cu-live-manager --yes install-service\n"
+            "  rm /tmp/bc250-cu-live-manager\n"
+            "  sudo /usr/local/bin/bc250-cu-live-manager --yes apply-service",
+            unit)
 
     def _ensure_dependencies(self) -> None:
         """
@@ -795,7 +832,59 @@ class Orchestrator(LoggerMixin):
                 self.logger.warning("Fix %s non applicato: %s", name, e)
                 results[name] = {"applied": False, "error": str(e)}
 
+        # Classificazione ONESTA dell'esito (applied/manual/failed): così
+        # l'utente vede dal report quali fix sono attivi, quali richiedono
+        # attenzione manuale e quali sono falliti. I no-op/manuali NON sono
+        # errori (il contratto EXIT_SUCCESS resta invariato): sono solo resi
+        # espliciti, non più nascosti dietro un generico WARNING.
+        summary = {"applied": [], "manual": [], "failed": []}
+        for name, entry in results.items():
+            status = self._classify_fix(entry)
+            note = self._fix_note(entry)
+            entry["status"] = status
+            if note:
+                entry["note"] = note
+            summary[status].append(name)
+        self.results["fix_summary"] = summary
+        self.results["fix_results"] = results
+
+        manual_label = ", ".join(f"{n} (manuale)" for n in summary["manual"])
+        failed_label = ", ".join(f"{n} (fallito)" for n in summary["failed"])
+        labels = [x for x in (manual_label, failed_label) if x]
+        if labels:
+            self.logger.warning(
+                "⚠️ Fix NON applicati automaticamente: %s", ", ".join(labels))
+
         return results
+
+    @staticmethod
+    def _classify_fix(result: Dict[str, Any]) -> str:
+        """Classifica l'esito di un fix in 'applied'/'manual'/'failed'.
+
+        - applied: fix applicato o già attivo (applied=True, skipped_*)
+        - manual:  fix manuale/no-op (applied=False SENZA errore)
+        - failed:  eccezione o applied=False CON errore
+        """
+        if result.get("applied"):
+            return "applied"
+        if result.get("error"):
+            return "failed"
+        return "manual"
+
+    @staticmethod
+    def _fix_note(result: Dict[str, Any]) -> str:
+        """Estrae un dettaglio leggibile dall'esito di un fix."""
+        if result.get("skipped_checkpoint"):
+            return "già eseguito (checkpoint)"
+        if result.get("skipped_verified"):
+            return "già attivo (verificato)"
+        if result.get("dry_run"):
+            return "simulato (dry-run)"
+        for key in ("error", "warning", "note", "detail"):
+            value = result.get(key)
+            if value:
+                return str(value)
+        return ""
 
     def _phase_optimize(self) -> Dict[str, Any]:
         """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited."""
@@ -984,6 +1073,24 @@ class Orchestrator(LoggerMixin):
                 "Questo report descrive cosa sarebbe successo."
             )
 
+        # Rendere espliciti i fix che richiedono ancora attenzione manuale
+        # (no-op/manuali) o che sono falliti: il report deve dirlo chiaramente
+        # invece di lasciare l'utente nell'incertezza.
+        summary = self.results.get("fix_summary", {})
+        manual = summary.get("manual") or []
+        failed = summary.get("failed") or []
+        if manual or failed:
+            parts = []
+            if manual:
+                parts.append("manuali: " + ", ".join(manual))
+            if failed:
+                parts.append("falliti: " + ", ".join(failed))
+            self.results["notes"].append(
+                "Attenzione manuale richiesta — fix non applicati "
+                "automaticamente (" + "; ".join(parts) + "). Consulta la "
+                "sezione 'Esito Fix' del report."
+            )
+
         self.report.generate(
             before=self.results["before"],
             after=self.results["after"],
@@ -992,6 +1099,8 @@ class Orchestrator(LoggerMixin):
             benchmarks=self.results["benchmarks"],
             applied_fixes=self.results["applied_fixes"],
             notes=self.results["notes"],
+            fix_summary=self.results.get("fix_summary"),
+            fix_results=self.results.get("fix_results"),
         )
         if getattr(self, "_partial_run", False):
             self.logger.info("✅ Fase/i richiesta/e completata/e")
