@@ -72,7 +72,7 @@ class TestFixSummaryClassification(unittest.TestCase):
         orch.fix_ace = _FakeFixer(applied=False,
                                   raise_on_apply=RuntimeError("repo ACE mancante"))
         orch.fix_vram = _FakeFixer(applied=False,
-                                   error="bc250_memcfg non configurato")
+                                   warning="bc250_memcfg non configurato")
         orch.fix_gtt = _FakeFixer(verify=True)   # già attivo → applied
         orch.fix_fan = _FakeFixer(applied=True)  # in done → skipped_checkpoint
 
@@ -82,8 +82,8 @@ class TestFixSummaryClassification(unittest.TestCase):
         summary = orch.results["fix_summary"]
         self.assertCountEqual(summary["applied"],
                               ["acpi_fix", "gtt_tuning", "fan_control"])
-        self.assertCountEqual(summary["manual"], ["iommu", "tlb_fix"])
-        self.assertCountEqual(summary["failed"], ["ace_fix", "vram_config"])
+        self.assertCountEqual(summary["manual"], ["iommu", "tlb_fix", "vram_config"])
+        self.assertCountEqual(summary["failed"], ["ace_fix"])
 
         results = orch.results["fix_results"]
         self.assertEqual(results["acpi_fix"]["status"], "applied")
@@ -96,7 +96,9 @@ class TestFixSummaryClassification(unittest.TestCase):
         self.assertEqual(results["tlb_fix"]["status"], "manual")
         self.assertEqual(results["ace_fix"]["status"], "failed")
         self.assertEqual(results["ace_fix"]["note"], "repo ACE mancante")
-        self.assertEqual(results["vram_config"]["status"], "failed")
+        self.assertEqual(results["vram_config"]["status"], "manual")
+        self.assertEqual(results["vram_config"]["note"],
+                         "bc250_memcfg non configurato")
 
         # Il riepilogo viene loggato chiaramente
         joined = "\n".join(logs.output)
@@ -125,13 +127,13 @@ class TestFixSummaryClassification(unittest.TestCase):
         orch = self._make()
         orch.results["fix_summary"] = {
             "applied": ["gtt_tuning"],
-            "manual": ["iommu", "tlb_fix"],
-            "failed": ["vram_config"],
+            "manual": ["iommu", "tlb_fix", "vram_config"],
+            "failed": ["ace_fix"],
         }
         orch._finalize()
         joined = " ".join(orch.results["notes"])
         self.assertIn("manuali: iommu, tlb_fix", joined)
-        self.assertIn("falliti: vram_config", joined)
+        self.assertIn("falliti: ace_fix", joined)
 
     def test_finalize_no_note_without_manual_or_failed(self):
         orch = self._make()

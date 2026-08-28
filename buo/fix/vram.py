@@ -51,7 +51,7 @@ class VRAMConfig(LoggerMixin):
                 "warning": (
                     "bc250_memcfg non configurato. Scaricalo da "
                     f"{MEMCFG_REPO} e passa --memcfg <percorso>. "
-                    "Esempio reale: bc250_memcfg --set-vram {gpu_memory_gb}G"
+                    f"Esempio reale: bc250_memcfg --set-vram {gpu_memory_gb}G"
                 ),
             }
 

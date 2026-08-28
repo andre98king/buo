@@ -1063,8 +1063,9 @@ class Orchestrator(LoggerMixin):
         results["fix_verification"] = verification
         self.results["fixes"] = verification
 
-        # Benchmark after
-        if self.config.benchmark_enabled and not self.dry_run:
+        # Benchmark after (in dry-run il runner è in modalità mock,
+        # quindi viene simulato come il benchmark BEFORE e lo stress test)
+        if self.config.benchmark_enabled:
             self.logger.info("📊 Benchmark AFTER...")
             self.results["benchmarks"]["after"] = self.benchmark.run_all(
                 gpu_duration=self.config.benchmark_gpu_duration,
