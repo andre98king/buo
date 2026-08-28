@@ -2,7 +2,6 @@
 # Gli HARD LIMITS (vid_absolute_max, gpu_voltage_absolute_max...) NON
 # sono sovrascrivibili: vivono in buo/constants.py e sono immutabili.
 version: "1.0"
-mode: "adaptive"              # adaptive | efficiency | performance | custom
 
 hardware:
   psu_wattage: 350            # W — alimentatore dichiarato
@@ -44,7 +43,6 @@ phases:
     cpu_step: 100            # MHz
     cpu_test_duration: 30    # s
     gpu_start_freq: 1200     # MHz
-    gpu_step: 50             # MHz
     gpu_test_duration: 30    # s
   overclock:
     enable: true
@@ -62,8 +60,6 @@ deps:
   auto_install: true         # BUO scarica da solo i tool mancanti al primo avvio
   auto_install_governor: true   # il governor viene auto-installato (COPR/AUR ufficiale) di default
 
-logging:
-  level: "info"              # debug | info | warn | error
-  file: "/var/log/buo/buo.log"
+
 
 

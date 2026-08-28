@@ -36,12 +36,11 @@ class TestConfig(unittest.TestCase):
 
     def test_load_missing_file_returns_defaults(self):
         cfg = BUOConfig.load(Path("/nonexistent/buo.yaml"))
-        self.assertEqual(cfg.mode, "adaptive")
+        self.assertEqual(cfg.psu_wattage, 350)
 
     def test_roundtrip_dict(self):
-        cfg = BUOConfig({"mode": "performance", "psu_wattage": 400})
+        cfg = BUOConfig({"hardware": {"psu_wattage": 400}})
         d = cfg.to_dict()
-        self.assertEqual(d["mode"], "performance")
         self.assertEqual(d["hardware"]["psu_wattage"], 400)
         # gli hard limits restano immutabili anche nella serializzazione
         self.assertEqual(d["safety"]["cpu"]["vid_absolute_max"], 1325)
@@ -54,10 +53,10 @@ class TestConfig(unittest.TestCase):
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "buo.yaml"
-            cfg = BUOConfig({"mode": "efficiency"})
+            cfg = BUOConfig({"hardware": {"cooling_type": "custom"}})
             cfg.save(path)
             loaded = BUOConfig.load(path)
-            self.assertEqual(loaded.mode, "efficiency")
+            self.assertEqual(loaded.cooling_type, "custom")
 
 
 if __name__ == "__main__":

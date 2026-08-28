@@ -440,7 +440,6 @@ def config(edit: bool) -> None:
                   header_style="bold cyan")
     table.add_column("Parametro", style="white")
     table.add_column("Valore", style="green")
-    table.add_row("Modalità", d["mode"])
     table.add_row("PSU", f"{d['hardware']['psu_wattage']} W")
     table.add_row("Raffreddamento", d["hardware"]["cooling_type"])
     table.add_row("Power budget", f"{d['safety']['power_budget']} W")

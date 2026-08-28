@@ -32,9 +32,6 @@ class BUOConfig:
     def __init__(self, data: Optional[Dict[str, Any]] = None):
         data = data or {}
 
-        # Modalità: adaptive | efficiency | performance | custom
-        self.mode: str = str(data.get("mode", "adaptive"))
-
         # Hardware dichiarato dall'utente
         hardware = data.get("hardware") or {}
         self.psu_wattage: int = int(
@@ -111,7 +108,6 @@ class BUOConfig:
             undervolt.get("cpu_test_duration", 30)
         )
         self.undervolt_gpu_start_freq: int = int(undervolt.get("gpu_start_freq", 1200))
-        self.undervolt_gpu_step: int = int(undervolt.get("gpu_step", 50))
         self.undervolt_gpu_test_duration: int = int(
             undervolt.get("gpu_test_duration", 30)
         )
@@ -142,13 +138,6 @@ class BUOConfig:
             deps.get("auto_install_governor", True)
         )
 
-        # ----- Logging / Report -----
-        logging_cfg = data.get("logging", {})
-        self.log_level: str = str(logging_cfg.get("level", "info"))
-        self.log_file: str = str(logging_cfg.get("file", "/var/log/buo/buo.log"))
-
-
-
     # ------------------------------------------------------------------ #
 
     @classmethod
@@ -171,7 +160,6 @@ class BUOConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Serializza la configurazione (per checkpoint e report)."""
         return {
-            "mode": self.mode,
             "hardware": {
                 "psu_wattage": self.psu_wattage,
                 "cooling_type": self.cooling_type,
@@ -221,7 +209,6 @@ class BUOConfig:
                     "cpu_step": self.undervolt_cpu_step,
                     "cpu_test_duration": self.undervolt_cpu_test_duration,
                     "gpu_start_freq": self.undervolt_gpu_start_freq,
-                    "gpu_step": self.undervolt_gpu_step,
                     "gpu_test_duration": self.undervolt_gpu_test_duration,
                 },
                 "overclock": {
@@ -242,7 +229,6 @@ class BUOConfig:
                 "auto_install": self.deps_auto_install,
                 "auto_install_governor": self.deps_auto_install_governor,
             },
-            "logging": {"level": self.log_level, "file": self.log_file},
         }
 
     def save(self, path: Optional[Path] = None) -> None:
