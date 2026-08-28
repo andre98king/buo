@@ -76,6 +76,70 @@ class TestVRAMEstimator(unittest.TestCase):
         model = VRAMTemperatureEstimator()
         self.assertIsNotNone(model.estimate(70, 150))
 
+    def test_level_ok_below_warning(self):
+        est = VRAMTemperatureEstimator(warning_threshold=82.0,
+                                       critical_threshold=92.0)
+        result = est.estimate(gpu_temp=60.0, gpu_power=100.0)
+        self.assertEqual(result.level, "ok")
+
+    def test_level_warning_between_thresholds(self):
+        est = VRAMTemperatureEstimator(warning_threshold=82.0,
+                                       critical_threshold=92.0)
+        result = est.estimate(gpu_temp=160.0, gpu_power=0.0)
+        self.assertEqual(result.level, "warning")
+
+    def test_level_critical_above_critical(self):
+        est = VRAMTemperatureEstimator(warning_threshold=82.0,
+                                       critical_threshold=92.0)
+        result = est.estimate(gpu_temp=200.0, gpu_power=5000.0)
+        self.assertEqual(result.level, "critical")
+
+    def test_level_defaults_to_ok(self):
+        est = VRAMTemperatureEstimator()
+        result = est.estimate(gpu_temp=45.0, gpu_power=20.0)
+        self.assertEqual(result.level, "ok")
+
+    def test_reset_clears_state(self):
+        est = VRAMTemperatureEstimator()
+        est.estimate(gpu_temp=200.0, gpu_power=5000.0)  # critical
+        est.estimate(gpu_temp=70.0, gpu_power=150.0)
+        self.assertGreater(len(est._history), 0)
+        self.assertGreater(est._estimates_count, 0)
+        self.assertGreater(est._critical_count, 0)
+
+        est.reset()
+
+        self.assertIsNone(est._filtered_temp)
+        self.assertIsNone(est._last_time)
+        self.assertEqual(len(est._history), 0)
+        self.assertEqual(est._estimates_count, 0)
+        self.assertEqual(est._warning_count, 0)
+        self.assertEqual(est._critical_count, 0)
+
+    def test_reset_next_estimate_starts_fresh(self):
+        est = VRAMTemperatureEstimator(tau=0.2)
+        est.estimate(gpu_temp=70.0, gpu_power=150.0)
+        est.reset()
+        result = est.estimate(gpu_temp=70.0, gpu_power=150.0)
+        self.assertAlmostEqual(result.temperature, result.raw_temperature,
+                               places=6)
+
+    def test_str_emoji_per_level(self):
+        ok_est = VRAMTemperatureEstimator(warning_threshold=82.0,
+                                          critical_threshold=92.0)
+        ok_result = ok_est.estimate(gpu_temp=60.0, gpu_power=100.0)
+        self.assertEqual(str(ok_result), "✅ 43.1°C (conf: 50%)")
+
+        warn_est = VRAMTemperatureEstimator(warning_threshold=82.0,
+                                            critical_threshold=92.0)
+        warn_result = warn_est.estimate(gpu_temp=160.0, gpu_power=0.0)
+        self.assertEqual(str(warn_result), "⚠️ 84.1°C (conf: 50%)")
+
+        crit_est = VRAMTemperatureEstimator(warning_threshold=82.0,
+                                            critical_threshold=92.0)
+        crit_result = crit_est.estimate(gpu_temp=200.0, gpu_power=5000.0)
+        self.assertEqual(str(crit_result), "🔴 120.0°C (conf: 50%)")
+
 
 if __name__ == "__main__":
     unittest.main()

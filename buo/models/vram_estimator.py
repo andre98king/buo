@@ -43,10 +43,11 @@ class VRAMEstimate:
     ambient_temp: float
     alpha: float
     beta: float
+    level: str = "ok"
 
     def __str__(self) -> str:
-        status = "✅" if self.temperature < 80 else \
-                 ("⚠️" if self.temperature < 90 else "🔴")
+        status = {"ok": "✅", "warning": "⚠️", "critical": "🔴"}.get(
+            self.level, "✅")
         return f"{status} {self.temperature:.1f}°C (conf: {self.confidence:.0%})"
 
 
@@ -121,8 +122,12 @@ class VRAMTemperatureEstimator:
         self._estimates_count += 1
         if filtered > self.critical_threshold:
             self._critical_count += 1
+            level = "critical"
         elif filtered > self.warning_threshold:
             self._warning_count += 1
+            level = "warning"
+        else:
+            level = "ok"
 
         return VRAMEstimate(
             temperature=filtered,
@@ -134,7 +139,19 @@ class VRAMTemperatureEstimator:
             ambient_temp=ambient_temp,
             alpha=self.alpha,
             beta=self.beta,
+            level=level,
         )
+
+    # ------------------------------------------------------------------ #
+
+    def reset(self) -> None:
+        """Azzera lo stato di smoothing, lo storico e i contatori."""
+        self._filtered_temp = None
+        self._last_time = None
+        self._history.clear()
+        self._estimates_count = 0
+        self._warning_count = 0
+        self._critical_count = 0
 
     # ------------------------------------------------------------------ #
 
