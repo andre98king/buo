@@ -68,14 +68,20 @@ class ACPIFix(LoggerMixin):
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.state.is_acpi_fixed
         if self.distro.initramfs_tool == "ostree":
-            # Metodo concatenato: fix applicato = una boot entry punta a
-            # un nostro blob (initramfs-acpi-*.img) con cpio in testa.
+            # Metodo concatenato: fix applicato = la boot entry DI DEFAULT
+            # punta a un nostro blob (initramfs-acpi-*.img) con cpio in
+            # testa. Se il default non è ancora risolvibile, accetta
+            # qualsiasi entry già puntata a un blob valido.
             loader = self.boot_dir / "loader" / "entries"
             if not loader.is_dir():
                 return False
-            for entry in sorted(loader.glob("*.conf")):
+            entry = self._default_entry(loader)
+            candidates = [entry] if entry else []
+            candidates += [e for e in sorted(loader.glob("*.conf"))
+                           if e not in candidates]
+            for e in candidates:
                 try:
-                    text = entry.read_text(errors="replace")
+                    text = e.read_text(errors="replace")
                 except Exception:
                     continue
                 m = re.search(r"^initrd\s+(\S+)", text, re.M)
@@ -173,12 +179,50 @@ class ACPIFix(LoggerMixin):
             shutil.rmtree(tmpdir, ignore_errors=True)
         return {"applied": True, "method": "cpio", "needs_reboot": True}
 
+    def _default_entry(self, loader: Path) -> Optional[Path]:
+        """Risolve la boot entry che systemd-boot userà al prossimo boot.
+
+        Priorità (come systemd-boot):
+        1) `default` in loader.conf (es. "ostree-1.conf");
+        2) entry del deployment attualmente bootato (ostree= da
+           /proc/cmdline → hash del boot manifest);
+        3) prima *.conf in ordine alfabetico (fallback).
+        """
+        conf = loader.parent / "loader.conf"
+        if conf.is_file():
+            try:
+                for line in conf.read_text(errors="replace").splitlines():
+                    line = line.strip()
+                    if line.startswith("default") and len(line.split()) > 1:
+                        val = line.split(None, 1)[1].strip().strip('"')
+                        name = Path(val).name
+                        if not name.endswith(".conf"):
+                            name += ".conf"
+                        cand = loader / name
+                        if cand.is_file():
+                            return cand
+            except Exception:
+                pass
+        try:
+            cmdline = Path("/proc/cmdline").read_text(errors="replace")
+            m = re.search(r"ostree=/ostree/boot\.0/default/([0-9a-f]+)",
+                          cmdline)
+            if m:
+                for entry in sorted(loader.glob("*.conf")):
+                    if m.group(1) in entry.read_text(errors="replace"):
+                        return entry
+        except Exception:
+            pass
+        entries = sorted(loader.glob("*.conf"))
+        return entries[0] if entries else None
+
     def _install_ostree(self) -> Dict[str, Any]:
         """Bazzite/ostree: initramfs CONCATENATO (metodo validato).
 
         cpio ACPI + initramfs in un blob unico → boot entry (systemd-boot)
         puntata al blob con UNA sola riga initrd. Fail-closed:
-        - entry di default = prima *.conf in ordine alfabetico;
+        - entry di default risolta come systemd-boot (loader.conf →
+          deployment attivo da /proc/cmdline → fallback alfabetico);
         - backup della entry prima di ogni modifica;
         - verifica magic cpio sul blob prima di sostituire la entry;
         - nessuna modifica se qualcosa non quadra (initramfs assente/
@@ -192,11 +236,9 @@ class ACPIFix(LoggerMixin):
             return {"applied": False,
                     "error": f"directory entries non trovata: {loader}"}
 
-        entries = sorted(loader.glob("*.conf"))
-        if not entries:
+        entry = self._default_entry(loader)
+        if entry is None:
             return {"applied": False, "error": "nessuna boot entry (*.conf)"}
-
-        entry = entries[0]
         text = entry.read_text(errors="replace")
         m_linux = re.search(r"^linux\s+(\S+)", text, re.M)
         m_initrd = re.search(r"^initrd\s+(\S+)", text, re.M)

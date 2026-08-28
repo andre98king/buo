@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from buo.exceptions import CheckpointError
 from buo.state.checkpoint import CheckpointManager
 
 
@@ -54,6 +55,26 @@ class TestCheckpoint(unittest.TestCase):
         self.manager.set("x", 2)  # il secondo salvataggio crea un backup
         backups = list((Path(self.tmp.name) / "backups").glob("state_*.json"))
         self.assertGreaterEqual(len(backups), 1)
+
+    def test_corrupt_state_fails_closed(self):
+        """A2: JSON corrotto → CheckpointError, NON reset silenzioso."""
+        state_file = Path(self.tmp.name) / "state.json"
+        state_file.write_text("{ questo non è json !!!")
+        with self.assertRaises(CheckpointError):
+            CheckpointManager(Path(self.tmp.name))
+        # il file corrotto resta intatto (per intervento manuale)
+        self.assertTrue(state_file.exists())
+
+    def test_non_dict_state_fails_closed(self):
+        state_file = Path(self.tmp.name) / "state.json"
+        state_file.write_text("[1, 2, 3]")
+        with self.assertRaises(CheckpointError):
+            CheckpointManager(Path(self.tmp.name))
+
+    def test_save_is_atomic_no_tmp_leftover(self):
+        self.manager.set("x", "valore")
+        self.assertFalse((Path(self.tmp.name) / "state.json.tmp").exists())
+        self.assertTrue((Path(self.tmp.name) / "state.json").exists())
 
 
 if __name__ == "__main__":

@@ -1003,14 +1003,24 @@ class Orchestrator(LoggerMixin):
             return {"applied": True, "mock": True, "freq": freq}
         try:
             from pathlib import Path as _P
+            import os as _os
             from .unlock.wrappers.bc250_overclock import BC250ApplyWrapper
             f, s = self._clamp_cpu(freq, scale, vid)
+            # A1: scrittura symlink-safe in /tmp (O_NOFOLLOW: se il path
+            # è un symlink pre-creato da un altro utente → ELOOP → fail)
             conf = _P("/tmp/buo-overclock.conf")
-            conf.write_text(
-                f"[overclock]\nfrequency = {f}\n"
-                f"scale = {s}\nmax_temperature = {LIMITS.cpu.temp_max}\n",
-                encoding="utf-8",
-            )
+            try:
+                fd = _os.open(conf, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC
+                              | _os.O_NOFOLLOW, 0o600)
+            except OSError:
+                return {"applied": False,
+                        "error": "overclock.conf non scrivibile "
+                                 "(path occupato o symlink)"}
+            with _os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(
+                    f"[overclock]\nfrequency = {f}\n"
+                    f"scale = {s}\nmax_temperature = {LIMITS.cpu.temp_max}\n",
+                )
             w = BC250ApplyWrapper()
             if not w.available:
                 return {"applied": False,

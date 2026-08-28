@@ -8,6 +8,7 @@ initrd, backup prima della modifica, fail-closed su ogni anomalia.
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from buo.fix.acpi import ACPIFix
@@ -127,6 +128,46 @@ class TestAcpiOstreeConcat(unittest.TestCase):
         out = self.fix.apply()
         self.assertTrue(out["applied"])
         self.assertTrue(out.get("already"))
+
+
+    # ---------------- risoluzione entry di default (A3) ---------------- #
+
+    def test_default_entry_from_loader_conf(self):
+        """La entry scelta è quella in loader.conf, NON la alfabetica."""
+        (self.entries / "ostree-0.conf").write_text(
+            ENTRY_TEXT.replace("ostree:1", "ostree:0"))
+        (self.root / "loader" / "loader.conf").write_text(
+            "default ostree-0.conf\n")
+        entry = self.fix._default_entry(self.entries)
+        self.assertEqual(entry.name, "ostree-0.conf")
+
+    def test_default_entry_from_cmdline_deployment(self):
+        """Fallback: entry del deployment attivo (ostree= in cmdline)."""
+        (self.entries / "ostree-2.conf").write_text(
+            "title B\n"
+            "linux /ostree/default-deadbeef/vmlinuz-x\n"
+            "initrd /initramfs-x.img\n"
+            "options ostree=/ostree/boot.0/default/deadbeef/0 quiet\n")
+        real_read = Path.read_text
+
+        def fake_read(self_, *a, **k):
+            if str(self_) == "/proc/cmdline":
+                return ("BOOT_IMAGE=... "
+                        "ostree=/ostree/boot.0/default/deadbeef/0 rhgb quiet")
+            return real_read(self_, *a, **k)
+
+        with mock.patch("buo.fix.acpi.Path.read_text", fake_read):
+            entry = self.fix._default_entry(self.entries)
+        self.assertEqual(entry.name, "ostree-2.conf")
+
+    def test_default_entry_alphabetical_fallback(self):
+        """Senza loader.conf e cmdline ostree → prima *.conf."""
+        (self.entries / "ostree-0.conf").write_text(
+            ENTRY_TEXT.replace("ostree:1", "ostree:0"))
+        with mock.patch("buo.fix.acpi.Path.read_text",
+                        side_effect=lambda *a, **k: ""):
+            entry = self.fix._default_entry(self.entries)
+        self.assertEqual(entry.name, "ostree-0.conf")
 
 
 if __name__ == "__main__":

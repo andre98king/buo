@@ -11,6 +11,7 @@ reboot inaspettato e di tornare a una fase precedente.
 """
 
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -42,11 +43,22 @@ class CheckpointManager(LoggerMixin):
         if self.state_file.exists():
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
-                    self._state = json.load(f)
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("lo stato non è un oggetto JSON")
+                self._state = data
                 self.logger.debug("Stato caricato da %s", self.state_file)
             except Exception as e:
-                self.logger.warning("Errore caricamento stato: %s", e)
-                self._state = self._empty_state()
+                # Fail-closed (A2): stato corrotto → NIENTE reset silenzioso.
+                # Il file resta intatto e si blocca con intervento manuale:
+                # un reset qui renderebbe il rollback fail-open (si
+                # perderebbe il ledger applied_steps → hardware modificato
+                # senza possibilità di annullamento).
+                raise CheckpointError(
+                    f"Checkpoint corrotto ({self.state_file}): {e}. "
+                    f"Ripristinare da {self.backup_dir} oppure rimuovere "
+                    f"il file SOLO accettando di perdere lo stato salvato."
+                ) from e
         else:
             self._state = self._empty_state()
 
@@ -63,15 +75,23 @@ class CheckpointManager(LoggerMixin):
         }
 
     def save(self) -> None:
-        """Salva lo stato su file (con backup del precedente)."""
+        """Salva lo stato in modo ATOMICO (temp + fsync + replace).
+
+        Il backup del precedente ha timestamp con microsecondi (evita
+        sovrascritture nello stesso secondo).
+        """
         try:
             if self.state_file.exists():
                 backup_path = self.backup_dir / (
-                    f"state_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    f"state_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
                 )
                 shutil.copy2(self.state_file, backup_path)
-            with open(self.state_file, "w", encoding="utf-8") as f:
+            tmp = self.state_file.with_suffix(".json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.state_file)
             self.logger.debug("Stato salvato in %s", self.state_file)
         except Exception as e:
             raise CheckpointError(f"Errore salvataggio checkpoint: {e}")
