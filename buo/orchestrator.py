@@ -184,7 +184,8 @@ class Orchestrator(LoggerMixin):
     # ================================================================== #
 
     def run(self, start_phase: Optional[str] = None,
-            stop_after: Optional[str] = None) -> int:
+            stop_after: Optional[str] = None,
+            restore: Optional[Dict[str, Any]] = None) -> int:
         """
         Esegue il workflow (o un sottoinsieme di fasi).
 
@@ -192,8 +193,21 @@ class Orchestrator(LoggerMixin):
             start_phase: fase da cui partire (default: dal checkpoint)
             stop_after: fermarsi DOPO questa fase (es. comandi fase
                         standalone: probe, undervolt, apply)
+            restore: profilo macchina (G2). Se presente, la fase
+                     'optimize' NON viene rilanciata (auto-tuning):
+                     si riapplicano i punti salvati nel profilo.
         """
         self.logger.info("🚀 Avvio ottimizzazione (BUO v1.0.0)")
+
+        # Modalità RESTORE (G2): riapplica il profilo senza auto-tuning
+        self._restore_mode = restore is not None
+        if restore is not None:
+            optimize_data = restore.get("optimize", {})
+            self.checkpoint.seed_phase("optimize", optimize_data)
+            self.logger.info(
+                "♻️ RESTORE: profilo applicato (%d fix, %s)",
+                len(restore.get("applied_fixes", []) or []),
+                restore.get("created", "data sconosciuta"))
 
         # Esecuzione parziale (comando fase standalone)?
         self._partial_run = start_phase is not None
@@ -286,6 +300,10 @@ class Orchestrator(LoggerMixin):
     # ================================================================== #
 
     def _execute_phase(self, phase: str) -> Dict[str, Any]:
+        if phase == "optimize" and self._restore_mode:
+            # G2: in restore NON si rilancia l'auto-tuning; si riapplicano
+            # i punti salvati nel profilo (già seedati nel checkpoint).
+            return self.checkpoint.get_phase("optimize").get("data", {})
         handlers = {
             "init": self._phase_init,
             "pre_audit": self._phase_pre_audit,
@@ -1122,6 +1140,16 @@ class Orchestrator(LoggerMixin):
         """Genera il report finale e ferma il safety monitor."""
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
+
+        # G2: dopo un run reale completo, auto-esporta il profilo macchina
+        # (così `buo restore` dopo un format trova lo stato più recente).
+        if not self.dry_run and not self.mock:
+            try:
+                from .profile import export_profile
+                path = export_profile()
+                self.logger.info("📦 Profilo macchina salvato: %s", path)
+            except Exception as e:
+                self.logger.warning("Export profilo fallito: %s", e)
 
         if self.dry_run:
             self.results["notes"].append(

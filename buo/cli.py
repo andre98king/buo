@@ -717,6 +717,109 @@ def doctor(json_output: bool, mock: bool) -> None:
         console.print(doctor_.to_text(report))
 
 
+# ------------------------------ restore ------------------------------- #
+
+@cli.command()
+@click.option("--profile", "profile_path", type=click.Path(),
+              default=None, help="File profilo (default: profilo salvato)")
+@click.option("--validate", is_flag=True,
+              help="Esegue anche lo stress test (default: saltato)")
+@click.option("--mock", is_flag=True, help="Usa hardware simulato")
+@click.option("--dry-run", is_flag=True, help="Simula senza modifiche")
+def restore(profile_path, validate: bool, mock: bool, dry_run: bool) -> None:
+    """
+    ♻️ RIPRISTINA lo stato salvato (dopo format o aggiornamento).
+
+    Riapplica: toolchain, fix ACPI, unlock CPU/40 CU, undervolt
+    persistente e governor — usando il PROFILO salvato, senza
+    rilanciare l'auto-tuning. Con --validate esegue anche lo stress.
+    """
+    from pathlib import Path as _Path
+    from .profile import default_profile_path, load_profile
+
+    show_header()
+    path = _Path(profile_path) if profile_path else default_profile_path()
+    try:
+        profile = load_profile(path)
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/]")
+        console.print("[dim]Suggerimento: esegui prima `sudo buo unleash` "
+                      "per creare il profilo, oppure specifica --profile[/]")
+        sys.exit(1)
+
+    console.print(f"[bold]♻️ Restore da profilo:[/] [cyan]{path}[/]")
+    console.print(f"[dim]  creato: {profile.get('created', '?')} — "
+                  f"fix nel profilo: "
+                  f"{len(profile.get('applied_fixes', []) or [])}[/]")
+
+    config = BUOConfig.load()
+    if not validate:
+        config.validation_stress_duration = 0
+        console.print("[dim]  stress test: SALTATO (--validate per eseguirlo)[/]")
+
+    orchestrator = _make_orchestrator(mock, dry_run, False, False,
+                                      config=config)
+    exit_code = orchestrator.run(restore=profile)
+
+    if exit_code == 0:
+        console.print("\n[bold green]✅ RIPRISTINO COMPLETATO — "
+                      "la macchina è tornata allo stato salvato![/]")
+    else:
+        console.print(f"\n[bold red]❌ Ripristino fallito (codice {exit_code})[/]")
+        console.print("[dim]Log: /var/log/buo/buo.log — "
+                      "rollback: sudo buo rollback[/]")
+    sys.exit(exit_code)
+
+
+# ------------------------------ profile ------------------------------- #
+
+@cli.group()
+def profile() -> None:
+    """📦 Profilo macchina: export/import per il ripristino (G2)."""
+
+
+@profile.command("export")
+@click.option("--output", "output_path", type=click.Path(),
+              default=None, help="File di destinazione")
+def profile_export(output_path) -> None:
+    """Esporta il profilo macchina corrente su file JSON."""
+    from pathlib import Path as _Path
+    from .profile import export_profile
+
+    show_header()
+    target = _Path(output_path) if output_path else None
+    prof = export_profile(target)
+    console.print(f"[bold green]✅ Profilo esportato:[/] "
+                  f"[cyan]{target or prof}[/]")
+    console.print(f"[dim]  fix: {len(prof.get('applied_fixes', []) or [])} — "
+                  f"ottimizzazione: "
+                  f"{'presente' if prof.get('optimize') else 'ASSENTE'}[/]")
+
+
+@profile.command("import")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.option("--output", "output_path", type=click.Path(),
+              default=None, help="Dove salvarlo (default: profilo salvato)")
+def profile_import(file_path, output_path) -> None:
+    """Valida e importa un profilo (lo rende il profilo di restore)."""
+    from pathlib import Path as _Path
+    from .profile import default_profile_path, load_profile
+
+    show_header()
+    try:
+        prof = load_profile(_Path(file_path))
+    except ValueError as e:
+        console.print(f"[red]❌ {e}[/]")
+        sys.exit(1)
+    target = _Path(output_path) if output_path else default_profile_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        _Path(file_path).read_text(encoding="utf-8"), encoding="utf-8")
+    console.print(f"[bold green]✅ Profilo importato:[/] [cyan]{target}[/]")
+    console.print(f"[dim]  fix: {len(prof.get('applied_fixes', []) or [])} — "
+                  f"usalo con: sudo buo restore[/]")
+
+
 # ====================================================================== #
 
 def main() -> int:

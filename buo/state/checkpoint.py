@@ -115,6 +115,18 @@ class CheckpointManager(LoggerMixin):
         self._state["current_phase"] = phase
         self.save()
 
+    def seed_phase(self, phase: str, data: Dict[str, Any]) -> None:
+        """Inietta i dati di una fase SENZA salvare su disco (G2 restore).
+
+        Usato da `buo restore` per riapplicare il profilo salvato senza
+        toccare lo stato persistente (e senza violare il dry-run).
+        """
+        self._state.setdefault("phases", {})[phase] = {
+            "completed": True,
+            "timestamp": datetime.now().isoformat(),
+            "data": data,
+        }
+
     def get_phase(self, phase: str) -> Dict[str, Any]:
         return self._state.get("phases", {}).get(phase, {})
 
