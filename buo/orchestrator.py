@@ -62,7 +62,7 @@ OFFLINE_HINT = (
     "--export-bundle bundle.tar.gz\n"
     "  2) copia il file su USB e importalo qui:\n"
     "       sudo buo install-deps --offline /percorso/bundle.tar.gz\n"
-    "  3) oppure imposta deps.offline_bundle in /etc/buo/config.toml "
+    "  3) oppure imposta deps.offline_bundle in /etc/buo/buo.yaml "
     "e riprova: sudo buo unleash\n"
 )
 
