@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased (2026-08-28)
+
+### Corretto
+- 🔴 **40-CU su ostree**: `GPU40CUUnlock` usa ora il **runtime UMR**
+  (`bc250-cu-live-manager`) invece del kernel patch (che su Bazzite/ostree
+  fallisce per `/usr` read-only). Nuovo metodo `persist()` (opt-in).
+- 🔴 `install-deps`: installa la variante **Fedora** di `bc250-enable-40cu.sh`
+  (la generica è Debian-oriented e falliva) + `bc250-cu-live-manager` +
+  `bc250-compute-verify.sh`.
+- `FixVerifier`: aggiunti i checker per `gtt_tuning` (ttm.pages_limit),
+  `fan_control` (nct6683), `vram_config` (manuale) — prima "nessuna
+  verifica definita".
+- Overclock CPU: ora **applica** il punto undervolt validato via
+  `bc250-apply --apply` (volatile, non-blocking). Prima era solo calcolato.
+- Rimossi import inutili (orchestrator, deps, verify, gpu).
+
 ## v1.0.0 (2026-08-27)
 
 ### Aggiunto
