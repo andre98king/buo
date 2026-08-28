@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+# Cwd-indipendente: i path relativi (--exclude-from=.gitignore, sorgenti)
+# valgono rispetto alla radice del repo, da qualunque directory si invochi.
+cd "$(dirname "$0")/.."
+
 VERSION="${1:-1.0.0}"
 DATE="$(date +%Y%m%d)"
 OUT="buo-release-${VERSION}-${DATE}"
