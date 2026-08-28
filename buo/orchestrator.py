@@ -122,7 +122,8 @@ class Orchestrator(LoggerMixin):
         self.dxe_unlock = DXECoreUnlock(mock=eff_mock, mock_hardware=hw)
         self.gpu_unlock = GPU40CUUnlock(mock=eff_mock, mock_hardware=hw,
                                         use_wrapper=not eff_mock)
-        self.health_test = CUHealthTest(mock=eff_mock, mock_hardware=hw)
+        self.health_test = CUHealthTest(mock=eff_mock, mock_hardware=hw,
+                                        max_reboots=self.config.probe_health_reboot_max)
         self.cu_mask = CUMask(mock=eff_mock, mock_hardware=hw)
 
         self.fix_tlb = TLBKernelFix(mock=eff_mock, mock_hardware=hw)
@@ -320,6 +321,11 @@ class Orchestrator(LoggerMixin):
                 hardware=self.hardware,
                 abort_callback=self._safety_abort,
                 vram_estimation=self.config.vram_estimation_enabled,
+                vram_alpha=self.config.vram_alpha,
+                vram_beta=self.config.vram_beta,
+                vram_tau=self.config.vram_tau,
+                vram_warning_threshold=self.config.vram_warning_threshold,
+                vram_critical_threshold=self.config.vram_critical_threshold,
             )
             self.safety_monitor.start()
             self.logger.info("🛡️ Safety monitor avviato (sampling 0.5s)")

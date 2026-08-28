@@ -30,6 +30,20 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover tests -v
 
+  test-extras:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies with optional extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install click rich pyyaml numpy scikit-learn textual
+      - name: Run unit tests (optional deps present)
+        run: python -m unittest discover tests -q
+
   lint:
     runs-on: ubuntu-latest
     steps:

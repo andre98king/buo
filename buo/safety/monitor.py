@@ -68,6 +68,11 @@ class SafetyMonitor(threading.Thread):
         abort_callback: Optional[Callable[[str], None]] = None,
         hardware: Any = None,
         vram_estimation: bool = True,
+        vram_alpha: Optional[float] = None,
+        vram_beta: Optional[float] = None,
+        vram_tau: Optional[float] = None,
+        vram_warning_threshold: Optional[float] = None,
+        vram_critical_threshold: Optional[float] = None,
     ):
         super().__init__(daemon=True)
         self.logger = get_logger("safety")
@@ -96,7 +101,13 @@ class SafetyMonitor(threading.Thread):
         self._vram_enabled = vram_estimation and _HAS_VRAM
         self._vram_estimator = None
         if self._vram_enabled:
-            self._vram_estimator = VRAMTemperatureEstimator()
+            self._vram_estimator = VRAMTemperatureEstimator(
+                alpha=vram_alpha,
+                beta=vram_beta,
+                tau=vram_tau,
+                warning_threshold=vram_warning_threshold,
+                critical_threshold=vram_critical_threshold,
+            )
 
     # ------------------------------------------------------------------ #
 

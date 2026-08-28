@@ -29,3 +29,6 @@ htmlcov/
 
 # Conversazione di progettazione (solo locale)
 reference/
+
+# Script temporanei di monitoraggio
+/tmp-*.sh

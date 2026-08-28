@@ -180,16 +180,16 @@ class TestRecoveryPlan(unittest.TestCase):
         self.assertEqual(plan["phases_completed"], ["unlock"])
         self.assertIn("fix", plan["phases_pending"])
 
-    def test_verify_callback_error_fails_open_to_resume(self):
-        # Logica reale: verified resta None su eccezione → resume
+    def test_verify_callback_error_fails_closed_to_rollback(self):
+        # Fail-closed: un errore di verifica NON riprende, ma avvia il rollback
         def boom(phase):
             raise RuntimeError("probe fallito")
 
         rm = RecoveryManager(checkpoint=self._checkpoint(
             self._interrupted_state()), verify_callback=boom)
         plan = rm.get_recovery_plan()
-        self.assertIsNone(plan["verification"])
-        self.assertEqual(plan["action"], "resume")
+        self.assertFalse(plan["verification"])
+        self.assertEqual(plan["action"], "rollback")
 
     def test_recommend_rollback_text(self):
         rm = RecoveryManager(checkpoint=self._checkpoint(

@@ -55,6 +55,7 @@ class RecoveryManager(LoggerMixin):
                 verified = self.verify_callback(interrupted)
             except Exception as e:
                 self.logger.warning("Verifica fase %s fallita: %s", interrupted, e)
+                verified = False  # fail-closed: verifica fallita -> rollback
 
         return {
             "current_phase": current,
