@@ -19,6 +19,16 @@ from ..utils.paths import state_dir
 
 logger = get_logger("report.dashboard")
 
+
+def _json_for_script(data: Any) -> str:
+    """Encode JSON for safe embedding inside a <script> block."""
+    return (
+        json.dumps(data, ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="it">
 <head>
@@ -134,7 +144,7 @@ def generate_html_dashboard(report_json: Optional[Path] = None) -> Path:
 
     html = HTML_TEMPLATE.format(
         generated=generated,
-        report_json=json.dumps(data, ensure_ascii=False),
+        report_json=_json_for_script(data),
     )
 
     out = path.with_suffix(".html")

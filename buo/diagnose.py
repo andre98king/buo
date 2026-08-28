@@ -84,8 +84,8 @@ class Doctor:
             d = cfg.to_dict()
             report["config"] = {
                 "mode": d["mode"],
-                "psu_wattage": d["psu_wattage"],
-                "cooling_type": d["cooling_type"],
+                "psu_wattage": d["hardware"]["psu_wattage"],
+                "cooling_type": d["hardware"]["cooling_type"],
                 "power_budget": d["safety"]["power_budget"],
                 "auto_install_deps": d["deps"]["auto_install"],
                 "vram_estimation": d["vram_estimation"]["enabled"],

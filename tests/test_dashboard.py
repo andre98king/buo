@@ -48,6 +48,19 @@ class TestDashboard(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             generate_html_dashboard(Path(self._tmp.name) / "nope.json")
 
+    def test_script_payload_is_escaped(self):
+        report = Path(self._tmp.name) / "report.json"
+        data = {
+            "generated_at": "2026-08-27T00:00:00",
+            "performance_gain": {"x": "</script><script>alert(1)</script>"},
+            "problems_found": [],
+        }
+        report.write_text(json.dumps(data), encoding="utf-8")
+        out = generate_html_dashboard(report)
+        html = out.read_text(encoding="utf-8")
+        self.assertNotIn("</script><script>", html)
+        self.assertIn("\\u003c/script\\u003e", html)
+
     def test_output_path_is_sibling(self):
         report = Path(self._tmp.name) / "report.json"
         self._write_report(report)

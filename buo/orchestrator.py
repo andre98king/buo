@@ -112,9 +112,10 @@ class Orchestrator(LoggerMixin):
             self.hardware = MockHardware(seed=1)
         hw = self.hardware if eff_mock else None
 
-        # L'audit resta REALE anche in dry-run: è sola lettura e dà dati veri
-        self.audit = HardwareAudit(mock=self.mock, mock_hardware=self.hardware)
-        self.detector = ProblemDetector(mock=self.mock, mock_hardware=self.hardware)
+        # In dry-run anche i moduli READ-ONLY usano il mock: nessuna lettura
+        # reale di /proc//sys né spawn di glxinfo/systemctl/modinfo.
+        self.audit = HardwareAudit(mock=eff_mock, mock_hardware=hw)
+        self.detector = ProblemDetector(mock=eff_mock, mock_hardware=hw)
 
         self.cpu_unlock = CPUUnlock(mock=eff_mock, mock_hardware=hw,
                                     use_wrapper=not eff_mock)
@@ -138,9 +139,9 @@ class Orchestrator(LoggerMixin):
         self.oc = OverclockOptimizer(mock=eff_mock, mock_hardware=hw)
         self.governor = GovernorWrapper(mock=eff_mock, mock_hardware=hw)
 
-        self.benchmark = BenchmarkRunner(mock=self.mock, mock_hardware=self.hardware)
-        self.stress = StressTest(mock=self.mock, mock_hardware=self.hardware)
-        self.verifier = FixVerifier(mock=self.mock, mock_hardware=self.hardware)
+        self.benchmark = BenchmarkRunner(mock=eff_mock, mock_hardware=hw)
+        self.stress = StressTest(mock=eff_mock, mock_hardware=hw)
+        self.verifier = FixVerifier(mock=eff_mock, mock_hardware=hw)
         self.report = ReportGenerator()
 
     def _register_rollback_handlers(self) -> None:
@@ -354,12 +355,22 @@ class Orchestrator(LoggerMixin):
 
         temps = audit.get("temps", {})
         cpu_t = temps.get("cpu_temp")
-        if cpu_t and cpu_t > LIMITS.cpu.temp_critical - 10:  # > 90°C pre-operativo
+        if cpu_t is None:
+            self.logger.warning(
+                "⚠️ Temperatura CPU non leggibile: il gate termico "
+                "pre-operativo non può verificare il surriscaldamento "
+                "(fail-soft — si procede)")
+        elif cpu_t > LIMITS.cpu.temp_critical - 10:  # > 90°C pre-operativo
             raise SafetyViolation(
                 f"Temperatura CPU attuale {cpu_t:.1f}°C troppo alta per iniziare"
             )
         gpu_t = temps.get("gpu_temp")
-        if gpu_t and gpu_t > LIMITS.gpu.temp_critical - 15:  # > 85°C
+        if gpu_t is None:
+            self.logger.warning(
+                "⚠️ Temperatura GPU non leggibile: il gate termico "
+                "pre-operativo non può verificare il surriscaldamento "
+                "(fail-soft — si procede)")
+        elif gpu_t > LIMITS.gpu.temp_critical - 15:  # > 85°C
             raise SafetyViolation(
                 f"Temperatura GPU attuale {gpu_t:.1f}°C troppo alta per iniziare"
             )

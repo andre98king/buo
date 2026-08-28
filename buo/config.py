@@ -13,6 +13,7 @@ li contiene con valori diversi, vengono ignorati a favore dei limiti
 immutabili (sicurezza assoluta).
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -36,8 +37,13 @@ class BUOConfig:
         self.mode: str = str(data.get("mode", "adaptive"))
 
         # Hardware dichiarato dall'utente
-        self.psu_wattage: int = int(data.get("psu_wattage", 350))
-        self.cooling_type: str = str(data.get("cooling_type", "push-pull"))
+        hardware = data.get("hardware") or {}
+        self.psu_wattage: int = int(
+            hardware.get("psu_wattage", data.get("psu_wattage", 350))
+        )
+        self.cooling_type: str = str(
+            hardware.get("cooling_type", data.get("cooling_type", "push-pull"))
+        )
 
         # ----- Safety: partono dagli hard limits immutabili -----
         # I valori del file YAML NON possono alzare gli hard limits.
@@ -162,15 +168,21 @@ class BUOConfig:
             with open(path, "r", encoding="utf-8") as f:
                 data = _yaml().safe_load(f) or {}
             return cls(data)
-        except Exception:
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Caricamento configurazione fallito da %s (%s): uso i default",
+                path, exc,
+            )
             return cls()
 
     def to_dict(self) -> Dict[str, Any]:
         """Serializza la configurazione (per checkpoint e report)."""
         return {
             "mode": self.mode,
-            "psu_wattage": self.psu_wattage,
-            "cooling_type": self.cooling_type,
+            "hardware": {
+                "psu_wattage": self.psu_wattage,
+                "cooling_type": self.cooling_type,
+            },
             "safety": {
                 "cpu": {
                     "vid_absolute_max": self.cpu_vid_absolute_max,

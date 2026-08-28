@@ -42,9 +42,14 @@ class TestConfig(unittest.TestCase):
         cfg = BUOConfig({"mode": "performance", "psu_wattage": 400})
         d = cfg.to_dict()
         self.assertEqual(d["mode"], "performance")
-        self.assertEqual(d["psu_wattage"], 400)
+        self.assertEqual(d["hardware"]["psu_wattage"], 400)
         # gli hard limits restano immutabili anche nella serializzazione
         self.assertEqual(d["safety"]["cpu"]["vid_absolute_max"], 1325)
+
+    def test_nested_hardware_config(self):
+        cfg = BUOConfig({"hardware": {"psu_wattage": 400}})
+        self.assertEqual(cfg.psu_wattage, 400)
+        self.assertEqual(cfg.cooling_type, "push-pull")
 
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

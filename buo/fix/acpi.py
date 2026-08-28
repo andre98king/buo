@@ -19,6 +19,7 @@ AGGIORNAMENTO (ricerca community, elektricM/amd-bc250-docs):
 
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -133,23 +134,27 @@ class ACPIFix(LoggerMixin):
 
     def _install_cpio(self, aml: Path) -> Dict[str, Any]:
         # initrd override: kernel/firmware/acpi/... → cpio → /boot
-        tmp = Path("/tmp/buo-acpi-ssdt")
-        target = tmp / "kernel/firmware/acpi"
-        target.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(aml, target / aml.name)
+        tmpdir = tempfile.mkdtemp(prefix="buo-acpi-")
+        try:
+            tmp = Path(tmpdir)
+            target = tmp / "kernel/firmware/acpi"
+            target.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(aml, target / aml.name)
 
-        cpio = subprocess.run(
-            ["find", "kernel", "-type", "f"],
-            cwd=str(tmp), capture_output=True, text=True,
-        )
-        result = subprocess.run(
-            ["cpio", "-H", "newc", "--create"],
-            cwd=str(tmp), input=cpio.stdout.encode(),
-            capture_output=True,
-        )
-        shutil.copy2(aml, target / aml.name)  # garantisce presenza
-        with open("/boot/SSDT_ACPI.cpio", "wb") as f:
-            f.write(result.stdout)
+            cpio = subprocess.run(
+                ["find", "kernel", "-type", "f"],
+                cwd=str(tmp), capture_output=True, text=True,
+            )
+            result = subprocess.run(
+                ["cpio", "-H", "newc", "--create"],
+                cwd=str(tmp), input=cpio.stdout.encode(),
+                capture_output=True,
+            )
+            shutil.copy2(aml, target / aml.name)  # garantisce presenza
+            with open("/boot/SSDT_ACPI.cpio", "wb") as f:
+                f.write(result.stdout)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
         return {"applied": True, "method": "cpio", "needs_reboot": True}
 
     # ---------------------------------------------------------------- #

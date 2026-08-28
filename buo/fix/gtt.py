@@ -14,6 +14,8 @@ oppure 4194304 per 16 GiB.
 """
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -56,12 +58,22 @@ class GTTTuning(LoggerMixin):
         )
         try:
             Path("/etc/modprobe.d").mkdir(parents=True, exist_ok=True)
-            rc, out, err = run_command(
-                ["sh", "-c",
-                 f"printf '%s' {shlex_quote(content)} > {GTT_CONF}"],
-                sudo=True)
-            if rc != 0:
-                return {"applied": False, "error": err}
+            # Scrittura diretta (BUO gira da root); se i permessi non lo
+            # consentono si passa da `install` con sudo (nessuna shell).
+            try:
+                Path(GTT_CONF).write_text(content, encoding="utf-8")
+            except OSError:
+                tmpdir = tempfile.mkdtemp(prefix="buo-gtt-")
+                try:
+                    src = Path(tmpdir) / "buo-gtt.conf"
+                    src.write_text(content, encoding="utf-8")
+                    rc, _, err = run_command(
+                        ["install", "-m", "644", str(src), GTT_CONF],
+                        sudo=True)
+                    if rc != 0:
+                        return {"applied": False, "error": err}
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
             return {"applied": True, "pages_limit": self.pages_limit,
                     "needs_reboot": True}
         except Exception as e:
@@ -73,8 +85,3 @@ class GTTTuning(LoggerMixin):
             rc, _, _ = run_command(["rm", "-f", GTT_CONF], sudo=True)
             return rc == 0
         return True
-
-
-def shlex_quote(s: str) -> str:
-    import shlex
-    return shlex.quote(s)

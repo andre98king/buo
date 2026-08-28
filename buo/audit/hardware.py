@@ -70,14 +70,16 @@ class HardwareAudit(LoggerMixin):
                 finally:
                     os.close(fd)
         except Exception as e:
-            self.logger.debug("Lettura maschera core fallita: %s", e)
+            self.logger.warning("Lettura maschera core (SMN) fallita: %s", e)
 
-        # Fallback: nproc / cpuinfo
+        # Fallback: nproc / cpuinfo (solo conteggio; mai inferire "unlocked"
+        # dal cpuinfo: senza la lettura SMN autoritativa lo stato resta
+        # NON verificato).
         cores = self._count_cpuinfo()
         return {
             "core_mask": f"0x{mask:02X}" if mask is not None else None,
             "cores": cores,
-            "unlocked": mask == CORE_MASK_UNLOCKED if mask is not None else (cores >= 8),
+            "unlocked": mask == CORE_MASK_UNLOCKED if mask is not None else None,
         }
 
     @staticmethod
@@ -297,8 +299,9 @@ class HardwareAudit(LoggerMixin):
                         if t.startswith("temp") and t.endswith("_input"):
                             with open(f"{base}/{entry}/{t}") as f:
                                 return int(f.read().strip()) / 1000.0
-        except Exception:
-            pass
+        except Exception as e:
+            self.logger.warning("Sensore hwmon %s/%s non leggibile: %s",
+                                kind, attr, e)
         return None
 
     # --------------------------------------------------------------- #

@@ -141,9 +141,18 @@ class TestDryRunNeverTouchesHardware(unittest.TestCase):
         self.assertTrue(orch.uv_cpu.mock)
         self.assertTrue(orch.uv_gpu.mock)
         self.assertTrue(orch.governor.mock)
+        # Anche i moduli READ-ONLY devono essere in mock in dry-run
+        # (niente letture reali di /proc//sys né glxinfo/systemctl/modinfo)
+        self.assertTrue(orch.audit.mock)
+        self.assertTrue(orch.detector.mock)
+        self.assertTrue(orch.benchmark.mock)
+        self.assertTrue(orch.stress.mock)
+        self.assertTrue(orch.verifier.mock)
 
     def test_mock_run_touches_nothing(self):
         orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=True)
+        # L'audit in dry-run deve essere mock: mai letture hardware reali
+        self.assertTrue(orch.audit.mock, "in dry-run l'audit deve essere mock")
         orch.checkpoint.clear()
         rc = orch.run()
         self.assertEqual(rc, 0)
