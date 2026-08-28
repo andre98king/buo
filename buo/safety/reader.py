@@ -49,7 +49,9 @@ class RealHardwareReader:
                         with open(f"{self._hwmon}/{entry}/{t}") as f:
                             return float(f.read().strip())
         except Exception:
-            pass
+            # Fail-soft con traccia in debug (semantica invariata: None).
+            self.logger.debug("Lettura %s/%s non riuscita (hwmon=%s)",
+                              kind, attr, self._hwmon, exc_info=True)
         return None
 
     # ------------------- API usate dal SafetyMonitor ------------------ #

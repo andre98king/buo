@@ -6,7 +6,9 @@ Coprono:
     • `buo status` senza --mock legge l'hardware REALE (RealHardwareReader),
       mai MockHardware;
     • `buo status --mock` resta simulato (MockHardware);
-    • utente non-root senza stato reale → avviso fail-soft, mai crash.
+    • state dir NON di sistema → avviso fail-soft, mai crash (il warning
+      segue state_dir(), non l'euid);
+    • lettura hardware che solleva → avviso fail-soft, mai crash.
 
 Tutte le letture hardware sono patchate: i test non toccano mai hardware
 reale né /sys/class/hwmon.
@@ -15,6 +17,7 @@ reale né /sys/class/hwmon.
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from click.testing import CliRunner
@@ -120,15 +123,35 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("24/40", result.output)       # default mock: 24 CU
         self.assertNotIn("sudo buo status", result.output)  # niente avviso
 
-    def test_status_non_root_shows_state_warning(self):
-        """Non-root senza stato reale: avviso fail-soft, mai crash."""
+    def test_status_non_system_state_dir_shows_warning(self):
+        """State dir NON di sistema (BUO_STATE_DIR in test): avviso
+        fail-soft, mai crash — l'avviso segue state_dir(), non l'euid."""
         with mock.patch("buo.safety.reader.RealHardwareReader",
-                        return_value=_FakeReader()), \
-                mock.patch("os.geteuid", return_value=1000):
+                        return_value=_FakeReader()):
             result = self._invoke(["status"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("sudo buo status", result.output)  # avviso fail-soft
         self.assertIn("Fase corrente: init", result.output)
+
+    def test_status_system_state_dir_no_warning(self):
+        """State dir di sistema (/var/lib/buo): NESSUN avviso, anche se
+        l'utente non è root — il warning dipende dallo state dir risolto."""
+        with mock.patch("buo.safety.reader.RealHardwareReader",
+                        return_value=_FakeReader()), \
+                mock.patch("buo.utils.paths.state_dir",
+                           return_value=Path("/var/lib/buo")):
+            result = self._invoke(["status"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertNotIn("sudo buo status", result.output)
+
+    def test_status_reader_error_fail_soft(self):
+        """Reader che solleva (es. /sys non leggibile): avviso fail-soft
+        e uscita pulita, mai crash con exit 1."""
+        with mock.patch("buo.safety.reader.RealHardwareReader",
+                        side_effect=OSError("hwmon non leggibile")):
+            result = self._invoke(["status"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Lettura hardware non riuscita", result.output)
 
 
 if __name__ == "__main__":

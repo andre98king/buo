@@ -13,6 +13,10 @@ variabile d'ambiente BUO_STATE_DIR.
 import os
 from pathlib import Path
 
+# Directory di stato di SISTEMA (usata da CLI per capire se lo stato letto
+# è quello reale o un fallback locale: state_dir() == SYSTEM_STATE_DIR).
+SYSTEM_STATE_DIR = Path("/var/lib/buo")
+
 
 def _is_writable(path: Path) -> bool:
     try:
@@ -31,7 +35,7 @@ def state_dir() -> Path:
     if env:
         return Path(env)
 
-    var = Path("/var/lib/buo")
+    var = SYSTEM_STATE_DIR
     if _is_writable(var):
         return var
 

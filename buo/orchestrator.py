@@ -1378,13 +1378,18 @@ class Orchestrator(LoggerMixin):
     # ================================================================== #
 
     def status(self) -> Dict[str, Any]:
-        """Stato corrente (per `buo status`)."""
+        """Stato corrente (per `buo status`).
+
+        `applied_fixes` viene dal checkpoint (applied_steps): `results`
+        è popolato solo durante `run()`, quindi in `buo status` (nuovo
+        Orchestrator) sarebbe sempre vuoto.
+        """
         info = self.hardware.get_system_info() if self.hardware else None
         return {
             "current_phase": self.checkpoint.get_current_phase(),
             "reboot_count": self.checkpoint.get_reboot_count(),
             "hardware": info,
-            "applied_fixes": self.results["applied_fixes"],
+            "applied_fixes": sorted(self._applied_steps()),
         }
 
     def recovery_plan(self) -> Dict[str, Any]:

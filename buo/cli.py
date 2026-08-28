@@ -304,11 +304,15 @@ def status(mock: bool) -> None:
                                       interactive=False, verbose=False)
     info = orchestrator.status()
 
-    # Fase/Reboot: dallo state dir corretto (state_dir(): /var/lib/buo
-    # se root, home altrimenti). Non-root: il valore letto è quello della
-    # home (non lo stato reale) — avviso chiaro, fail-soft, mai crash.
-    if not mock and os.geteuid() != 0:
-        console.print("[yellow]⚠️ Stato dalla home (non root): esegui "
+    # Fase/Reboot: dallo state dir risolto (state_dir(): SYSTEM_STATE_DIR
+    # se scrivibile, altrimenti home). Se NON è quello di sistema, i valori
+    # letti sono quelli locali (non lo stato reale) — avviso chiaro,
+    # fail-soft, mai crash. Il criterio è lo state dir risolto, non l'euid:
+    # root in container può avere /var/lib/buo non scrivibile, e un
+    # BUO_STATE_DIR esplicito vale anche da root.
+    from .utils.paths import SYSTEM_STATE_DIR, state_dir
+    if not mock and state_dir() != SYSTEM_STATE_DIR:
+        console.print("[yellow]⚠️ Stato non di sistema: esegui "
                       "`sudo buo status` per lo stato reale[/]")
     console.print(f"[dim]Fase corrente: {info['current_phase']} | "
                   f"Reboot: {info['reboot_count']}[/]\n")
@@ -316,7 +320,13 @@ def status(mock: bool) -> None:
     if mock:
         hardware = info.get("hardware")
     else:
-        hardware = RealHardwareReader().get_system_info()
+        try:
+            hardware = RealHardwareReader().get_system_info()
+        except Exception as exc:
+            # Fail-soft: lettura hardware anomala (es. /sys non leggibile)
+            # → avviso e uscita pulita, mai crash con exit 1.
+            console.print(f"[yellow]⚠️ Lettura hardware non riuscita: {exc}[/]")
+            return
     if hardware is None:
         console.print("[yellow]⚠️ Nessun hardware rilevato "
                       "(usa --mock per simulare)[/]")

@@ -80,6 +80,16 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(status["current_phase"], "init")
         self.assertIsNotNone(status["hardware"])
 
+    def test_status_applied_fixes_from_checkpoint(self):
+        """status() legge i fix dal checkpoint (applied_steps), MAI da
+        results['applied_fixes'] che fuori da run() è sempre vuoto."""
+        orch = self._make()
+        orch.checkpoint.set("applied_steps", ["gpu_40cu", "cpu_core_unlock"])
+        self.assertEqual(orch.results["applied_fixes"], [])
+        status = orch.status()
+        self.assertEqual(status["applied_fixes"],
+                         ["cpu_core_unlock", "gpu_40cu"])
+
     def test_recovery_plan(self):
         orch = self._make()
         plan = orch.recovery_plan()
