@@ -37,8 +37,8 @@ sudo reboot
 ### Passo 3 — Verifica
 
 ```bash
-ping -c 2 IP_DI_RETE    # dal PC
-ssh utente@IP_DI_RETE   # se preferisci da remoto
+ping -c 2 <IP_BC250>    # dal PC
+ssh <utente>@<IP_BC250> # se preferisci da remoto
 ```
 
 ---

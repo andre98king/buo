@@ -4,12 +4,12 @@
 
 | Versione | Supportata |
 |:---|:---|
-| 1.0.0 (pre-alpha) | ✅ con segnalazioni su GitHub |
+| 1.0.0 | ✅ supportata |
 
-BUO è in fase **pre-alpha**: lo usi sulla tua scheda a tuo rischio.
-È progettato per **modificare parametri hardware** (SMU, frequenze,
-voltaggi, moduli kernel). Leggi sempre `docs/RECOVERY.md`
-prima di eseguirlo su hardware reale.
+BUO è progettato per **modificare parametri hardware reali** (SMU,
+frequenze, voltaggi, moduli kernel). Leggi sempre `docs/RECOVERY.md`
+prima di eseguirlo su hardware reale: un uso scorretto può causare
+instabilità, crash o boot failure.
 
 ## ⚠️ Avvertenze di sicurezza fondamentali
 
@@ -33,11 +33,10 @@ prima di eseguirlo su hardware reale.
 
 Hai trovato un bug di sicurezza (es. un limite scavalcabile, una scrittura
 pericolosa su hardware, una race nel checkpoint)? **Non aprire un issue
-pubblico.** Contattaci in privato:
-
-- Apri un **security advisory** privato su GitHub: tab **Security → Report
-  a vulnerability** (solo per collaboratori del repo) oppure
-- Email al maintainer (vedi `git log` / `pyproject.toml` per il contatto).
+pubblico** per le vulnerabilità: usa la **segnalazione privata** di GitHub
+(tab **Security → Report a vulnerability** / private security advisory sul
+repo, disponibile a chiunque una volta che il repo è pubblico). Per bug
+non sensibili puoi invece aprire un issue normale.
 
 Fornisci: versione BUO, distro (Bazzite/Arch/Fedora), output di
 `buo status`, e i passi per riprodurre. Risponderemo entro 7 giorni.

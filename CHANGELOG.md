@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (2026-08-28, sessione serale)
+## v1.0.0 (2026-08-28)
 
 ### Corretto
 - 🔴 **Fix display 144Hz (Steam Gaming Mode)**: FPS bloccati a 60-70 perché
@@ -18,19 +18,6 @@
   `enabled`+`active`. Quirk documentato: eseguire `install-service` da una
   COPIA dello script (da `/usr/local/bin`, symlink, `install` fallisce con
   "stesso file" e lo script esce senza scrivere l'unità). Bug #24.
-
-### Validato sul campo (28/08 sera)
-- **Gaming**: Marvel Rivals picco 120 FPS con 144Hz; monitoraggio partita
-  (logger 5s via servizio systemd utente): GPU avg 65°C / max 86°C (breve),
-  CPU avg 70°C / max 85°C, potenza GPU max 147W, load max 11.6.
-- **UV GPU confermato attivo**: curva SMU del governor
-  (800/900/1000mV @ 1/1.5/2GHz) + throttle termico 85°C (recupero 75°C).
-- **CPU senza UV** (VID stock, schedutil): l'undervolt CPU resta da fare;
-  i limiti di sicurezza sono già in `buo.yaml` (vid max 1300).
-
-## Unreleased (2026-08-28)
-
-### Corretto
 - 🔴 **40-CU su ostree**: `GPU40CUUnlock` usa ora il **runtime UMR**
   (`bc250-cu-live-manager`) invece del kernel patch (che su Bazzite/ostree
   fallisce per `/usr` read-only). Nuovo metodo `persist()` (opt-in).
@@ -44,7 +31,14 @@
   `bc250-apply --apply` (volatile, non-blocking). Prima era solo calcolato.
 - Rimossi import inutili (orchestrator, deps, verify, gpu).
 
-## v1.0.0 (2026-08-27)
+### Validato sul campo (28/08 sera)
+- **Gaming**: Marvel Rivals picco 120 FPS con 144Hz; monitoraggio partita
+  (logger 5s via servizio systemd utente): GPU avg 65°C / max 86°C (breve),
+  CPU avg 70°C / max 85°C, potenza GPU max 147W, load max 11.6.
+- **UV GPU confermato attivo**: curva SMU del governor
+  (800/900/1000mV @ 1/1.5/2GHz) + throttle termico 85°C (recupero 75°C).
+- **CPU senza UV** (VID stock, schedutil): l'undervolt CPU resta da fare;
+  i limiti di sicurezza sono già in `buo.yaml` (vid max 1300).
 
 ### Aggiunto
 - Orchestratore completo (`unleash`): pre-audit → sblocchi → fix → ottimizzazione → validazione → report
