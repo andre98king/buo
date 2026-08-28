@@ -149,7 +149,7 @@ class Orchestrator(LoggerMixin):
         """Registra i rollback di ogni livello (ordine dal design)."""
         handlers: Dict[str, Callable[[], bool]] = {
             "cpu_overclock": lambda: self._rollback_cpu_overclock(),
-            "gpu_governor": lambda: self.governor.stop() or True,
+            "gpu_governor": lambda: self.governor.stop(),
             "gpu_40cu": lambda: self.gpu_unlock.rollback(),
             "gpu_mask": lambda: self.cu_mask.rollback(),
             "cpu_core_unlock": lambda: self.cpu_unlock.rollback(),

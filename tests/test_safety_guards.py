@@ -22,6 +22,7 @@ from buo.constants import LIMITS
 from buo.exceptions import SafetyViolation
 from buo.safety.limits import SAFETY_LIMITS
 from buo.safety.monitor import SafetyMonitor
+from buo.state.reboot import RebootManager
 from buo.state.recovery import RecoveryManager
 from buo.unlock.dxe import DXECoreUnlock
 from buo.unlock.mask import CUMask
@@ -271,6 +272,17 @@ class TestCUMaskApply(unittest.TestCase):
         result = cm.apply(defective_cu=[2, 3])
         self.assertTrue(result["applied"])
         self.assertEqual(result["mask"], "0x000FFFFF")
+
+
+class TestRebootManagerGuard(unittest.TestCase):
+    """Il comando di ripresa non può iniettare direttive nell'unit systemd."""
+
+    def test_default_command_is_accepted(self):
+        self.assertEqual(RebootManager().resume_command, "buo resume")
+
+    def test_newline_in_command_is_rejected(self):
+        with self.assertRaises(ValueError):
+            RebootManager("buo resume\nExecStart=/tmp/evil")
 
 
 if __name__ == "__main__":

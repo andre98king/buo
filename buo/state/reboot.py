@@ -26,6 +26,9 @@ class RebootManager(LoggerMixin):
     SERVICE_PATH = Path("/etc/systemd/system") / SERVICE_NAME
 
     def __init__(self, resume_command: str = "buo resume"):
+        # Fail-closed: niente newline/control char (iniezione unit systemd).
+        if any(c in resume_command for c in "\r\n\x00"):
+            raise ValueError("resume_command non valido (newline non ammesso)")
         self.resume_command = resume_command
 
     def schedule(self, reason: str = "reboot required",

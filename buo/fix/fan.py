@@ -57,6 +57,6 @@ class FanControl(LoggerMixin):
         return rc == 0 and "nct668" in out
 
     def rollback(self) -> bool:
-        """Rimuove il modulo (se caricato)."""
+        """Rimuove il modulo (se caricato). Non bloccante: riporta l'esito reale."""
         rc, _, _ = run_command(["rmmod", "nct6683"], sudo=True, check=False)
-        return True  # rmmod può fallire se in uso: non bloccante
+        return rc == 0
