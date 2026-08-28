@@ -15,8 +15,18 @@ AGGIORNAMENTO (ricerca community, elektricM/amd-bc250-docs):
     • SSDT-PST (P-States): abilita il frequency scaling 800→3200 MHz via
       cpufreq — CONFERMATO FUNZIONANTE su kernel 6.19.8 (in passato era
       ritenuto "doesn't work"; l'informazione è superata).
+
+AGGIORNAMENTO 2 (metodo CONCATENATO validato sul campo, Bazzite/ostree):
+    il kernel carica le tabelle ACPI dal PRIMO archivio cpio dentro
+    l'initrd. Metodo sicuro su ostree: cpio ACPI + nuovo initramfs
+    concatenati in UN blob (/boot/initramfs-acpi-<ver>.img) e boot entry
+    puntata al blob con UNA sola riga initrd. L'initramfs originale NON
+    viene toccato e la entry viene sempre backup-ata (rollback sicuro).
+    ⚠️ Un cpio SEPARATO scritto su /boot (es. /boot/SSDT_ACPI.cpio) ha
+    causato boot failure su ostree: non usarlo.
 """
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,9 +46,12 @@ class ACPIFix(LoggerMixin):
     """Installa le tabelle ACPI C-State per la BC-250."""
 
     def __init__(self, mock: bool = False, mock_hardware=None,
-                 aml_dir: Optional[str] = None):
+                 aml_dir: Optional[str] = None,
+                 boot_dir: Optional[str] = None):
         self.mock = mock
         self.mock_hw = mock_hardware
+        # Root del boot (ESP): /boot di default, iniettabile nei test
+        self.boot_dir = Path(boot_dir) if boot_dir else Path("/boot")
         # Default: cartella .aml scaricata da `buo install-deps` (se presente)
         if aml_dir is None:
             from ..utils.paths import deps_dir
@@ -54,6 +67,21 @@ class ACPIFix(LoggerMixin):
         """True se le tabelle C-State risultano caricate."""
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.state.is_acpi_fixed
+        if self.distro.initramfs_tool == "ostree":
+            # Metodo concatenato: fix applicato = una boot entry punta a
+            # un nostro blob (initramfs-acpi-*.img) con cpio in testa.
+            loader = self.boot_dir / "loader" / "entries"
+            if not loader.is_dir():
+                return False
+            for entry in sorted(loader.glob("*.conf")):
+                try:
+                    text = entry.read_text(errors="replace")
+                except Exception:
+                    continue
+                m = re.search(r"^initrd\s+(\S+)", text, re.M)
+                if m and self._is_acpi_blob(m.group(1)):
+                    return True
+            return False
         tables = Path("/sys/firmware/acpi/tables")
         if not tables.exists():
             return False
@@ -90,21 +118,9 @@ class ACPIFix(LoggerMixin):
         if self.distro.initramfs_tool == "initramfs-tools":
             return self._install_cpio(aml_cst)
         if self.distro.initramfs_tool == "ostree":
-            # ⚠️ CRITICO (bug trovato sul campo): scrivere SSDT_ACPI.cpio
-            # su /boot di un sistema ostree (Bazzite/SteamOS) ha causato
-            # un BOOT FAILURE (scheda irraggiungibile). Su ostree l'ACPI
-            # fix è MANUALE, con il metodo corretto della community.
-            return {
-                "applied": False,
-                "needs_reboot": False,
-                "warning": (
-                    "ACPI fix su Bazzite/ostree: NON automatizzabile in "
-                    "sicurezza (un cpio scritto su /boot può rompere il "
-                    "boot). Metodo manuale della community: consulta "
-                    "docs/HARDWARE_SETUP.md oppure i repo bc250-acpi-fix / "
-                    "bazzite-bc-250-toolkit."
-                ),
-            }
+            # Bazzite/SteamOS: metodo CONCATENATO validato sul campo
+            # (cpio ACPI + initramfs in un blob, UNA riga initrd).
+            return self._install_ostree()
         return {"applied": False, "error": f"distro non supportata: {self.distro.id}"}
 
     # ------------------------- metodi distro ------------------------- #
@@ -157,12 +173,178 @@ class ACPIFix(LoggerMixin):
             shutil.rmtree(tmpdir, ignore_errors=True)
         return {"applied": True, "method": "cpio", "needs_reboot": True}
 
+    def _install_ostree(self) -> Dict[str, Any]:
+        """Bazzite/ostree: initramfs CONCATENATO (metodo validato).
+
+        cpio ACPI + initramfs in un blob unico → boot entry (systemd-boot)
+        puntata al blob con UNA sola riga initrd. Fail-closed:
+        - entry di default = prima *.conf in ordine alfabetico;
+        - backup della entry prima di ogni modifica;
+        - verifica magic cpio sul blob prima di sostituire la entry;
+        - nessuna modifica se qualcosa non quadra (initramfs assente/
+          troppo piccolo, blob non valido, righe initrd != 1).
+        """
+        if self.aml_dir is None:
+            return {"applied": False, "error": "aml_dir non disponibile"}
+
+        loader = self.boot_dir / "loader" / "entries"
+        if not loader.is_dir():
+            return {"applied": False,
+                    "error": f"directory entries non trovata: {loader}"}
+
+        entries = sorted(loader.glob("*.conf"))
+        if not entries:
+            return {"applied": False, "error": "nessuna boot entry (*.conf)"}
+
+        entry = entries[0]
+        text = entry.read_text(errors="replace")
+        m_linux = re.search(r"^linux\s+(\S+)", text, re.M)
+        m_initrd = re.search(r"^initrd\s+(\S+)", text, re.M)
+        if not m_linux or not m_initrd:
+            return {"applied": False,
+                    "error": f"entry senza righe linux/initrd: {entry.name}"}
+
+        cur_initrd = m_initrd.group(1)
+        # Idempotenza: la entry punta già a un nostro blob valido
+        if self._is_acpi_blob(cur_initrd):
+            return {"applied": True, "method": "ostree-concat",
+                    "needs_reboot": False, "already": True}
+
+        ver = Path(m_linux.group(1)).name.replace("vmlinuz-", "")
+        blob = self.boot_dir / f"initramfs-acpi-{ver}.img"
+        src = self.boot_dir / cur_initrd.lstrip("/")
+        if not src.is_file() or src.stat().st_size < 20 * 1024 * 1024:
+            return {"applied": False,
+                    "error": f"initramfs originale non valido: {src}"}
+
+        cpio_bytes = self._build_acpi_cpio()
+        if not cpio_bytes or len(cpio_bytes) < 64:
+            return {"applied": False, "error": "cpio ACPI non generato (nessun .aml?)"}
+
+        # Concatenazione in temp + rename atomico
+        tmp = blob.with_suffix(".img.tmp")
+        try:
+            with open(tmp, "wb") as f:
+                f.write(cpio_bytes)
+                with open(src, "rb") as fin:
+                    shutil.copyfileobj(fin, f)
+            if not self._is_cpio(tmp):
+                tmp.unlink(missing_ok=True)
+                return {"applied": False, "error": "blob non inizia con magic cpio"}
+        except Exception as e:  # pragma: no cover - difesa I/O
+            tmp.unlink(missing_ok=True)
+            return {"applied": False, "error": f"concatenazione fallita: {e}"}
+        tmp.replace(blob)
+
+        # Backup della entry (timestamp unico)
+        from datetime import datetime
+        backup = entry.with_name(
+            entry.name + f".bak-{datetime.now():%Y%m%d-%H%M%S}")
+        backup.write_text(text)
+
+        # Riscrittura: UNA sola riga initrd verso il blob
+        new_text = re.sub(
+            r"^initrd\s+.*$", f"initrd /initramfs-acpi-{ver}.img",
+            text, flags=re.M)
+        if len(re.findall(r"^initrd\s+(\S+)", new_text, re.M)) != 1:
+            entry.write_text(text)  # rollback immediato
+            blob.unlink(missing_ok=True)
+            return {"applied": False, "error": "verifica riga initrd unica fallita"}
+        entry.write_text(new_text)
+        subprocess.run(["sync"], check=False)
+
+        return {"applied": True, "method": "ostree-concat",
+                "needs_reboot": True, "entry": entry.name, "blob": blob.name}
+
+    def _build_acpi_cpio(self) -> Optional[bytes]:
+        """cpio newc con kernel/firmware/acpi/*.aml — pura Python.
+
+        Nessuna dipendenza esterna (cpio/dracut): l'archivio segue il
+        formato newc ("070701") che il parser initramfs del kernel
+        accetta per le tabelle ACPI (kernel/firmware/acpi/).
+        """
+        amls = sorted(self.aml_dir.glob("*.aml")) if self.aml_dir else []
+        if not amls:
+            return None
+
+        def _header(name: bytes, size: int, ino: int) -> bytes:
+            return b"".join([
+                b"070701",
+                f"{ino:08x}".encode(),      # ino
+                b"000081a4",                # mode 0100644
+                b"00000000",                # uid
+                b"00000000",                # gid
+                b"00000001",                # nlink
+                b"00000000",                # mtime
+                f"{size:08x}".encode(),     # filesize
+                b"00000000",                # devmajor
+                b"00000000",                # devminor
+                b"00000000",                # rdevmajor
+                b"00000000",                # rdevminor
+                f"{len(name) + 1:08x}".encode(),  # namesize (con NUL)
+                b"00000000",                # check
+            ])
+
+        out = bytearray()
+        ino = 1
+        for aml in amls:
+            data = aml.read_bytes()
+            name = f"kernel/firmware/acpi/{aml.name}".encode()
+            out += _header(name, len(data), ino)
+            out += name + b"\x00"
+            while len(out) % 4:
+                out += b"\x00"
+            out += data
+            while len(out) % 4:
+                out += b"\x00"
+            ino += 1
+        trailer = b"TRAILER!!!"
+        out += _header(trailer, 0, ino)
+        out += trailer + b"\x00"
+        while len(out) % 4:
+            out += b"\x00"
+        return bytes(out)
+
+    @staticmethod
+    def _is_cpio(path: Path) -> bool:
+        """Magic del formato cpio newc: '070701'."""
+        try:
+            with open(path, "rb") as f:
+                return f.read(6) == b"070701"
+        except Exception:
+            return False
+
+    def _is_acpi_blob(self, initrd_path: str) -> bool:
+        """True se initrd punta a un nostro blob già concatenato."""
+        name = Path(initrd_path).name
+        if not name.startswith("initramfs-acpi-"):
+            return False
+        blob = self.boot_dir / name
+        return blob.is_file() and self._is_cpio(blob)
+
     # ---------------------------------------------------------------- #
 
     def rollback(self) -> bool:
         """Rimuove le tabelle e ricostruisce l'initramfs."""
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.remove_acpi_fix()
+
+        # ostree: ripristina il backup della boot entry (metodo concatenato)
+        if self.distro.initramfs_tool == "ostree":
+            loader = self.boot_dir / "loader" / "entries"
+            if not loader.is_dir():
+                return False
+            for bak in sorted(loader.glob("*.conf.bak-*"), reverse=True):
+                entry = loader / (bak.name.split(".bak-")[0])
+                if not entry.exists():
+                    continue
+                try:
+                    entry.write_text(bak.read_text(errors="replace"))
+                    return True
+                except Exception as e:  # pragma: no cover
+                    self.logger.error("Rollback ostree fallito per %s: %s",
+                                      entry, e)
+            return False
 
         removed = False
         for path in [

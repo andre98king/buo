@@ -164,24 +164,26 @@ class TestACPIFixSafety(unittest.TestCase):
 
     # ------------------------------ ostree ----------------------------- #
 
-    def test_ostree_refuses_cpio_boot_path(self):
-        """Guard boot-failure: su ostree NIENTE cpio su /boot, stato manuale."""
+    def test_ostree_concatenated_no_cpio_on_boot(self):
+        """Ostree: metodo CONCATENATO (mai cpio separato su /boot).
+
+        Senza entries systemd-boot → fail-closed: applied False, nessun
+        cpio scritto su /boot, nessuna esecuzione esterna.
+        """
         subprocess_run = mock.MagicMock()
-        mocked_open = mock.mock_open()
-        with mock.patch("buo.fix.acpi.detect_distro",
+        with tempfile.TemporaryDirectory() as boot_td, \
+             mock.patch("buo.fix.acpi.detect_distro",
                         return_value=self._distro("ostree", "bazzite")), \
-             mock.patch("buo.fix.acpi.subprocess.run", subprocess_run), \
-             mock.patch("builtins.open", mocked_open):
-            fix = ACPIFix(mock=False, aml_dir=str(self.aml_dir))
+             mock.patch("buo.fix.acpi.subprocess.run", subprocess_run):
+            fix = ACPIFix(mock=False, aml_dir=str(self.aml_dir),
+                          boot_dir=boot_td)
             result = fix.apply()
 
         self.assertFalse(result["applied"])
-        self.assertFalse(result["needs_reboot"])
-        self.assertIn("warning", result)
-        self.assertIn("NON automatizzabile", result["warning"])
-        # il guard boot-failure: nessun cpio generato e nessun file su /boot
+        self.assertIn("entries", result["error"])
+        # guard boot-failure: nessun cpio separato su /boot
+        self.assertFalse((Path(boot_td) / "SSDT_ACPI.cpio").exists())
         subprocess_run.assert_not_called()
-        mocked_open.assert_not_called()
 
     # ------------------------------ dracut ----------------------------- #
 
