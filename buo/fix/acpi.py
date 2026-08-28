@@ -410,6 +410,9 @@ class ACPIFix(LoggerMixin):
         for path in [
             Path("/etc/initcpio/acpi_override"),
             Path("/etc/dracut.conf.d/acpi"),
+            # A5: la conf dracut scritta da apply() referenzia i file
+            # rimossi: senza rimuoverla il rollback resterebbe rotto
+            Path("/etc/dracut.conf.d/buo-acpi-override.conf"),
             Path("/boot/SSDT_ACPI.cpio"),
         ]:
             if path.exists():
@@ -421,6 +424,18 @@ class ACPIFix(LoggerMixin):
                     removed = True
                 except Exception as e:
                     self.logger.error("Errore rimozione %s: %s", path, e)
+
+        # A5: mkinitcpio — ripristina la riga HOOKS=(acpi_override …)
+        mkinit = Path("/etc/mkinitcpio.conf")
+        if mkinit.exists():
+            try:
+                content = mkinit.read_text(errors="replace")
+                if "acpi_override" in content:
+                    mkinit.write_text(
+                        content.replace("HOOKS=(acpi_override ", "HOOKS=("))
+                    removed = True
+            except Exception as e:
+                self.logger.error("Ripristino mkinitcpio fallito: %s", e)
 
         self.distro.rebuild_initramfs()
         return removed

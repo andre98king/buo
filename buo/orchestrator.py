@@ -199,6 +199,13 @@ class Orchestrator(LoggerMixin):
         """
         self.logger.info("🚀 Avvio ottimizzazione (BUO v1.0.0)")
 
+        # A6: lock anti-esecuzione-concorrente (solo run reali). Due
+        # istanze simultanee corromperebbero stato e ledger. Il flock
+        # viene rilasciato automaticamente dal kernel alla chiusura del
+        # processo (anche su crash).
+        if not self.dry_run and not self.mock:
+            self._acquire_lock()
+
         # Modalità RESTORE (G2): riapplica il profilo senza auto-tuning
         self._restore_mode = restore is not None
         if restore is not None:
@@ -283,6 +290,23 @@ class Orchestrator(LoggerMixin):
             import traceback
             self.logger.debug(traceback.format_exc())
             return EXIT_ERROR
+
+    def _acquire_lock(self) -> None:
+        """A6: flock non bloccante sulla dir di stato (anti-concorrenza).
+
+        Se un'altra istanza è in esecuzione → RuntimeError immediato
+        (niente doppie scritture hardware / stato corrotto).
+        """
+        import fcntl
+        from .utils.paths import state_dir
+        state_dir().mkdir(parents=True, exist_ok=True)
+        self._lock_fd = open(state_dir() / "buo.lock", "w", encoding="utf-8")
+        try:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise RuntimeError(
+                "Un'altra istanza di buo è già in esecuzione "
+                "(stato bloccato: attendere o chiudere l'altra istanza).")
 
     def _next_phase(self, current: str) -> str:
         idx = PHASES.index(current)
