@@ -46,15 +46,13 @@ class TestAcpiRollbackCompleteness(unittest.TestCase):
 
     def test_mkinitcpio_hooks_restored(self):
         fix = self._fix("mkinitcpio")
-        written = {}
+        written_content = []
 
-        def fake_read(self_, *a, **k):
-            if str(self_) == "/etc/mkinitcpio.conf":
-                return "HOOKS=(acpi_override base udev)\n"
-            return ""
+        def fake_read(*a, **k):
+            return "HOOKS=(acpi_override base udev)\n"
 
-        def fake_write(self_, content):
-            written[str(self_)] = content
+        def fake_write(*a, **k):
+            written_content.append(a[0] if a else k.get("content", ""))
 
         with mock.patch.object(fix.distro, "rebuild_initramfs"), \
              mock.patch("buo.fix.acpi.Path.exists", return_value=True), \
@@ -65,7 +63,8 @@ class TestAcpiRollbackCompleteness(unittest.TestCase):
              mock.patch("buo.fix.acpi.Path.write_text",
                         mock.Mock(side_effect=fake_write)):
             fix.rollback()
-        content = written.get("/etc/mkinitcpio.conf", "")
+        self.assertTrue(written_content)
+        content = written_content[0]
         self.assertIn("HOOKS=(base udev)", content)
         self.assertNotIn("acpi_override", content)
 
