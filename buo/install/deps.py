@@ -34,63 +34,104 @@ from ..utils.shell import run_command, which
 # Binari attesi (destinazioni)
 BIN_DIR_SYSTEM = "/usr/local/bin"
 
-# ---------------------------------------------------------------------------
-# Catalogo delle dipendenze (repo + file da installare)
-# ---------------------------------------------------------------------------
 
-DEPS: List[Dict[str, Any]] = [
-    {
-        "name": "bc250_smu_oc",
-        "repo": "https://github.com/bc250-collective/bc250_smu_oc",
-        "type": "scripts",
-        "required_for": "undervolt CPU (fail-closed senza questo tool)",
-        "files": [
-            {"src": "bc250_detect.py", "dest": "bc250-detect", "exec": True},
-            {"src": "bc250_apply.py", "dest": "bc250-apply", "exec": True},
-            # bc250_detect importa stress_helper e la libreria bc250_smu:
-            # senza di loro lo script fallisce subito (bug trovato sul campo)
-            {"src": "bc250_limits.py", "dest": "bc250_limits.py", "exec": False},
-            {"src": "stress_helper.py", "dest": "stress_helper.py", "exec": False},
-        ],
-        "copy_dirs": [
-            {"src": "bc250_smu", "dest": "bc250_smu"},
-        ],
-    },
-    {
-        "name": "bc250-40cu-unlock",
-        "repo": "https://github.com/duggasco/bc250-40cu-unlock",
-        "type": "scripts",
-        "required_for": "unlock GPU 40-CU, health test, maschera",
-        "files": [
-            {"src": "scripts/bc250-enable-40cu.sh",
-             "dest": "bc250-enable-40cu.sh", "exec": True},
-            {"src": "scripts/bc250-cu-health-test.sh",
-             "dest": "bc250-cu-health-test.sh", "exec": True},
-            {"src": "scripts/bc250-cu-mask.sh",
-             "dest": "bc250-cu-mask.sh", "exec": True},
-        ],
-    },
-    {
-        "name": "bc250-acpi-fix",
-        "repo": "https://github.com/bc250-collective/bc250-acpi-fix",
-        "type": "aml",
-        "required_for": "tabelle ACPI C-State (risparmio energetico idle)",
-        "files": [{"src": "SSDT-CST.aml", "dest": None, "exec": False}],
-    },
-    {
-        "name": "cyan-skillfish-governor",
-        "repo": "https://github.com/filippor/cyan-skillfish-governor",
-        "type": "instruct",
-        "required_for": "governor GPU dinamico (SMU)",
-        "files": [],
-        "note": (
-            "Servizio distro-specifico: su Fedora/Bazzite usa il COPR o "
-            "lo script di evdokim/bazzite-bc-250-governor, su Arch l'AUR "
-            "cyan-skillfish-governor-smu. BUO lo clona ma non esegue "
-            "installer di terze parti senza conferma."
-        ),
-    },
-]
+def _distro_id() -> str:
+    """id distro (fedora/bazzite/arch/debian...) con fallback robusto."""
+    try:
+        from ..utils.distro import detect_distro
+        d = detect_distro()
+        return getattr(d, "id", "") or ""
+    except Exception:
+        return ""
+
+
+def _40cu_files() -> List[Dict[str, Any]]:
+    """File dello script 40-CU corretti per la distro.
+
+    Bug sul campo (28/08/2026): la variante GENERICA di
+    bc250-enable-40cu.sh è Debian-oriented (usa apt per i sorgenti kernel)
+    e fallisce su Fedora/Bazzite. Su Fedora serve la variante -fedora
+    (build contro kernel-devel). Su OSTREE il kernel patch NON funziona
+    (/usr read-only): le 40 CU vanno via runtime UMR (bc250-cu-live-manager).
+    """
+    fedora_like = _distro_id() in ("fedora", "bazzite", "rhel", "centos")
+    enable_src = ("scripts/bc250-enable-40cu-fedora.sh" if fedora_like
+                  else "scripts/bc250-enable-40cu.sh")
+    return [
+        {"src": enable_src, "dest": "bc250-enable-40cu.sh", "exec": True},
+        {"src": "scripts/bc250-cu-health-test.sh",
+         "dest": "bc250-cu-health-test.sh", "exec": True},
+        {"src": "scripts/bc250-cu-mask.sh",
+         "dest": "bc250-cu-mask.sh", "exec": True},
+        {"src": "scripts/bc250-compute-verify.sh",
+         "dest": "bc250-compute-verify.sh", "exec": True},
+    ]
+
+
+def _build_deps() -> List[Dict[str, Any]]:
+    """Catalogo delle dipendenze (con selezione distro-aware per la 40-CU)."""
+    return [
+        {
+            "name": "bc250_smu_oc",
+            "repo": "https://github.com/bc250-collective/bc250_smu_oc",
+            "type": "scripts",
+            "required_for": "undervolt CPU (fail-closed senza questo tool)",
+            "files": [
+                {"src": "bc250_detect.py", "dest": "bc250-detect", "exec": True},
+                {"src": "bc250_apply.py", "dest": "bc250-apply", "exec": True},
+                # bc250_detect importa stress_helper e la libreria bc250_smu:
+                # senza di loro lo script fallisce subito (bug sul campo)
+                {"src": "bc250_limits.py", "dest": "bc250_limits.py", "exec": False},
+                {"src": "stress_helper.py", "dest": "stress_helper.py", "exec": False},
+            ],
+            "copy_dirs": [
+                {"src": "bc250_smu", "dest": "bc250_smu"},
+            ],
+        },
+        {
+            "name": "bc250-40cu-unlock",
+            "repo": "https://github.com/duggasco/bc250-40cu-unlock",
+            "type": "scripts",
+            "required_for": "unlock GPU 40-CU (kernel patch, non-ostree), "
+                           "health test, maschera, verifier",
+            "files": _40cu_files(),
+        },
+        {
+            "name": "bc250-cu-live-manager",
+            "repo": "https://github.com/WinnieLV/bc250-cu-live-manager",
+            "type": "scripts",
+            "required_for": "40-CU runtime UMR su ostree (il kernel patch "
+                           "non funziona: /usr read-only). Richiede anche "
+                           "umr (rpm-ostree install umr).",
+            "files": [
+                {"src": "bc250-cu-live-manager.sh",
+                 "dest": "bc250-cu-live-manager", "exec": True},
+            ],
+        },
+        {
+            "name": "bc250-acpi-fix",
+            "repo": "https://github.com/bc250-collective/bc250-acpi-fix",
+            "type": "aml",
+            "required_for": "tabelle ACPI C-State (risparmio energetico idle)",
+            "files": [{"src": "SSDT-CST.aml", "dest": None, "exec": False}],
+        },
+        {
+            "name": "cyan-skillfish-governor",
+            "repo": "https://github.com/filippor/cyan-skillfish-governor",
+            "type": "instruct",
+            "required_for": "governor GPU dinamico (SMU)",
+            "files": [],
+            "note": (
+                "Servizio distro-specifico: su Fedora/Bazzite usa il COPR o "
+                "lo script di evdokim/bazzite-bc-250-governor, su Arch l'AUR "
+                "cyan-skillfish-governor-smu. BUO lo clona ma non esegue "
+                "installer di terze parti senza conferma."
+            ),
+        },
+    ]
+
+
+DEPS: List[Dict[str, Any]] = _build_deps()
 
 
 class DependencyManager(LoggerMixin):
