@@ -23,6 +23,15 @@ ENTRY_TEXT = (
 INITRAMFS_SIZE = 20 * 1024 * 1024 + 100  # > soglia 20MB
 
 
+def _aml(sig: bytes = b"SSDT", size: int = 36) -> bytes:
+    """Header ACPI minimale valido (A4): signature + lunghezza."""
+    data = bytearray(36)
+    data[0:4] = sig
+    data[4:8] = size.to_bytes(4, "little")
+    data[8] = 1  # revision
+    return bytes(data)
+
+
 class TestAcpiOstreeConcat(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -31,8 +40,8 @@ class TestAcpiOstreeConcat(unittest.TestCase):
         self.entries.mkdir(parents=True)
         self.aml = self.root / "aml"
         self.aml.mkdir()
-        (self.aml / "SSDT-CST.aml").write_bytes(b"AML-CST-DATA")
-        (self.aml / "SSDT-PST.aml").write_bytes(b"AML-PST-DATA")
+        (self.aml / "SSDT-CST.aml").write_bytes(_aml())
+        (self.aml / "SSDT-PST.aml").write_bytes(_aml())
         self.initramfs = self.root / f"initramfs-{KERNEL}.img"
         self.initramfs.write_bytes(b"X" * INITRAMFS_SIZE)
         self.entry = self.entries / "ostree-1.conf"
@@ -168,6 +177,31 @@ class TestAcpiOstreeConcat(unittest.TestCase):
                         side_effect=lambda *a, **k: ""):
             entry = self.fix._default_entry(self.entries)
         self.assertEqual(entry.name, "ostree-0.conf")
+
+
+    # ---------------- validazione .aml (A4) ---------------- #
+
+    def test_invalid_aml_skipped(self):
+        """AML con header non valido → scartato, il cpio usa i validi."""
+        (self.aml / "SSDT-ROTT.aml").write_bytes(b"NOT-AN-AML!!!")
+        cpio = self.fix._build_acpi_cpio()
+        self.assertTrue(cpio)
+        self.assertNotIn(b"SSDT-ROTT", cpio)
+        self.assertIn(b"SSDT-CST", cpio)
+
+    def test_all_invalid_aml_fails_closed(self):
+        for f in self.aml.glob("*.aml"):
+            f.unlink()
+        (self.aml / "SSDT-BAD.aml").write_bytes(b"XXXX" + b"\x00" * 32)
+        out = self.fix.apply()
+        self.assertFalse(out["applied"])
+        self.assertEqual(self.entry.read_text(), ENTRY_TEXT)
+
+    def test_valid_aml_helper_contract(self):
+        self.assertTrue(self.fix._valid_aml(_aml()))
+        self.assertFalse(self.fix._valid_aml(b"AML-CST-DATA"))
+        self.assertFalse(self.fix._valid_aml(b"XXXX" + b"\x00" * 32))
+        self.assertFalse(self.fix._valid_aml(b""))
 
 
 if __name__ == "__main__":

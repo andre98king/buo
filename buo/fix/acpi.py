@@ -298,6 +298,20 @@ class ACPIFix(LoggerMixin):
         return {"applied": True, "method": "ostree-concat",
                 "needs_reboot": True, "entry": entry.name, "blob": blob.name}
 
+    @staticmethod
+    def _valid_aml(data: bytes) -> bool:
+        """Validazione ACPI table header (A4): signature SSDT/DSDT +
+        lunghezza dichiarata coerente. Un .aml corrotto/malevolo finirebbe
+        nell'initramfs ed essere interpretato dal kernel con privilegi
+        massimi: si accettano SOLO file validi."""
+        if len(data) < 36:
+            return False
+        sig = data[:4]
+        if sig not in (b"SSDT", b"DSDT"):
+            return False
+        declared = int.from_bytes(data[4:8], "little")
+        return 36 <= declared <= len(data)
+
     def _build_acpi_cpio(self) -> Optional[bytes]:
         """cpio newc con kernel/firmware/acpi/*.aml — pura Python.
 
@@ -331,6 +345,10 @@ class ACPIFix(LoggerMixin):
         ino = 1
         for aml in amls:
             data = aml.read_bytes()
+            if not self._valid_aml(data):
+                self.logger.warning(
+                    "ACPI: %s scartato (header AML non valido)", aml.name)
+                continue
             name = f"kernel/firmware/acpi/{aml.name}".encode()
             out += _header(name, len(data), ino)
             out += name + b"\x00"
