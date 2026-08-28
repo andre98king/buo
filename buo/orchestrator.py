@@ -983,19 +983,23 @@ class Orchestrator(LoggerMixin):
                 cpu_freq,
                 scale=best.get("scale"),
                 vid=best.get("vid"),
+                persist=self.config.undervolt_persist,
             )
 
         return results
 
     def _apply_cpu_config(self, freq: int, scale: Optional[int] = None,
-                          vid: Optional[int] = None) -> Dict[str, Any]:
-        """Applica il punto CPU (undervolt validato) — VOLATILE.
+                          vid: Optional[int] = None,
+                          persist: bool = False) -> Dict[str, Any]:
+        """Applica il punto CPU (undervolt validato).
 
         Scrive overclock.conf e lo applica con `bc250-apply --apply`
-        (NON --install: niente persistenza, nessun servizio). Il punto
-        deve essere già stato validato da bc250-detect. Fail-closed ma
-        NON bloccante: se lo script manca o fallisce, logga e continua
-        (l'undervolt è un guadagno, non un requisito di sicurezza).
+        (VOLATILE). Con persist=True esegue anche `bc250-apply --install`
+        (G3): il profilo viene applicato automaticamente a ogni boot —
+        è ciò che fa sopravvivere l'undervolt a un riavvio/format.
+        Fail-closed ma NON bloccante: se lo script manca o fallisce,
+        logga e continua (l'undervolt è un guadagno, non un requisito
+        di sicurezza).
         """
         if self.dry_run:
             self.logger.info("CPU config: [DRY-RUN] simulata")
@@ -1031,10 +1035,27 @@ class Orchestrator(LoggerMixin):
             if result["returncode"] != 0:
                 return {"applied": False,
                         "error": (result.get("stderr") or "apply fallito")[:200]}
-            self.logger.info("✅ CPU config applicata: %d MHz, scale %d "
-                             "(volatile)", f, s)
-            return {"applied": True, "freq": f, "scale": s,
-                    "method": "bc250-apply (volatile)"}
+            out: Dict[str, Any] = {
+                "applied": True, "freq": f, "scale": s,
+                "method": "bc250-apply (volatile)",
+            }
+            if persist:
+                inst = w.install(str(conf))
+                if inst.get("returncode") == 0:
+                    out["persistent"] = True
+                    out["method"] = "bc250-apply --apply + --install"
+                    self.logger.info(
+                        "♻️ Undervolt PERSISTENTE installato: %d MHz, "
+                        "scale %d (riapplicato a ogni boot)", f, s)
+                else:
+                    out["persistent"] = False
+                    out["persist_error"] = (
+                        (inst.get("stderr") or "install fallito")[:200])
+                    self.logger.warning(
+                        "Persistenza undervolt NON riuscita: %s",
+                        out["persist_error"])
+            self.logger.info("✅ CPU config applicata: %d MHz, scale %d", f, s)
+            return out
         except Exception as e:
             self.logger.warning("CPU config non applicata: %s", e)
             return {"applied": False, "error": str(e)[:200]}

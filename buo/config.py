@@ -107,6 +107,10 @@ class BUOConfig:
 
         undervolt = phases.get("undervolt", {})
         self.undervolt_gpu_start_freq: int = int(undervolt.get("gpu_start_freq", 1200))
+        # G3: rende PERSISTENTE l'undervolt al boot (bc250-apply --install).
+        # Default ON: "BUO si occupa di tutto" — il profilo deve sopravvivere
+        # al reboot, altrimenti dopo un riavvio la CPU torna a tensione stock.
+        self.undervolt_persist: bool = bool(undervolt.get("persist", True))
 
         overclock = phases.get("overclock", {})
         self.overclock_enable: bool = bool(overclock.get("enable", True))
