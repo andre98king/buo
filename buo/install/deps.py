@@ -27,21 +27,33 @@ SICUREZZA:
 """
 
 import hashlib
+import io
 import json
 import os
 import shlex
 import stat
 import shutil
+import tarfile
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from .. import __version__
 from ..utils.logging import LoggerMixin
 from ..utils.paths import deps_dir
 from ..utils.shell import run_command, which
 
 # Binari attesi (destinazioni)
 BIN_DIR_SYSTEM = "/usr/local/bin"
+
+# Formato del bundle offline (design: DESIGN_OFFLINE_DEPS.md sez. 3.3)
+BUNDLE_FORMAT = "buo-bundle"
+BUNDLE_VERSION = 1
+# Tipi di dipendenza che vivono in un checkout git (clonabili/bundlati);
+# i `package` (governor/umr) NON si bundlano MAI.
+BUNDLE_TYPES = ("scripts", "aml", "build")
 
 
 def _distro_id() -> str:
@@ -198,6 +210,10 @@ class DependencyManager(LoggerMixin):
     def __init__(self, bin_dir: str = BIN_DIR_SYSTEM):
         self.bin_dir = Path(bin_dir)
         self.base_dir = deps_dir()
+        # Nomi dei repo la cui verifica è già avvenuta via import del bundle
+        # offline (tree-hash + commit): su macchine senza git il riuso di
+        # questi checkout non richiede una nuova verifica git.
+        self._bundle_imported: Set[str] = set()
 
     # ------------------------------------------------------------------ #
 
@@ -275,25 +291,51 @@ class DependencyManager(LoggerMixin):
     # ------------------------------------------------------------------ #
 
     def install(self, deps: Optional[List[str]] = None,
-                sudo: bool = True) -> Dict[str, Any]:
+                sudo: bool = True,
+                offline_bundle: Optional[Union[str, Path]] = None
+                ) -> Dict[str, Any]:
         """
         Clona le repo mancanti e installa gli script.
+
+        Se `offline_bundle` è dato e servono tool git-based mancanti, il
+        bundle viene importato e verificato PRIMA del calcolo di needs_git
+        (i repo soddisfatti dal bundle non richiedono git). Se l'import
+        fallisce → {"_error": ...} (fail-closed, niente installato).
 
         Returns:
             {name: {"status": "ok"|"skipped"|"failed", "detail": str}}
         """
-        # git serve SOLO per le dipendenze clonate (scripts/aml): i
-        # package (governor, umr) si installano col package manager della
-        # distro e non devono essere bloccati da un git assente.
+        if offline_bundle:
+            # Import solo se serve: se i tool git-based ci sono già tutti,
+            # il bundle non viene toccato (mai import inutile).
+            git_based_missing = any(
+                dep["type"] in BUNDLE_TYPES
+                and not self._check_one(dep)["present"]
+                for dep in DEPS
+                if deps is None or dep["name"] in deps
+            )
+            if git_based_missing:
+                res = self.import_bundle(offline_bundle)
+                if res["status"] != "ok":
+                    return {"_error": res["detail"]}
+
+        # git serve SOLO per CLONARE i checkout mancanti (scripts/aml/build):
+        # i package (governor, umr) si installano col package manager della
+        # distro e non devono essere bloccati da un git assente. Un checkout
+        # GIÀ presente (riuso o bundle offline) non richiede git. Fix bug
+        # latente: il tipo "build" (bc250_memcfg) clona via git ma oggi era
+        # escluso dal gate → errore confuso a metà clone.
         needs_git = any(
-            dep["type"] in ("scripts", "aml")
+            dep["type"] in BUNDLE_TYPES
             and not self._check_one(dep)["present"]
+            and not (self.base_dir / dep["name"]).exists()
             for dep in DEPS
             if deps is None or dep["name"] in deps
         )
         if needs_git and which("git") is None:
             return {"_error": "git non trovato: installalo con il package "
-                              "manager della distro"}
+                              "manager della distro, oppure usa un bundle "
+                              "offline (buo install-deps --offline <file>)"}
 
         self.base_dir.mkdir(parents=True, exist_ok=True)
         result: Dict[str, Any] = {}
@@ -388,28 +430,31 @@ class DependencyManager(LoggerMixin):
                 if rc != 0:
                     return {"status": "failed",
                             "detail": f"checkout commit fallito: {err[:200]}"}
-                rc, out, err = run_command(
-                    ["git", "-C", str(checkout), "rev-parse", "HEAD"],
-                    timeout=60)
-                resolved = out.strip() if out else ""
-                if rc != 0 or resolved != commit:
-                    self.logger.error("commit inatteso: atteso=%s reale=%r",
-                                      commit, resolved)
-                    return {"status": "failed",
-                            "detail": "verifica commit fallita"}
-                # A7: il checkout deve essere PULITO (nessuna modifica
-                # locale): un clone manomesso non deve passare inosservato.
-                rc, out, _ = run_command(
-                    ["git", "-C", str(checkout), "status", "--porcelain"],
-                    timeout=60)
-                if rc != 0 or out.strip():
-                    return {"status": "failed",
-                            "detail": "checkout modificato localmente "
-                                      "(possibile tampering)"}
+                # A7: verifica commit + pulizia (rev-parse == atteso, status
+                # --porcelain vuoto): il clone fresco è sempre VERIFICATO.
+                err_verify = self._verify_checkout(dep, checkout)
+                if err_verify is not None:
+                    return {"status": "failed", "detail": err_verify}
                 self.logger.info("checkout %s pinnato su %s",
-                                 dep["name"], resolved)
-            elif not (checkout / ".git").exists():
-                return {"status": "failed", "detail": "checkout corrotto"}
+                                 dep["name"], dep["commit"])
+            elif (dep["name"] in self._bundle_imported
+                  and which("git") is None):
+                # Checkout appena importato da un bundle offline verificato
+                # (tree-hash + commit già controllati in import_bundle) su
+                # una macchina senza git: nessuna verifica git richiesta.
+                self.logger.info("checkout %s importato dal bundle offline "
+                                 "(verificato in import)", dep["name"])
+            else:
+                # Riuso del checkout esistente: A7 — il commit e la pulizia
+                # vanno VERIFICATI anche qui (buco chiuso: prima il riuso
+                # non verificava il commit atteso).
+                err_verify = self._verify_checkout(dep, checkout)
+                if err_verify is not None:
+                    return {"status": "failed",
+                            "detail": f"checkout esistente non valido: "
+                                      f"{err_verify}"}
+                self.logger.info("checkout %s riusato e verificato su %s",
+                                 dep["name"], dep["commit"])
         except Exception as e:
             return {"status": "failed", "detail": f"clone in errore: {e}"}
 
@@ -638,6 +683,353 @@ class DependencyManager(LoggerMixin):
                             encoding="utf-8")
         except Exception:
             pass  # il record hash non deve mai bloccare l'installazione
+
+    # ------------------------------------------------------------------ #
+    # Offline bundle (design: DESIGN_OFFLINE_DEPS.md)
+    # ------------------------------------------------------------------ #
+
+    def _verify_checkout(self, dep: Dict[str, Any],
+                         checkout: Path) -> Optional[str]:
+        """Verifica A7 di un checkout: .git presente, git rev-parse HEAD ==
+        dep['commit'], git status --porcelain vuoto.
+
+        Returns: None se ok, altrimenti messaggio di errore (fail-closed).
+        """
+        commit = dep.get("commit")
+        if not commit:
+            return f"{dep['name']}: nessun commit pinnato nel catalogo"
+        if not checkout.exists() or not (checkout / ".git").exists():
+            return f"{dep['name']}: checkout corrotto (manca .git)"
+        if which("git") is None:
+            return (f"{dep['name']}: git non disponibile — impossibile "
+                    f"verificare il checkout")
+        try:
+            rc, out, err = run_command(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                timeout=60)
+            resolved = out.strip() if out else ""
+            if rc != 0 or resolved != commit:
+                self.logger.error("commit inatteso: atteso=%s reale=%r",
+                                  commit, resolved)
+                return f"{dep['name']}: verifica commit fallita"
+            rc, out, _ = run_command(
+                ["git", "-C", str(checkout), "status", "--porcelain"],
+                timeout=60)
+            if rc != 0 or out.strip():
+                return (f"{dep['name']}: checkout modificato localmente "
+                        f"(possibile tampering)")
+        except Exception as e:
+            return f"{dep['name']}: verifica checkout in errore: {e}"
+        return None
+
+    @staticmethod
+    def _tree_sha256(root: Path) -> str:
+        """Hash deterministico dell'albero di lavoro di un checkout (ignora .git).
+
+        Input per ogni entry: relpath (sorted), modalità (stat.S_IMODE), e
+        contenuto (file) o target (symlink). Copre symlink legittimi nei repo.
+        """
+        entries: List[Tuple[str, int, Any]] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            base = Path(dirpath)
+            for name in filenames:
+                p = base / name
+                try:
+                    rel = p.relative_to(root)
+                    st = p.lstat()
+                except (OSError, ValueError):
+                    continue
+                if ".git" in rel.parts:
+                    continue
+                mode = stat.S_IMODE(st.st_mode)
+                if stat.S_ISLNK(st.st_mode):
+                    try:
+                        entries.append((str(rel), mode, os.readlink(p)))
+                    except OSError:
+                        continue
+                elif stat.S_ISREG(st.st_mode):
+                    try:
+                        entries.append((str(rel), mode, p.read_bytes()))
+                    except OSError:
+                        continue
+        h = hashlib.sha256()
+        for rel, mode, payload in sorted(entries, key=lambda e: e[0]):
+            h.update(rel.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(str(mode).encode("ascii"))
+            h.update(b"\x00")
+            h.update(payload if isinstance(payload, bytes)
+                     else payload.encode("utf-8"))
+            h.update(b"\x00")
+        return h.hexdigest()
+
+    @staticmethod
+    def _read_bundle_manifest(bundle: Path) -> Optional[Dict[str, Any]]:
+        """Legge 'buo-bundle.json' dal tarball senza estrarlo; None se invalido."""
+        try:
+            with tarfile.open(str(bundle), "r:gz") as tar:
+                member = tar.getmember("buo-bundle.json")
+                if not member.isfile():
+                    return None
+                f = tar.extractfile(member)
+                if f is None:
+                    return None
+                data = json.loads(f.read().decode("utf-8"))
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def export_bundle(self, dest: Union[str, Path],
+                      deps: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Crea il bundle offline dei checkout pinnati.
+
+        Fail-closed: se UN solo checkout manca, non è al commit atteso o non
+        è pulito → status "failed" con l'elenco, NESSUN file scritto (export
+        = solo copie di checkout già VERIFICATI, mai materiale non verificato).
+
+        Returns:
+            {"status": "ok", "path": str, "sha256": str}
+            | {"status": "failed", "detail": str}
+        """
+        dest = Path(dest)
+        repos = [d for d in DEPS
+                 if d["type"] in BUNDLE_TYPES
+                 and (deps is None or d["name"] in deps)]
+
+        # Fase 1: verifica TUTTI i checkout prima di scrivere qualsiasi cosa.
+        verified: Dict[str, Tuple[Dict[str, Any], Path]] = {}
+        problems: List[str] = []
+        for dep in repos:
+            checkout = self.base_dir / dep["name"]
+            if not checkout.exists():
+                problems.append(f"{dep['name']}: checkout mancante")
+                continue
+            err = self._verify_checkout(dep, checkout)
+            if err is not None:
+                problems.append(err)
+                continue
+            verified[dep["name"]] = (dep, checkout)
+        if problems:
+            return {"status": "failed",
+                    "detail": "checkout non verificabili: "
+                              + "; ".join(problems)}
+
+        # Fase 2: crea il tarball in un file temporaneo, poi move atomico.
+        tmp_path: Optional[Path] = None
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix="buo-bundle-",
+                                            suffix=".tar.gz",
+                                            dir=str(dest.parent))
+            os.close(fd)
+            tmp_path = Path(tmp_name)
+            with tarfile.open(str(tmp_path), "w:gz") as tar:
+                manifest = {
+                    "format": BUNDLE_FORMAT,
+                    "version": BUNDLE_VERSION,
+                    "buo_version": __version__,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "deps": {},
+                }
+                for name in sorted(verified):
+                    dep, checkout = verified[name]
+                    manifest["deps"][name] = {
+                        "repo": dep["repo"],
+                        "commit": dep["commit"],
+                        "tree_sha256": self._tree_sha256(checkout),
+                    }
+                payload = json.dumps(manifest, indent=2,
+                                     ensure_ascii=False).encode("utf-8")
+                info = tarfile.TarInfo("buo-bundle.json")
+                info.size = len(payload)
+                info.mtime = int(time.time())
+                tar.addfile(info, io.BytesIO(payload))
+                # checkout COMPLETI, incluso .git (shallow, pochi MB)
+                for name in sorted(verified):
+                    _, checkout = verified[name]
+                    tar.add(str(checkout), arcname=f"checkouts/{name}")
+            shutil.move(str(tmp_path), str(dest))
+            tmp_path = None
+        except Exception as e:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
+            return {"status": "failed",
+                    "detail": f"export bundle fallito: {e}"}
+        sha = hashlib.sha256(dest.read_bytes()).hexdigest()
+        return {"status": "ok", "path": str(dest), "sha256": sha}
+
+    def import_bundle(self, bundle: Union[str, Path]) -> Dict[str, Any]:
+        """Importa e VERIFICA un bundle in deps_dir (solo checkout: non installa).
+
+        Due fasi fail-closed: (1) verifica TUTTO — tarball valido, manifest
+        conforme, commit attesi == catalogo, completezza, estrazione sicura,
+        tree-hash, git se disponibile, conflitti con deps_dir — senza toccare
+        nulla; (2) solo se tutto ok → sposta i checkout verificati in deps_dir.
+
+        Returns:
+            {"status": "ok", "imported": [nomi...], "detail": str}
+            | {"status": "failed", "detail": str}
+        """
+        bundle = Path(bundle)
+        # check 1 — tarball valido
+        try:
+            tar = tarfile.open(str(bundle), "r:gz")
+        except Exception:
+            return {"status": "failed",
+                    "detail": f"{bundle}: non è un bundle BUO valido"}
+        with tar:
+            # check 2 — manifest presente e conforme
+            manifest = self._read_bundle_manifest(bundle)
+            if manifest is None:
+                return {"status": "failed",
+                        "detail": "manifest assente o non valido: "
+                                  "non è un bundle BUO valido"}
+            if (manifest.get("format") != BUNDLE_FORMAT
+                    or manifest.get("version") != BUNDLE_VERSION):
+                return {"status": "failed",
+                        "detail": "bundle generato da una versione BUO non "
+                                  "supportata (format/version non riconosciuti)"}
+            m_deps = manifest.get("deps")
+            if not isinstance(m_deps, dict) or not m_deps:
+                return {"status": "failed", "detail": "manifest senza repo"}
+
+            catalog = {d["name"]: d for d in DEPS
+                       if d["type"] in BUNDLE_TYPES}
+            # check 3 — commit attesi == catalogo (mai abbassare il pin)
+            for name, entry in m_deps.items():
+                dep = catalog.get(name)
+                if dep is None:
+                    return {"status": "failed",
+                            "detail": f"repo sconosciuto nel bundle: {name}"}
+                if (not isinstance(entry, dict)
+                        or entry.get("commit") != dep["commit"]):
+                    return {"status": "failed",
+                            "detail": (
+                                f"bundle obsoleto: atteso {dep['commit']} per "
+                                f"{name}, bundle ha "
+                                f"{entry.get('commit') if isinstance(entry, dict) else '?'}. "
+                                "Rigenera il bundle con: sudo buo install-deps "
+                                "--export-bundle <file> su una macchina con rete")}
+            # check 4 — completezza: ogni repo del catalogo DEVE esserci
+            for name in catalog:
+                if name not in m_deps:
+                    return {"status": "failed",
+                            "detail": f"bundle parziale: manca {name}. "
+                                      "Rigenera il bundle completo con: sudo "
+                                      "buo install-deps --export-bundle <file>"}
+
+            # check 5-6-7 — staging sicuro + tree-hash + git (se disponibile)
+            staging = Path(tempfile.mkdtemp(prefix="buo-bundle-import-"))
+            try:
+                err = self._extract_bundle(tar, m_deps, staging)
+                if err is not None:
+                    return {"status": "failed", "detail": err}
+                for name, entry in m_deps.items():
+                    checkout = staging / "checkouts" / name
+                    if not checkout.is_dir():
+                        return {"status": "failed",
+                                "detail": f"bundle incompleto: manca il "
+                                          f"checkout di {name}"}
+                    actual = self._tree_sha256(checkout)
+                    if actual != entry.get("tree_sha256"):
+                        return {"status": "failed",
+                                "detail": f"bundle corrotto o manomesso "
+                                          f"(tree hash non corrisponde per {name})"}
+                if which("git") is not None:
+                    for name in m_deps:
+                        dep = catalog[name]
+                        checkout = staging / "checkouts" / name
+                        err = self._verify_checkout(dep, checkout)
+                        if err is not None:
+                            return {"status": "failed",
+                                    "detail": f"checkout {name} non verificato: {err}"}
+
+                # check 8 — conflitti con deps_dir (pre-scan PRIMA di ogni move)
+                self.base_dir.mkdir(parents=True, exist_ok=True)
+                for name, entry in m_deps.items():
+                    dest = self.base_dir / name
+                    if dest.exists() and not self._checkout_matches(
+                            dest, catalog[name], entry.get("tree_sha256")):
+                        return {"status": "failed",
+                                "detail": (
+                                    f"checkout esistente in deps_dir in conflitto "
+                                    f"per {name}: commit diverso o non "
+                                    f"verificabile — rimuovilo manualmente o "
+                                    f"rigenera il bundle")}
+
+                # check 9 — applicazione: move atomico dei soli assenti
+                imported: List[str] = []
+                for name in sorted(m_deps):
+                    dest = self.base_dir / name
+                    if dest.exists():
+                        continue
+                    shutil.move(str(staging / "checkouts" / name), str(dest))
+                    imported.append(name)
+                # i checkout verificati (importati o già presenti) sono
+                # riusabili senza git nel giro di install() di questa run
+                self._bundle_imported.update(m_deps.keys())
+                detail = ("checkout importati: " + ", ".join(imported)
+                          if imported else "tutti i checkout già presenti")
+                return {"status": "ok", "imported": imported, "detail": detail}
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
+    def _extract_bundle(self, tar: tarfile.TarFile, m_deps: Dict[str, Any],
+                        staging: Path) -> Optional[str]:
+        """Estrae in staging i membri sotto checkouts/<nome-in-manifest>.
+
+        Fail-closed: path assoluti, componenti '..' o percorsi che
+        attraversano un symlink già estratto → rifiuto dell'intero import.
+        I membri fuori dall'allowlist (il manifest) sono ignorati con
+        warning, mai installati né eseguiti.
+        """
+        known = set(m_deps.keys())
+        for member in tar.getmembers():
+            name = member.name
+            parts = name.split("/")
+            if name.startswith("/") or ".." in parts:
+                return (f"bundle non sicuro: member con path non consentito "
+                        f"({name}) — import rifiutato")
+            if name == "buo-bundle.json":
+                continue  # già letto e verificato
+            if len(parts) < 2 or parts[0] != "checkouts" or parts[1] not in known:
+                self.logger.warning(
+                    "bundle: membro ignorato (fuori dall'allowlist del "
+                    "manifest): %s", name)
+                continue
+            if not (member.isdir() or member.isreg() or member.issym()):
+                return (f"bundle non sicuro: member di tipo non supportato "
+                        f"({name}) — import rifiutato")
+            # nessun componente del percorso può essere un symlink già
+            # estratto (evita scrittura fuori da staging attraverso symlink)
+            cur = staging
+            for part in parts[:-1]:
+                cur = cur / part
+                if cur.is_symlink():
+                    return (f"bundle non sicuro: symlink nel percorso di "
+                            f"{name} — import rifiutato")
+            try:
+                tar.extract(member, path=str(staging))
+            except Exception as e:
+                return f"estrazione fallita: {e}"
+        return None
+
+    def _checkout_matches(self, checkout: Path, dep: Dict[str, Any],
+                          tree_sha256: Optional[str]) -> bool:
+        """True se un checkout già in deps_dir è verificato allo stesso
+        commit (idempotenza → skip); False se in conflitto/non verificabile."""
+        if which("git") is None:
+            if not tree_sha256:
+                return False
+            try:
+                return self._tree_sha256(checkout) == tree_sha256
+            except Exception:
+                return False
+        return self._verify_checkout(dep, checkout) is None
 
     def summary(self, status: Dict[str, Any]) -> str:
         """Riepilogo leggibile dello stato delle dipendenze."""

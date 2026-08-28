@@ -137,6 +137,8 @@ class BUOConfig:
         self.deps_auto_install_governor: bool = bool(
             deps.get("auto_install_governor", True)
         )
+        # Bundle offline dei checkout (fallback senza rete): vuoto = nessuno.
+        self.deps_offline_bundle: str = str(deps.get("offline_bundle") or "")
 
     # ------------------------------------------------------------------ #
 
@@ -224,6 +226,7 @@ class BUOConfig:
             "deps": {
                 "auto_install": self.deps_auto_install,
                 "auto_install_governor": self.deps_auto_install_governor,
+                "offline_bundle": self.deps_offline_bundle,
             },
         }
 

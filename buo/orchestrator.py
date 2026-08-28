@@ -54,6 +54,18 @@ from .utils.mock import MockHardware
 from .validate.stress import StressTest
 from .validate.verify import FixVerifier
 
+# Istruzioni esatte per il fallback offline quando il download dei tool
+# fallisce senza rete/bundle (design: DESIGN_OFFLINE_DEPS.md sez. 2).
+OFFLINE_HINT = (
+    " Controlla la connessione e `git`, oppure usa il bundle offline:\n"
+    "  1) su una macchina CON rete:   sudo buo install-deps "
+    "--export-bundle bundle.tar.gz\n"
+    "  2) copia il file su USB e importalo qui:\n"
+    "       sudo buo install-deps --offline /percorso/bundle.tar.gz\n"
+    "  3) oppure imposta deps.offline_bundle in /etc/buo/config.toml "
+    "e riprova: sudo buo unleash\n"
+)
+
 
 class Orchestrator(LoggerMixin):
     """Macchina a stati principale di BUO."""
@@ -63,13 +75,17 @@ class Orchestrator(LoggerMixin):
                  dry_run: bool = False,
                  interactive: bool = False,
                  mock_hardware: Optional[MockHardware] = None,
-                 log_level: str = "INFO"):
+                 log_level: str = "INFO",
+                 offline_bundle: Optional[str] = None):
         setup_logging(level=log_level)
 
         self.config = config or BUOConfig.load()
         self.mock = mock
         self.dry_run = dry_run
         self.interactive = interactive
+        # Bundle offline dei checkout (flag CLI; ha precedenza sulla config
+        # deps.offline_bundle). Mai importato in mock/dry-run.
+        self.offline_bundle = offline_bundle
 
         # Hardware (mock o reale)
         self.hardware = mock_hardware or (MockHardware() if mock else None)
@@ -639,18 +655,22 @@ class Orchestrator(LoggerMixin):
                 pass
 
         # Installa SOLO ciò che manca (e che è abilitato): senza il filtro,
-        # il governor disabilitato verrebbe installato comunque.
-        result = manager.install(deps=missing)
+        # il governor disabilitato verrebbe installato comunque. Il bundle
+        # offline (flag CLI o config deps.offline_bundle) viene importato da
+        # install() PRIMA del giro normale, se servono tool git-based.
+        bundle = self.offline_bundle or self.config.deps_offline_bundle or None
+        result = manager.install(deps=missing, offline_bundle=bundle)
         if "_error" in result:
             raise ConfigurationError(
                 f"Download automatico non possibile: {result['_error']}"
+                + ("" if bundle else OFFLINE_HINT)
             )
         failed = [n for n, s in result.items() if s.get("status") == "failed"]
         if failed:
             raise ConfigurationError(
                 "Impossibile scaricare i tool necessari: "
-                f"{', '.join(failed)}. Controlla la connessione/`git` "
-                "oppure esegui manualmente: sudo buo install-deps"
+                f"{', '.join(failed)}."
+                + ("" if bundle else OFFLINE_HINT)
             )
         self.logger.info("✅ Tool scaricati e installati automaticamente")
 

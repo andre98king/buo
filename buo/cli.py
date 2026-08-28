@@ -57,7 +57,8 @@ console = Console()
 
 def _make_orchestrator(mock: bool, dry_run: bool,
                        interactive: bool, verbose: bool,
-                       config: Optional[BUOConfig] = None):
+                       config: Optional[BUOConfig] = None,
+                       offline_bundle: Optional[str] = None):
     from .orchestrator import Orchestrator
     if config is None:
         config = BUOConfig.load()
@@ -67,6 +68,7 @@ def _make_orchestrator(mock: bool, dry_run: bool,
         dry_run=dry_run,
         interactive=interactive,
         log_level="DEBUG" if verbose else "INFO",
+        offline_bundle=offline_bundle,
     )
 
 
@@ -122,8 +124,12 @@ def cli() -> None:
 @click.option("--skip-validation", is_flag=True, help="Salta lo stress test")
 @click.option("--quick", is_flag=True,
               help="Solo undervolt/overclock (senza fix kernel)")
+@click.option("--offline-bundle", type=click.Path(), default=None,
+              help="Bundle offline dei checkout: importato PRIMA "
+                   "dell'auto-install se servono tool git-based mancanti")
 def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
-            skip_benchmark: bool, skip_validation: bool, quick: bool) -> None:
+            skip_benchmark: bool, skip_validation: bool, quick: bool,
+            offline_bundle: Optional[str]) -> None:
     """
     🚀 Comando principale: analizza → sblocca → ottimizza → valida → report.
 
@@ -150,7 +156,8 @@ def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
         config.fix_fan = False
 
     orchestrator = _make_orchestrator(mock, dry_run, interactive, verbose,
-                                      config=config)
+                                      config=config,
+                                      offline_bundle=offline_bundle)
     exit_code = orchestrator.run()
 
     if exit_code == 0:
@@ -679,7 +686,15 @@ def safety_test(mock: bool) -> None:
 @cli.command("install-deps")
 @click.option("--check", "only_check", is_flag=True,
               help="Solo verifica, senza scaricare nulla")
-def install_deps(only_check: bool) -> None:
+@click.option("--export-bundle", "export_bundle_path", type=click.Path(),
+              default=None,
+              help="Crea un bundle offline dei checkout verificati "
+                   "(nessuna installazione)")
+@click.option("--offline", "offline_bundle", type=click.Path(),
+              default=None,
+              help="Importa e verifica un bundle offline, poi installa")
+def install_deps(only_check: bool, export_bundle_path: Optional[str],
+                 offline_bundle: Optional[str]) -> None:
     """
     📥 Scarica e installa i tool della community (repo mancanti).
 
@@ -687,11 +702,35 @@ def install_deps(only_check: bool) -> None:
     (GPU 40-CU/health/mask), bc250-acpi-fix (tabelle ACPI). Il governor
     (cyan-skillfish-governor-smu) e umr vengono installati come pacchetti
     dal package manager della distro (COPR/AUR), mai da installer esterni.
+
+    Senza rete: genera un bundle su una macchina connessa
+    (--export-bundle), copialo su USB e importalo qui (--offline).
     """
+    if export_bundle_path and offline_bundle:
+        raise click.UsageError(
+            "--export-bundle e --offline si escludono a vicenda: "
+            "usa uno alla volta")
+    if only_check and (export_bundle_path or offline_bundle):
+        raise click.UsageError(
+            "--check è sola lettura: non combina con "
+            "--export-bundle/--offline")
+
     show_header()
     from .install.deps import DependencyManager
 
     manager = DependencyManager()
+
+    if export_bundle_path:
+        res = manager.export_bundle(export_bundle_path)
+        if res["status"] != "ok":
+            console.print(f"[red]❌ Export bundle fallito: "
+                          f"{res['detail']}[/]")
+            sys.exit(1)
+        console.print(f"[bold green]✅ Bundle offline creato: "
+                      f"{res['path']}[/]")
+        console.print(f"[dim]SHA-256: {res['sha256']} "
+                      f"(verifica con: sha256sum {res['path']})[/]")
+        sys.exit(0)
 
     if only_check:
         status = manager.check()
@@ -708,9 +747,12 @@ def install_deps(only_check: bool) -> None:
             console.print("\n[bold green]✅ Tutte le dipendenze presenti[/]")
         sys.exit(0 if not missing else 1)
 
-    console.print("[dim]📥 Download delle repo della community "
-                  "(clone shallow)...[/]\n")
-    result = manager.install()
+    if offline_bundle:
+        console.print("[dim]📦 Import del bundle offline e installazione...[/]\n")
+    else:
+        console.print("[dim]📥 Download delle repo della community "
+                      "(clone shallow)...[/]\n")
+    result = manager.install(offline_bundle=offline_bundle)
     if "_error" in result:
         console.print(f"[red]❌ {result['_error']}[/]")
         sys.exit(1)
@@ -723,7 +765,8 @@ def install_deps(only_check: bool) -> None:
         console.print("\n[red]❌ Installazione non riuscita per: "
                       f"{', '.join(failed)}[/]")
         console.print("[dim]Controlla la connessione e che git sia "
-                      "installato[/]")
+                      "installato, oppure usa --offline con un bundle "
+                      "generato su una macchina con rete[/]")
         sys.exit(1)
     console.print("\n[bold green]✅ Dipendenze installate — ora puoi "
                   "eseguire: sudo buo unleash[/]")

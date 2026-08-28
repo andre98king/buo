@@ -67,6 +67,31 @@ class TestCLISmoke(unittest.TestCase):
         # 0 = tutto presente, 1 = manca qualcosa: entrambi validi
         self.assertIn(result.exit_code, (0, 1))
 
+    def test_install_deps_offline_missing_file(self):
+        result = self._invoke(["install-deps", "--offline",
+                               "/nonexistent/bundle.tar.gz"])
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("bundle", result.output)
+
+    def test_install_deps_export_and_offline_mutually_exclusive(self):
+        result = self._invoke(["install-deps",
+                               "--export-bundle", "/tmp/x.tar.gz",
+                               "--offline", "/tmp/y.tar.gz"])
+        self.assertEqual(result.exit_code, 2)  # UsageError
+        self.assertIn("uno alla volta", result.output)
+
+    def test_install_deps_check_and_offline_conflict(self):
+        result = self._invoke(["install-deps", "--check",
+                               "--offline", "/tmp/y.tar.gz"])
+        self.assertEqual(result.exit_code, 2)  # UsageError
+
+    def test_unleash_offline_bundle_mock_no_import(self):
+        # in --mock mai import: il path inesistente non deve mai essere
+        # toccato (se lo fosse, l'import fallirebbe con exit != 0)
+        result = self._invoke(["unleash", "--mock",
+                               "--offline-bundle", "/nonexistent/bundle.tar.gz"])
+        self.assertEqual(result.exit_code, 0)
+
     def test_tui_without_textual(self):
         """Senza textual, `buo tui` esce con codice 1 e messaggio chiaro."""
         import importlib.util

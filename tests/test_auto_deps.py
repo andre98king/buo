@@ -107,7 +107,7 @@ class TestAutoDeps(unittest.TestCase):
             return {d["name"]: {"present": False, "type": d["type"]}
                     for d in deps_module.DEPS}
 
-        def fake_install(self, deps=None, sudo=True):
+        def fake_install(self, deps=None, sudo=True, offline_bundle=None):
             called.append(deps)
             return {d["name"]: {"status": "ok"} for d in deps_module.DEPS}
 
@@ -135,7 +135,7 @@ class TestAutoDeps(unittest.TestCase):
             return {d["name"]: {"present": False, "type": d["type"]}
                     for d in deps_module.DEPS}
 
-        def fake_install(self, deps=None, sudo=True):
+        def fake_install(self, deps=None, sudo=True, offline_bundle=None):
             called.append(deps)
             return {d["name"]: {"status": "ok"} for d in deps_module.DEPS}
 
