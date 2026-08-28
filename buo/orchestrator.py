@@ -317,8 +317,9 @@ class Orchestrator(LoggerMixin):
 
         # Avvia il safety monitor (sempre attivo durante l'esecuzione)
         if not self.dry_run and not self.mock:
+            from .safety.reader import RealHardwareReader
             self.safety_monitor = SafetyMonitor(
-                hardware=self.hardware,
+                hardware=RealHardwareReader(),  # C1: letture REALI, mai fittizie
                 abort_callback=self._safety_abort,
                 vram_estimation=self.config.vram_estimation_enabled,
                 vram_alpha=self.config.vram_alpha,

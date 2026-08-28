@@ -248,10 +248,12 @@ def safety_monitor(mock: bool) -> None:
     """🛡️ Avvia SOLO il safety monitor (letture ogni 0.5s, Ctrl+C per uscire)."""
     import time
     from .safety.monitor import SafetyMonitor
+    from .safety.reader import RealHardwareReader
     from .utils.mock import MockHardware
 
     show_header()
-    hw = MockHardware() if mock else None
+    # C1: in modalità reale letture REALI (hwmon), mai valori fittizi
+    hw = MockHardware() if mock else RealHardwareReader()
     monitor = SafetyMonitor(hardware=hw, abort_callback=lambda r: None,
                             vram_estimation=False)
     monitor.start()
@@ -260,12 +262,14 @@ def safety_monitor(mock: bool) -> None:
         while True:
             readings = monitor.get_last_readings()
             if readings is not None:
+                def _fmt(v, unit, digits=1):
+                    return f"{v:.{digits}f}{unit}" if v is not None else "?"
                 console.print(
-                    f"\rCPU {readings.cpu_temp:.1f}°C | "
-                    f"GPU {readings.gpu_temp:.1f}°C | "
-                    f"VID {readings.cpu_vid}mV | "
-                    f"VGPU {readings.gpu_voltage}mV | "
-                    f"P {readings.total_power:.1f}W" + " " * 10,
+                    f"\rCPU {_fmt(readings.cpu_temp, '°C')} | "
+                    f"GPU {_fmt(readings.gpu_temp, '°C')} | "
+                    f"VID {_fmt(readings.cpu_vid, 'mV', 0)} | "
+                    f"VGPU {_fmt(readings.gpu_voltage, 'mV', 0)} | "
+                    f"P {_fmt(readings.total_power, 'W')}" + " " * 10,
                     end="")
             time.sleep(0.5)
     except KeyboardInterrupt:

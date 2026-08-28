@@ -73,6 +73,57 @@ class TestSafetyMonitor(unittest.TestCase):
         monitor.join(timeout=2)
         self.assertFalse(monitor.is_alive())
 
+    # --------------------- C1: letture None/real reader ----------------- #
+
+    class _BlindReader:
+        """Nessun sensore leggibile → tutto None (fail-visible)."""
+
+        def get_cpu_temp(self):
+            return None
+
+        def get_cpu_vid(self):
+            return None
+
+        def get_gpu_temp(self):
+            return None
+
+        def get_gpu_voltage(self):
+            return None
+
+        def get_gpu_power(self):
+            return None
+
+        def get_total_power(self):
+            return None
+
+    def test_none_readings_no_crash_no_violation(self):
+        violations = []
+        monitor = self._run_monitor(self._BlindReader(), violations)
+        self.assertEqual(violations, [])
+        readings = monitor.get_last_readings()
+        self.assertIsNotNone(readings)
+        self.assertIsNone(readings.cpu_temp)
+
+    def test_reader_temp_over_limit_triggers(self):
+        class HotReader(self._BlindReader):
+            def get_cpu_temp(self):
+                return 99.0
+
+        violations = []
+        self._run_monitor(HotReader(), violations)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("CPU Temp", violations[0])
+
+    def test_reader_vid_over_hard_limit_triggers(self):
+        class HighVidReader(self._BlindReader):
+            def get_cpu_vid(self):
+                return 1400
+
+        violations = []
+        self._run_monitor(HighVidReader(), violations)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("HARD", violations[0])
+
 
 if __name__ == "__main__":
     unittest.main()
