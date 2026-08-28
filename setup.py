@@ -25,7 +25,11 @@ setup(
         "pyyaml>=6.0",
     ],
     extras_require={
-        "ml": ["numpy>=1.24", "scikit-learn>=1.0"],
+        "ml": ["numpy>=1.24", "scikit-learn>=1.0", "joblib>=1.0"],
+        "tui": ["textual>=0.60"],
+        "upload": ["requests>=2.0"],
+        "banner": ["pyfiglet>=0.8"],
+        "inference": ["onnxruntime>=1.14"],
         "dev": ["pytest>=7.0"],
     },
     entry_points={

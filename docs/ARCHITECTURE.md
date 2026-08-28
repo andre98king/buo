@@ -24,7 +24,7 @@ ordine inverso rispetto all'applicazione).
 | Modulo | Responsabilità |
 |:---|:---|
 | `orchestrator.py` | Macchina a stati, coordinamento fasi |
-| `cli.py` | CLI (click + rich): unleash, status, probe, undervolt, overclock, apply, rollback, recover, resume, report, config, benchmark, safety-test, safety-monitor, install-deps, data-collect, data-upload, ml-train, tui |
+| `cli.py` | CLI (click + rich): unleash, status, probe, undervolt, overclock, apply, rollback, recover, resume, report, config, benchmark, safety-test, safety-monitor, install-deps, data-collect, data-upload, ml-train, tui, doctor |
 | `constants.py` | Hard limits immutabili, registri SMN/SMU, percorsi |
 | `config.py` | Configurazione YAML (limiti non sovrascrivibili) |
 | `audit/` | Discovery hardware + rilevamento problemi noti |

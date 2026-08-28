@@ -230,7 +230,7 @@ class VRAMMLModel:
     """
     Modello ML opzionale (Random Forest) per la stima VRAM.
 
-    Richiede: numpy, pandas, scikit-learn. Se mancano, il modello
+    Richiede: numpy, scikit-learn. Se mancano, il modello
     non è utilizzabile ma BUO continua con il modello empirico.
     """
 

@@ -13,7 +13,6 @@ sono sovrascrivibili da file di configurazione utente.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Any
 
 
 # ============================================================================
@@ -135,11 +134,6 @@ LOG_FILE = LOG_DIR + "/buo.log"
 BACKUP_DIR = STATE_DIR + "/backups"
 
 # Percorsi degli script esterni della community (default)
-SCRIPT_UNLOCK = "/usr/local/bin/bc250-unlock-cores.py"
-SCRIPT_40CU = "/usr/local/bin/bc250-enable-40cu.sh"
-SCRIPT_HEALTH = "/usr/local/bin/bc250-cu-health-test.sh"
-SCRIPT_MASK = "/usr/local/bin/bc250-cu-mask.sh"
-SCRIPT_DETECT = "/usr/local/bin/bc250-detect"
 SCRIPT_APPLY = "/usr/local/bin/bc250-apply"
 GOVERNOR_SERVICE = "cyan-skillfish-governor-smu"
 GOVERNOR_CONFIG = "/etc/cyan-skillfish-governor-smu/config.toml"
@@ -193,27 +187,3 @@ EXIT_SAFETY_VIOLATION = 20
 EXIT_HARDWARE_ERROR = 30
 EXIT_TIMEOUT = 40
 EXIT_REBOOT = 50
-
-
-def limits_to_dict() -> Dict[str, Any]:
-    """Serializza i limiti hardware (per report e log)."""
-    return {
-        "cpu": {
-            "vid_absolute_max": LIMITS.cpu.vid_absolute_max,
-            "vid_recommended_max": LIMITS.cpu.vid_recommended_max,
-            "temp_max": LIMITS.cpu.temp_max,
-            "freq_max": LIMITS.cpu.freq_max,
-        },
-        "gpu": {
-            "voltage_absolute_max": LIMITS.gpu.voltage_absolute_max,
-            "voltage_recommended_max": LIMITS.gpu.voltage_recommended_max,
-            "temp_max": LIMITS.gpu.temp_max,
-            "freq_max": LIMITS.gpu.freq_max,
-        },
-        "power_budget": LIMITS.power.power_budget,
-        "psu_max": LIMITS.power.psu_max,
-        "vram": {
-            "warning_threshold": LIMITS.vram.warning_threshold,
-            "critical_threshold": LIMITS.vram.critical_threshold,
-        },
-    }

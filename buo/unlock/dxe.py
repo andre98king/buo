@@ -16,7 +16,7 @@ BUO NON esegue il flash DXE automaticamente: lo tratta come operazione
 manuale a rischio, con avvisi bloccanti e verifica dei prerequisiti.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..exceptions import SafetyViolation
 from ..utils.logging import LoggerMixin

@@ -18,7 +18,6 @@ Dallo studio (messaggio 94):
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..exceptions import SafetyViolation
 from ..utils.logging import LoggerMixin
 
 TLB_PATCH_NAME = "bc250-flush-tlb-by-runlist.patch"

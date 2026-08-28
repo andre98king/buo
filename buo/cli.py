@@ -33,7 +33,6 @@ try:
     from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
-    from rich.progress import Progress, SpinnerColumn, TextColumn
     _HAS_RICH = True
 except Exception:  # pragma: no cover
     _HAS_RICH = False

@@ -14,7 +14,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 from ..constants import EXIT_REBOOT
 from ..utils.logging import LoggerMixin

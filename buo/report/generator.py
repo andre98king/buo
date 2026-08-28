@@ -19,7 +19,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..constants import STATE_DIR
 from ..utils.logging import LoggerMixin
 from ..utils.paths import (report_file_json as _default_json,
                            report_file_md as _default_md)

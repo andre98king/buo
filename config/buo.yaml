@@ -34,7 +34,7 @@ phases:
   fix:
     tlb: true                # patch kernel TLB fault (AI/ML)
     ace: true                # fix compute queue (kernel+Mesa)
-    iommu: true              # iommu=off
+    iommu: true              # verifica IOMMU attivo (no-op: MAI iommu=off)
     acpi: true               # SSDT C-State
     vram: true               # bc250_memcfg (split VRAM)
     gtt: true                # ttm.pages_limit
@@ -62,7 +62,7 @@ benchmark:
 
 deps:
   auto_install: true         # BUO scarica da solo i tool mancanti al primo avvio
-  auto_install_governor: false  # il governor resta manuale (servizio distro)
+  auto_install_governor: true   # il governor viene auto-installato (COPR/AUR ufficiale) di default
 
 logging:
   level: "info"              # debug | info | warn | error

@@ -16,7 +16,7 @@ PRINCIPIO DI SICUREZZA (fail-closed):
     l'absolute_max immutabile (1325 mV) di constants.LIMITS.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..constants import LIMITS
 from ..exceptions import ConfigurationError
@@ -126,8 +126,3 @@ class CPUUndervoltOptimizer(LoggerMixin):
             "best_efficiency": {"freq": 3700, "vid": 1012, "watt": 65},
             "source": "mock",
         }
-
-    def _find_best_efficiency(self, points: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not points:
-            return {}
-        return min(points, key=lambda p: p.get("vid", 1000) / p.get("freq", 1000))

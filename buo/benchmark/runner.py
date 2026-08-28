@@ -22,7 +22,6 @@ import re
 import time
 from typing import Any, Dict, Optional
 
-from ..exceptions import BenchmarkError
 from ..utils.logging import LoggerMixin
 from ..utils.shell import run_command, which
 

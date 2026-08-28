@@ -115,7 +115,8 @@ buo status --mock
 ### Primo avvio: BUO si occupa di tutto
 
 Al primo `sudo buo unleash` su hardware reale, BUO **cerca ogni tool nel
-sistema e, se manca, lo scarica/installa e lo configura da solo**:
+sistema e, se manca, lo scarica/installa e lo configura da solo** (il
+governor GPU è l'eccezione: la sua installazione è **opt-in**, vedi sotto):
 
 | Tool | Come lo installa BUO |
 |:---|:---|
@@ -125,9 +126,10 @@ sistema e, se manca, lo scarica/installa e lo configura da solo**:
 | stress/stress-ng | wrapper automatico se manca `stress` |
 
 Nessun installer di terze parti viene mai eseguito: solo repo note e
-pacchetti ufficiali del package manager della distro. Puoi disattivare
-questo comportamento in `/etc/buo/buo.yaml` (`deps.auto_install: false`,
-`deps.auto_install_governor: false`) o pre-installare tutto con:
+pacchetti ufficiali del package manager della distro. L'auto-install dei
+tool è **attivo di default** (`deps.auto_install: true`); anche il governor
+è **attivo di default** (`deps.auto_install_governor: true`, sempre solo via
+package manager ufficiale). Configuri tutto in `/etc/buo/buo.yaml` o pre-installi con:
 
 ```bash
 sudo buo install-deps       # scarica e installa i tool ora
@@ -173,6 +175,7 @@ sudo buo config --edit     # Modifica la configurazione (editor)
 buo benchmark --mock       # Solo benchmark (simulati)
 buo safety-test            # Verifica i safety gates (senza modifiche)
 buo safety-monitor         # 🛡️ Solo monitoraggio live (Ctrl+C per uscire)
+buo doctor                 # 🩺 Diagnostica completa in un solo comando (sola lettura)
 buo install-deps           # Scarica e installa i tool della community
 buo install-deps --check   # Verifica i tool senza scaricare
 buo data-collect           # 📥 Raccoglie campioni per il modello VRAM
@@ -233,13 +236,13 @@ safety:
 
 deps:
   auto_install: true            # scarica/installa i tool mancanti da solo
-  auto_install_governor: true   # installa il governor (COPR/AUR) da solo
+  auto_install_governor: true   # il governor viene installato da solo (COPR/AUR)
 
 phases:
   fix:
     tlb: true             # patch TLB fault
     ace: true             # fix compute queue
-    iommu: true           # iommu=off
+    iommu: true           # verifica IOMMU attivo (no-op: MAI iommu=off)
     acpi: true            # SSDT C-State
     gtt: true             # ttm.pages_limit
 ```

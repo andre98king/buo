@@ -11,7 +11,7 @@ BUO impone comunque un tetto configurabile (default 25) per evitare
 loop infiniti, come previsto dal design.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..utils.logging import LoggerMixin
 from .wrappers.bc250_health import BC250HealthWrapper

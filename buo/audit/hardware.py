@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..constants import (CORE_MASK_REG, CORE_MASK_STOCK, CORE_MASK_UNLOCKED,
+from ..constants import (CORE_MASK_REG, CORE_MASK_UNLOCKED,
                          HEALTH_RESULTS_FILE, PCI_CONFIG_PATH)
 from ..utils.logging import LoggerMixin
 

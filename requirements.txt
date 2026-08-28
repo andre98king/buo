@@ -2,8 +2,11 @@ click>=8.0
 rich>=13.0
 pyyaml>=6.0
 
-# Opzionali
+# Opzionali (installabili anche via extras: pip install -e '.[ml,tui,upload,banner,inference]')
 # textual>=0.60        # TUI cockpit interattivo (buo tui)
-# scikit-learn>=1.0   # modello ML per la stima VRAM
-# numpy>=1.24         # calibrazione VRAM e ML
-# onnxruntime         # benchmark AI/ML
+# numpy>=1.24          # calibrazione VRAM e ML
+# scikit-learn>=1.0    # modello ML per la stima VRAM (buo ml-train)
+# joblib>=1.0          # salvataggio/caricamento del modello ML (.joblib)
+# requests>=2.0        # buo data-upload (server federato, opzionale)
+# pyfiglet>=0.8        # banner ASCII "BUO" (solo cosmetico)
+# onnxruntime>=1.14    # benchmark AI/ML (opzionale)

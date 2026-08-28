@@ -16,9 +16,14 @@ prima di eseguirlo su hardware reale.
 1. **BUO esegue modifiche hardware reali** (undervolt/overclock, modprobe,
    unlock CPU/GPU). Un uso scorretto può causare instabilità, crash o
    boot failure (vedi `docs/BUGS.md`).
-2. **Su Bazzite/ostree**: BUO **non** scrive mai `/boot`, non modifica
-   l'initramfs e non invoca `rpm-ostree` in automatico (ACPI e IOMMU sono
-   manuali per scelta di sicurezza).
+2. **Su Bazzite/ostree**: BUO **non** scrive mai `/boot` e non modifica
+   l'initramfs. Ma installa **automaticamente** i pacchetti dal package
+   manager della distro: `rpm-ostree install umr` su ostree, `dnf` + COPR
+   `filippor/bazzite` per il governor su Fedora/Bazzite, AUR via
+   `yay`/`paru` su Arch. Non esegue **mai** installer di terze parti:
+   clona solo repo note (pinnate a un commit esatto e verificato) e copia
+   gli script; governor e umr arrivano esclusivamente come pacchetti
+   ufficiali distro/COPR/AUR.
 3. **Hard limit immutabili**: VID CPU ≤ 1325 mV, voltaggio GPU ≤ 1100 mV.
    Questi limiti NON sono sovrascrivibili via config.
 4. **Fail-closed**: se un test di stabilità non è possibile, BUO rifiuta di

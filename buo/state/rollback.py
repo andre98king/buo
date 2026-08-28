@@ -20,7 +20,6 @@ falliscono: avviso di recupero manuale.
 from typing import Callable, Dict, Optional
 
 from ..constants import ROLLBACK_ORDER
-from ..exceptions import RollbackError
 from ..utils.logging import LoggerMixin
 
 

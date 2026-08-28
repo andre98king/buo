@@ -17,7 +17,6 @@ Dallo studio (messaggio 92):
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from ..exceptions import SafetyViolation
 from ..utils.logging import LoggerMixin
 
 ACE_REPO = "https://github.com/DryhoppedIPA/bc250-gfx1013-fix"
