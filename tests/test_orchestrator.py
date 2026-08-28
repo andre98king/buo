@@ -82,6 +82,33 @@ class TestOrchestrator(unittest.TestCase):
         plan = orch.recovery_plan()
         self.assertIn("interrupted_phase", plan)
 
+    def test_apply_cpu_config_dry_run(self):
+        """Applicazione CPU in dry-run: simulata, nessun effetto."""
+        orch = self._make(dry_run=True)
+        r = orch._apply_cpu_config(3500, scale=0)
+        self.assertTrue(r["applied"])
+        self.assertTrue(r["dry_run"])
+
+    def test_apply_cpu_config_mock(self):
+        orch = self._make(dry_run=False)
+        r = orch._apply_cpu_config(3500, scale=0)
+        self.assertTrue(r["applied"])
+        self.assertTrue(r["mock"])
+
+    def test_apply_cpu_config_clamps_frequency(self):
+        """La frequenza è clampata ai limiti immutabili (mai oltre)."""
+        orch = self._make(dry_run=True)
+        f, s = orch._clamp_cpu(99999)  # oltre il limite
+        self.assertEqual(f, 4000)  # LIMITS.cpu.freq_max
+        f2, _ = orch._clamp_cpu(100)  # sotto il limite
+        self.assertEqual(f2, 3500)  # LIMITS.cpu.freq_min
+
+    def test_apply_cpu_config_scale_from_vid(self):
+        """Senza scale, conversione da VID: scale = (1206 - vid)/8."""
+        orch = self._make(dry_run=True)
+        _, s = orch._clamp_cpu(3500, vid=1030)
+        self.assertEqual(s, 22)  # (1206-1030)/8 = 22
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -631,11 +631,76 @@ class Orchestrator(LoggerMixin):
                 if ok and not self.mock:
                     self.governor.restart()
 
-        # Applica la config CPU (in produzione: bc250-apply --install)
-        if oc_cpu.get("recommended_freq"):
-            results["cpu_final"] = oc_cpu
+        # Applica la config CPU: il punto UNDERVOLT validato (bc250-detect
+        # lo ha testato stabile), VOLATILE via bc250-apply --apply. L'overclock
+        # aggressivo (freq > punto stabile) NON viene applicato: è informativo.
+        uv_cpu = optimize_data.get("undervolt_cpu", {})
+        best = (uv_cpu.get("best_efficiency")
+                or (uv_cpu.get("v_f_points") or [{}])[0])
+        cpu_freq = best.get("freq") or oc_cpu.get("recommended_freq")
+        if cpu_freq:
+            results["cpu_final"] = self._apply_cpu_config(
+                cpu_freq,
+                scale=best.get("scale"),
+                vid=best.get("vid"),
+            )
 
         return results
+
+    def _apply_cpu_config(self, freq: int, scale: Optional[int] = None,
+                          vid: Optional[int] = None) -> Dict[str, Any]:
+        """Applica il punto CPU (undervolt validato) — VOLATILE.
+
+        Scrive overclock.conf e lo applica con `bc250-apply --apply`
+        (NON --install: niente persistenza, nessun servizio). Il punto
+        deve essere già stato validato da bc250-detect. Fail-closed ma
+        NON bloccante: se lo script manca o fallisce, logga e continua
+        (l'undervolt è un guadagno, non un requisito di sicurezza).
+        """
+        if self.dry_run:
+            self.logger.info("CPU config: [DRY-RUN] simulata")
+            return {"applied": True, "dry_run": True, "freq": freq}
+        if self.mock:
+            return {"applied": True, "mock": True, "freq": freq}
+        try:
+            from pathlib import Path as _P
+            from .unlock.wrappers.bc250_overclock import BC250ApplyWrapper
+            f, s = self._clamp_cpu(freq, scale, vid)
+            conf = _P("/tmp/buo-overclock.conf")
+            conf.write_text(
+                f"[overclock]\nfrequency = {f}\n"
+                f"scale = {s}\nmax_temperature = {LIMITS.cpu.temp_max}\n",
+                encoding="utf-8",
+            )
+            w = BC250ApplyWrapper()
+            if not w.available:
+                return {"applied": False,
+                        "warning": "bc250-apply non installato "
+                                   "(esegui: sudo buo install-deps)"}
+            result = w.apply(str(conf))
+            if result["returncode"] != 0:
+                return {"applied": False,
+                        "error": (result.get("stderr") or "apply fallito")[:200]}
+            self.logger.info("✅ CPU config applicata: %d MHz, scale %d "
+                             "(volatile)", f, s)
+            return {"applied": True, "freq": f, "scale": s,
+                    "method": "bc250-apply (volatile)"}
+        except Exception as e:
+            self.logger.warning("CPU config non applicata: %s", e)
+            return {"applied": False, "error": str(e)[:200]}
+
+    @staticmethod
+    def _clamp_cpu(freq: int, scale: Optional[int] = None,
+                   vid: Optional[int] = None):
+        """Clamp della coppia frequenza/scale ai limiti immutabili.
+        Se scale manca ma c'è vid, conversione community scale=(1206-vid)/8."""
+        f = max(LIMITS.cpu.freq_min, min(LIMITS.cpu.freq_max, int(freq)))
+        s = 0
+        if scale is not None:
+            s = max(-8, min(50, int(scale)))
+        elif vid is not None:
+            s = max(-8, min(50, round((1206 - int(vid)) / 8)))
+        return f, s
 
     def _phase_validate(self) -> Dict[str, Any]:
         """FASE 3 — VALIDAZIONE: stress test, verifica fix, benchmark after."""
