@@ -31,6 +31,8 @@ class HardwareAudit(LoggerMixin):
 
     def run(self) -> Dict[str, Any]:
         """Esegue l'audit completo."""
+        if self.mock:
+            return self._audit_mock()
         audit = {
             "cpu": self._audit_cpu(),
             "gpu": self._audit_gpu(),
@@ -45,6 +47,82 @@ class HardwareAudit(LoggerMixin):
             "temps": self._audit_temps(),
         }
         return audit
+
+    def _audit_mock(self) -> Dict[str, Any]:
+        """Audit completamente simulato (dry-run/mock).
+
+        NON spawna subprocess (glxinfo/systemctl/modinfo) né legge
+        /proc, /sys o il file di health: restituisce valori fake ma con
+        la stessa forma dell'audit reale, così i consumatori a valle
+        (problems.detect e report) funzionano senza modifiche.
+        """
+        from ..constants import GOVERNOR_SERVICE
+        from ..utils.mock import MockHardware
+
+        hw = self.mock_hw if self.mock_hw is not None else MockHardware()
+
+        mask = hw.read_core_mask()
+        stable_cu = list(hw.state.gpu_stable_cu)
+        defective_cu = list(hw.state.gpu_defective_cu)
+        iommu_off = bool(hw.state.iommu_off)
+        acpi_fixed = bool(hw.state.is_acpi_fixed)
+
+        return {
+            "cpu": {
+                "core_mask": hex(mask),
+                "cores": 8 if mask == CORE_MASK_UNLOCKED else 6,
+                "unlocked": mask == CORE_MASK_UNLOCKED,
+            },
+            "gpu": {
+                "cu_count": hw.get_cu_count(),
+                "stable_cu": len(stable_cu),
+                "defective_cu": defective_cu,
+                "wgp_mask": hw.get_wgp_mask(),
+            },
+            "system": {
+                "hostname": "bc250-mock",
+                "arch": "x86_64",
+                "uptime": "0.0",
+            },
+            "kernel": {
+                "release": "6.18.0-mock",
+                "version": (6, 18),
+                "meets_minimum": True,
+            },
+            "mesa": {
+                "version": "25.2",
+                "meets_minimum": True,
+                "raw": "25.2.4",
+            },
+            "iommu": {
+                "enabled": not iommu_off,
+                "cmdline_has_iommu_off": iommu_off,
+                "cmdline": ("BOOT_IMAGE=/vmlinuz-mock iommu=off"
+                            if iommu_off else "BOOT_IMAGE=/vmlinuz-mock"),
+            },
+            "acpi": {
+                "ssdt_tables": ["SSDT-CST", "SSDT-PST"] if acpi_fixed else [],
+                "cst_present": acpi_fixed,
+                "pst_present": acpi_fixed,
+            },
+            "governor": {
+                "service": GOVERNOR_SERVICE,
+                "active": True,
+            },
+            "amdgpu": {
+                "patched_for_40cu": bool(hw.state.is_40cu_enabled),
+            },
+            "health": {
+                "available": True,
+                "stable_wgp": len(stable_cu),
+                "defective_wgp": len(defective_cu),
+            },
+            "temps": {
+                "cpu_temp": round(hw.get_cpu_temp(), 1),
+                "gpu_temp": round(hw.get_gpu_temp(), 1),
+                "ambient": round(hw.get_ambient_temp(), 1),
+            },
+        }
 
     # ---------------------------- CPU ------------------------------ #
 
