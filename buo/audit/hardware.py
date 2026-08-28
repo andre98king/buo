@@ -404,7 +404,41 @@ class HardwareAudit(LoggerMixin):
             "ssdt_tables": ssdt,
             "cst_present": any("CST" in s for s in ssdt),
             "pst_present": any("PST" in s for s in ssdt),
+            "cpu_present": any("CPU" in s for s in ssdt),
+            # ostree: le tabelle caricate non compaiono per nome in /sys
+            # (fuse negli slot SSDT1-N): segnale affidabile = boot entry
+            "boot_fix_present": self._boot_acpi_blob_present(),
         }
+
+    @staticmethod
+    def _boot_acpi_blob_present(boot_dir: str = "/boot") -> bool:
+        """True se la boot entry di default punta a un blob concatenato.
+
+        Metodo ostree (initramfs concatenato): il segnale affidabile NON
+        sono i nomi delle tabelle in /sys (il kernel fonde gli override
+        negli slot SSDT1-N), ma la boot entry che carica un blob
+        /boot/initramfs-acpi-*.img con magic cpio newc in testa.
+        """
+        loader = Path(boot_dir) / "loader" / "entries"
+        if not loader.is_dir():
+            return False
+        try:
+            for entry in sorted(loader.glob("*.conf")):
+                text = entry.read_text(errors="replace")
+                m = re.search(r"^initrd\s+(\S+)", text, re.M)
+                if not m:
+                    continue
+                name = Path(m.group(1)).name
+                if not name.startswith("initramfs-acpi-"):
+                    continue
+                blob = Path(boot_dir) / name
+                if blob.is_file():
+                    with open(blob, "rb") as f:
+                        if f.read(6) == b"070701":
+                            return True
+        except Exception:
+            return False
+        return False
 
     # ------------------------- GOVERNOR ---------------------------- #
 

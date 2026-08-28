@@ -172,3 +172,68 @@ class TestMesaFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBootAcpiBlob(unittest.TestCase):
+    """Detection ostree: boot entry → blob initramfs-acpi-*.img (G5)."""
+
+    def _tree(self, initrd_line=None):
+        import tempfile
+        td = tempfile.TemporaryDirectory()
+        root = Path(td.name)
+        entries = root / "loader" / "entries"
+        entries.mkdir(parents=True)
+        if initrd_line is not None:
+            (entries / "ostree-1.conf").write_text(
+                "title Bazzite\n"
+                "linux /ostree/.../vmlinuz-x\n"
+                f"{initrd_line}\n")
+        return td, root
+
+    def test_true_with_valid_blob(self):
+        td, root = self._tree("initrd /initramfs-acpi-1.img")
+        try:
+            blob = root / "initramfs-acpi-1.img"
+            blob.write_bytes(b"070701" + b"\x00" * 64)
+            self.assertTrue(HardwareAudit._boot_acpi_blob_present(td.name))
+        finally:
+            td.cleanup()
+
+    def test_false_without_entries(self):
+        td, _ = self._tree(None)
+        try:
+            self.assertFalse(HardwareAudit._boot_acpi_blob_present(td.name))
+        finally:
+            td.cleanup()
+
+    def test_false_when_blob_without_cpio_magic(self):
+        td, root = self._tree("initrd /initramfs-acpi-1.img")
+        try:
+            (root / "initramfs-acpi-1.img").write_bytes(b"NOTCPIO" + b"\x00" * 64)
+            self.assertFalse(HardwareAudit._boot_acpi_blob_present(td.name))
+        finally:
+            td.cleanup()
+
+    def test_false_when_entry_points_to_plain_initramfs(self):
+        td, root = self._tree("initrd /initramfs-1.img")
+        try:
+            (root / "initramfs-1.img").write_bytes(b"070701" + b"\x00" * 64)
+            self.assertFalse(HardwareAudit._boot_acpi_blob_present(td.name))
+        finally:
+            td.cleanup()
+
+    def test_audit_acpi_exposes_boot_fix_present(self):
+        td, root = self._tree("initrd /initramfs-acpi-1.img")
+        try:
+            (root / "initramfs-acpi-1.img").write_bytes(b"070701" + b"\x00" * 64)
+            with mock.patch("buo.audit.hardware.Path.is_dir",
+                            side_effect=lambda: True), \
+                 mock.patch("buo.audit.hardware.HardwareAudit."
+                            "_boot_acpi_blob_present",
+                            return_value=True):
+                audit = HardwareAudit()
+                acpi = audit._audit_acpi()
+            self.assertTrue(acpi["boot_fix_present"])
+            self.assertIn("ssdt_tables", acpi)
+        finally:
+            td.cleanup()

@@ -12,6 +12,7 @@ esplicita è possibile solo in modalità interattiva.
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from buo.config import BUOConfig
 from buo.orchestrator import Orchestrator
@@ -52,6 +53,44 @@ class TestAcpiGate(unittest.TestCase):
         orch = self._make(acpi_fixed=True)
         orch._phase_unlock()
         self.assertIn("cpu_core_unlock", orch._applied_steps())
+
+    def test_gate_ostree_uses_boot_blob_verify(self):
+        """Su ostree il gate usa verify() (boot entry → blob), non /sys.
+
+        Bug G5: i nomi delle tabelle in /sys su ostree sono SSDT1-N
+        (override fusi dal kernel), quindi il check cst/pst darebbe un
+        falso blocco anche a fix applicata.
+        """
+        orch = self._make(acpi_fixed=False)
+        orch.mock = False          # forza il ramo "reale"
+        orch.dry_run = False
+        orch.fix_acpi.distro.initramfs_tool = "ostree"
+        with mock.patch.object(orch.fix_acpi, "verify",
+                               return_value=True) as verify:
+            self.assertTrue(orch._acpi_gate_ok())
+            verify.assert_called_once()
+        with mock.patch.object(orch.fix_acpi, "verify",
+                               return_value=False):
+            self.assertFalse(orch._acpi_gate_ok())
+
+    def test_gate_non_ostree_accepts_blob_or_cst_pst(self):
+        """Non-ostree: gate aperto con cst+pst OPPURE blob concatenato."""
+        orch = self._make(acpi_fixed=False)
+        orch.mock = False
+        orch.dry_run = False
+        # il ramo non-ostree passa dall'audit: forziamo audit con blob
+        with mock.patch.object(orch.audit, "run", return_value={
+                "acpi": {"cst_present": False, "pst_present": False,
+                         "boot_fix_present": True}}):
+            self.assertTrue(orch._acpi_gate_ok())
+        with mock.patch.object(orch.audit, "run", return_value={
+                "acpi": {"cst_present": True, "pst_present": True,
+                         "boot_fix_present": False}}):
+            self.assertTrue(orch._acpi_gate_ok())
+        with mock.patch.object(orch.audit, "run", return_value={
+                "acpi": {"cst_present": False, "pst_present": False,
+                         "boot_fix_present": False}}):
+            self.assertFalse(orch._acpi_gate_ok())
 
     def test_gate_does_not_block_gpu(self):
         """Il gate ACPI riguarda SOLO la CPU: la GPU procede comunque."""

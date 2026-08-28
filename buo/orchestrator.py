@@ -717,18 +717,23 @@ class Orchestrator(LoggerMixin):
             return {"unlocked": False, "error": str(e)}
 
     def _acpi_gate_ok(self) -> bool:
-        """True se le tabelle ACPI per gli 8 core (CST+PST) sono presenti.
+        """True se le fix ACPI per gli 8 core risultano applicate.
 
-        Fail-closed: senza SSDT-CST/PST l'unlock 8-core manda la scheda in
-        boot loop.
-        In mock usa lo stato simulato; in modalità reale legge /sys.
+        Fail-closed: senza le fix ACPI l'unlock 8-core manda la scheda in
+        boot loop. Su ostree il metodo reale è l'initramfs concatenato e
+        il segnale affidabile è la boot entry che punta al blob
+        (fix_acpi.verify); sulle altre distro si leggono i nomi delle
+        tabelle da /sys (SSDT-CST/PST) o la presenza del blob.
         """
         if self.mock and self.hardware is not None:
             return bool(self.hardware.state.is_acpi_fixed)
         if self.dry_run:
             return True  # simulazione: nessun blocco in dry-run
+        if self.fix_acpi.distro.initramfs_tool == "ostree":
+            return bool(self.fix_acpi.verify())
         acpi = self.audit.run().get("acpi", {})
-        return bool(acpi.get("cst_present") and acpi.get("pst_present"))
+        return bool((acpi.get("cst_present") and acpi.get("pst_present"))
+                    or acpi.get("boot_fix_present"))
 
     def _suggest_40cu_persistence(self, results: Dict[str, Any],
                                   gpu: Dict[str, Any]) -> None:
