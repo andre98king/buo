@@ -129,6 +129,15 @@ def _build_deps() -> List[Dict[str, Any]]:
             ],
         },
         {
+            "name": "bc250_memcfg",
+            "repo": "https://github.com/fanoush/bc250_memcfg",
+            "type": "build",
+            "commit": "829e8d64f23c5ad1e1d662f4eab488f31e0daa72",
+            "required_for": "fix VRAM (split VRAM dedicata via "
+                           "bc250_memcfg --set-vram)",
+            "binary": "bc250_memcfg",
+        },
+        {
             "name": "bc250-acpi-fix",
             "repo": "https://github.com/bc250-collective/bc250-acpi-fix",
             "type": "aml",
@@ -404,6 +413,10 @@ class DependencyManager(LoggerMixin):
         except Exception as e:
             return {"status": "failed", "detail": f"clone in errore: {e}"}
 
+        # G6: tipo "build" — compila (make) e installa il binario
+        if dep["type"] == "build":
+            return self._build_and_install(dep, checkout, sudo=sudo)
+
         # Copia gli script nelle destinazioni
         failures = []
         for f in dep["files"]:
@@ -542,6 +555,52 @@ class DependencyManager(LoggerMixin):
             return False
 
     # ------------------------------------------------------------------ #
+
+    def _build_and_install(self, dep: Dict[str, Any], checkout: Path,
+                           sudo: bool) -> Dict[str, Any]:
+        """G6: compila un tool community (make) e installa il binario.
+
+        Verifica prerequisiti di build (make, compilatore) con messaggio
+        chiaro, poi copia il binario in bin_dir con hash registrato.
+        """
+        if which("make") is None:
+            return {"status": "failed",
+                    "detail": f"{dep['name']}: 'make' non trovato "
+                              "(installare gcc/make con il package manager)"}
+        rc, out, err = run_command(["make"], cwd=str(checkout), timeout=600)
+        if rc != 0:
+            return {"status": "failed",
+                    "detail": f"{dep['name']}: make fallito: {err[:200]}"}
+        binary = checkout / dep.get("binary", dep["name"])
+        if not binary.is_file():
+            return {"status": "failed",
+                    "detail": f"{dep['name']}: binario non prodotto: "
+                              f"{dep.get('binary')}"}
+        dest = self.bin_dir / binary.name
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if self._writable(self.bin_dir):
+                shutil.copy2(binary, dest)
+            else:
+                tmpdir = tempfile.mkdtemp(prefix="buo-")
+                try:
+                    tmp = Path(tmpdir) / binary.name
+                    shutil.copy2(binary, tmp)
+                    rc, _, err = run_command(
+                        ["install", "-m", "755", str(tmp), str(dest)],
+                        sudo=sudo)
+                    if rc != 0:
+                        return {"status": "failed",
+                                "detail": f"{dest}: {err[:120]}"}
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+            dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP |
+                       stat.S_IXOTH)
+            self._record_hash(dep, {"src": "binary"}, dest)
+            return {"status": "ok",
+                    "detail": f"{binary.name} compilato e installato"}
+        except Exception as e:
+            return {"status": "failed", "detail": f"{binary.name}: {e}"}
 
     def _record_hash(self, dep: Dict[str, Any], f: Dict[str, Any],
                      dest: Path) -> None:

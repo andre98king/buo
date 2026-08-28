@@ -24,6 +24,13 @@ class VRAMConfig(LoggerMixin):
                  memcfg_path: Optional[str] = None):
         self.mock = mock
         self.mock_hw = mock_hardware
+        # G6: se non specificato, cerca il binario installato da
+        # `buo install-deps` (bc250_memcfg ora è nel catalogo deps)
+        if memcfg_path is None:
+            import shutil
+            found = shutil.which("bc250_memcfg")
+            if found:
+                memcfg_path = found
         self.memcfg_path = memcfg_path  # eseguibile bc250_memcfg
 
     def verify(self) -> bool:
@@ -49,8 +56,9 @@ class VRAMConfig(LoggerMixin):
                 "applied": False,
                 "needs_reboot": False,
                 "warning": (
-                    "bc250_memcfg non configurato. Scaricalo da "
-                    f"{MEMCFG_REPO} e passa --memcfg <percorso>. "
+                    "bc250_memcfg non trovato: esegui `sudo buo install-deps` "
+                    f"(lo compila da {MEMCFG_REPO}), oppure passa "
+                    f"--memcfg <percorso>. "
                     f"Esempio reale: bc250_memcfg --set-vram {gpu_memory_gb}G"
                 ),
             }

@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from buo.install.deps import DependencyManager
 from buo.utils.paths import state_dir
@@ -64,3 +65,64 @@ class TestDepsHashes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildDep(unittest.TestCase):
+    """G6: tipo deps 'build' (clone → make → install binario)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["BUO_STATE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("BUO_STATE_DIR", None)
+        self._tmp.cleanup()
+
+    def test_build_installs_binary(self):
+        mgr = DependencyManager(bin_dir=self._tmp.name)
+        checkout = Path(self._tmp.name) / "checkout"
+        checkout.mkdir()
+        binary = checkout / "bc250_memcfg"
+        binary.write_bytes(b"ELFBINARY")
+        dep = {"name": "bc250_memcfg", "commit": "abc",
+               "binary": "bc250_memcfg"}
+
+        with mock.patch("buo.install.deps.run_command",
+                        return_value=(0, "", "")), \
+             mock.patch("buo.install.deps.which", return_value="/usr/bin/make"):
+            out = mgr._build_and_install(dep, checkout, sudo=False)
+
+        self.assertEqual(out["status"], "ok")
+        dest = Path(self._tmp.name) / "bc250_memcfg"
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.read_bytes(), b"ELFBINARY")
+
+    def test_build_fails_without_make(self):
+        mgr = DependencyManager(bin_dir=self._tmp.name)
+        dep = {"name": "bc250_memcfg", "commit": "abc"}
+        with mock.patch("buo.install.deps.which", return_value=None):
+            out = mgr._build_and_install(dep, Path("/nonexistent"),
+                                         sudo=False)
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("make", out["detail"])
+
+    def test_build_fails_when_make_errors(self):
+        mgr = DependencyManager(bin_dir=self._tmp.name)
+        checkout = Path(self._tmp.name) / "checkout"
+        checkout.mkdir()
+        dep = {"name": "bc250_memcfg", "commit": "abc",
+               "binary": "bc250_memcfg"}
+        with mock.patch("buo.install.deps.run_command",
+                        return_value=(1, "", "make: errore")), \
+             mock.patch("buo.install.deps.which", return_value="/usr/bin/make"):
+            out = mgr._build_and_install(dep, checkout, sudo=False)
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("make", out["detail"])
+
+    def test_memcfg_in_catalog(self):
+        from buo.install.deps import _build_deps
+        names = [d["name"] for d in _build_deps()]
+        self.assertIn("bc250_memcfg", names)
+        dep = next(d for d in _build_deps() if d["name"] == "bc250_memcfg")
+        self.assertEqual(dep["type"], "build")
+        self.assertTrue(dep["commit"])
