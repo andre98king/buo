@@ -26,6 +26,8 @@ SICUREZZA:
       l'orchestratore resta fail-closed (non procede senza i tool)
 """
 
+import hashlib
+import json
 import os
 import shlex
 import stat
@@ -386,6 +388,15 @@ class DependencyManager(LoggerMixin):
                                       commit, resolved)
                     return {"status": "failed",
                             "detail": "verifica commit fallita"}
+                # A7: il checkout deve essere PULITO (nessuna modifica
+                # locale): un clone manomesso non deve passare inosservato.
+                rc, out, _ = run_command(
+                    ["git", "-C", str(checkout), "status", "--porcelain"],
+                    timeout=60)
+                if rc != 0 or out.strip():
+                    return {"status": "failed",
+                            "detail": "checkout modificato localmente "
+                                      "(possibile tampering)"}
                 self.logger.info("checkout %s pinnato su %s",
                                  dep["name"], resolved)
             elif not (checkout / ".git").exists():
@@ -422,6 +433,9 @@ class DependencyManager(LoggerMixin):
                 if f.get("exec"):
                     dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP |
                                stat.S_IXOTH)
+                # A7: registra l'impronta SHA-256 del file installato
+                # (tamper-evidence: rileva modifiche dopo l'installazione)
+                self._record_hash(dep, f, dest)
             except Exception as e:
                 failures.append(f"{f['dest']}: {e}")
 
@@ -528,6 +542,43 @@ class DependencyManager(LoggerMixin):
             return False
 
     # ------------------------------------------------------------------ #
+
+    def _record_hash(self, dep: Dict[str, Any], f: Dict[str, Any],
+                     dest: Path) -> None:
+        """A7: registra l'SHA-256 del file installato (tamper-evidence).
+
+        Il file `deps-hashes.json` nella dir di stato permette di
+        rilevare modifiche ai tool della community DOPO l'installazione
+        (es. da parte di un processo malevolo o di un aggiornamento
+        manuale).
+        """
+        try:
+            digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+        except Exception:
+            return
+        record = {
+            "name": dep["name"],
+            "commit": dep.get("commit"),
+            "src": f["src"],
+            "dest": str(dest),
+            "sha256": digest,
+        }
+        try:
+            from ..utils.paths import state_dir
+            path = state_dir() / "deps-hashes.json"
+            data = {}
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            key = record["dest"]
+            data[key] = record
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                            encoding="utf-8")
+        except Exception:
+            pass  # il record hash non deve mai bloccare l'installazione
 
     def summary(self, status: Dict[str, Any]) -> str:
         """Riepilogo leggibile dello stato delle dipendenze."""
