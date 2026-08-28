@@ -101,6 +101,7 @@ class TestAntiLoop(unittest.TestCase):
         """Un nuovo run completo da init azzera il ledger (i vecchi
         passi spariscono; restano solo quelli applicati nel run nuovo)."""
         orch = self._make()
+        orch.hardware.state.is_acpi_fixed = True  # fix ACPI presenti
         orch.checkpoint.set("applied_steps", ["acpi", "iommu"])
         orch.checkpoint.set_current_phase("complete")
         rc = orch.run()

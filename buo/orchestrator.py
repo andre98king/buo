@@ -367,7 +367,77 @@ class Orchestrator(LoggerMixin):
             self.logger.warning("⚠️ CPU a %.1f°C: verifica il raffreddamento",
                                 cpu_t)
 
+        # Budget di potenza: la combo 8 core + 40 CU ha un picco noto
+        # (docs/COMMUNITY_NOTES.md §2c). Avviso NON bloccante: la decisione
+        # finale resta al governor/limiti immutabili.
+        self._check_power_budget()
+
+        # Toolchain 40-CU: su ostree serve bc250-cu-live-manager + umr
+        # (il kernel patch non funziona: /usr read-only). Avviso non
+        # bloccante: l'unlock fallirà in modo pulito se mancano.
+        self._check_40cu_toolchain(audit)
+
         self.logger.info("✅ Verifica di sanità superata")
+
+    def _check_power_budget(self) -> None:
+        """Avvisa se la combo 8 core + 40 CU può superare il PSU dichiarato.
+
+        Numeri misurati sul campo (docs/COMMUNITY_NOTES.md §2c):
+            • gaming 200-220W (undervolt + cap 1500 MHz)
+            • FurMark 250-320W senza cap
+            • GPU idle 48W, PSU Metalfish 300W
+        Se psu_wattage < 350 e sono abilitati entrambi gli unlock, l'utente
+        deve sapere che serve il cap GPU 1500 MHz + undervolt.
+        """
+        if self.config.probe_cpu_unlock and self.config.probe_gpu_unlock:
+            psu = self.config.psu_wattage
+            if psu < 350:
+                self.logger.warning(
+                    "⚠️ POTENZA: PSU dichiarato %dW con 8 core + 40 CU "
+                    "abilitati. Picco misurato: FurMark 250-320W SENZA cap. "
+                    "Per restare sotto i %dW: undervolt + cap GPU 1500 MHz "
+                    "(≈125-220W). docs/COMMUNITY_NOTES.md §2c.", psu, psu)
+            else:
+                self.logger.info(
+                    "✅ Potenza: PSU %dW sufficiente per 8 core + 40 CU "
+                    "(comunque consigliato il cap GPU 1500 MHz per "
+                    "l'efficienza).", psu)
+        elif self.config.probe_gpu_unlock and self.config.psu_wattage < 300:
+            self.logger.warning(
+                "⚠️ POTENZA: PSU %dW con 40 CU: picco FurMark 250-320W "
+                "senza cap — usare undervolt + cap GPU 1500 MHz.",
+                self.config.psu_wattage)
+
+    def _check_40cu_toolchain(self, audit: Dict[str, Any]) -> None:
+        """Verifica i tool necessari per il percorso 40-CU della distro.
+
+        Su ostree il kernel patch non funziona (/usr read-only): serve
+        bc250-cu-live-manager + umr (runtime UMR). Su non-ostree serve
+        bc250-enable-40cu.sh. Avviso non bloccante: se mancano, l'unlock
+        fallirà in modo pulito (fail-closed) con istruzioni.
+        """
+        if not self.config.probe_gpu_unlock or self.mock:
+            return
+        if self.gpu_unlock is None or self.gpu_unlock.wrapper is None:
+            self.logger.warning(
+                "⚠️ Toolchain 40-CU non inizializzata: esegui "
+                "`sudo buo install-deps` prima dell'unlock GPU.")
+            return
+        if not self.gpu_unlock.wrapper.available:
+            self.logger.warning(
+                "⚠️ Script 40-CU mancante (%s): esegui "
+                "`sudo buo install-deps` (o installa manualmente il tool "
+                "della community).", self.gpu_unlock.wrapper.script_path)
+            return
+        if self.gpu_unlock.is_ostree:
+            import shutil
+            if shutil.which("umr") is None:
+                self.logger.warning(
+                    "⚠️ `umr` non trovato: necessario per il runtime UMR "
+                    "delle 40 CU su ostree. Installare con: "
+                    "rpm-ostree install umr (poi reboot).")
+            else:
+                self.logger.info("✅ Toolchain 40-CU pronta (umr + live-manager)")
 
     def _ensure_dependencies(self) -> None:
         """
@@ -458,22 +528,39 @@ class Orchestrator(LoggerMixin):
         results: Dict[str, Any] = {}
         done = self._applied_steps()
 
-        # 1. CPU 8-core (volatile)
+        # 1. CPU 8-core (volatile) — con GATE ACPI fail-closed
         if self.config.probe_cpu_unlock and "cpu_core_unlock" not in done:
-            try:
-                cpu = self.cpu_unlock.unlock()
-                results["cpu"] = cpu
-                if cpu.get("changed", True):
-                    self.results["applied_fixes"].append("cpu_core_unlock")
-                    # MARCATO PRIMA del reboot: al resume non si ripete
-                    self._mark_step("cpu_core_unlock")
-                    if cpu.get("needs_reboot"):
-                        self._schedule_reboot("CPU unlock — reboot richiesto")
+            if not self._acpi_gate_ok():
+                self.logger.warning(
+                    "⚠️ GATE ACPI: fix SSDT-PST/CST mancanti — senza di esse "
+                    "l'unlock 8-core porta la BC-250 in BOOT LOOP "
+                    "(docs/BUGS.md #18).")
+                proceed = False
+                if self.interactive:
+                    try:
+                        resp = input(
+                            "   Procedere comunque con l'unlock 8-core SENZA "
+                            "fix ACPI? [y/N] ").strip().lower()
+                        proceed = resp in ("y", "yes")
+                    except EOFError:
+                        proceed = False
+                if not proceed:
+                    self.logger.warning(
+                        "⛔ CPU unlock SALTATO (fail-closed): applicare prima "
+                        "la fix ACPI (e-tho/bc250-acpi-fix), poi rieseguire")
+                    results["cpu"] = {
+                        "unlocked": False,
+                        "acpi_gate_blocked": True,
+                    }
+                    self.results["notes"].append(
+                        "CPU unlock bloccato dal gate ACPI: fix SSDT-CST/PST "
+                        "mancanti (e-tho/bc250-acpi-fix) — necessario prima "
+                        "di sbloccare gli 8 core (boot loop, docs/BUGS.md #18)"
+                    )
                 else:
-                    self.logger.info("CPU: core già sbloccati (BIOS/DXE) — salto")
-            except Exception as e:
-                self.logger.warning("Unlock CPU non eseguito: %s", e)
-                results["cpu"] = {"unlocked": False, "error": str(e)}
+                    results["cpu"] = self._do_cpu_unlock()
+            else:
+                results["cpu"] = self._do_cpu_unlock()
         elif "cpu_core_unlock" in done:
             self.logger.info("CPU: unlock già eseguito (checkpoint) — salto")
 
@@ -488,6 +575,9 @@ class Orchestrator(LoggerMixin):
                     self._mark_step("gpu_40cu")  # prima del reboot
                     if gpu.get("needs_reboot"):
                         self._schedule_reboot("GPU 40-CU — reboot richiesto")
+                    # Runtime UMR = VOLATILE: suggerisci la persistenza
+                    # (semi-automatico: avviso + conferma interattiva).
+                    self._suggest_40cu_persistence(results, gpu)
                 elif was_enabled:
                     self.logger.info("GPU: 40-CU già attive — salto")
             except Exception as e:
@@ -511,6 +601,84 @@ class Orchestrator(LoggerMixin):
                 results["health"] = {"error": str(e)}
 
         return results
+
+    def _do_cpu_unlock(self) -> Dict[str, Any]:
+        """Esegue l'unlock CPU 8-core (volatile, richiede reboot)."""
+        try:
+            cpu = self.cpu_unlock.unlock()
+            if cpu.get("changed", True):
+                self.results["applied_fixes"].append("cpu_core_unlock")
+                # MARCATO PRIMA del reboot: al resume non si ripete
+                self._mark_step("cpu_core_unlock")
+                if cpu.get("needs_reboot"):
+                    self._schedule_reboot("CPU unlock — reboot richiesto")
+            else:
+                self.logger.info("CPU: core già sbloccati (BIOS/DXE) — salto")
+            return cpu
+        except Exception as e:
+            self.logger.warning("Unlock CPU non eseguito: %s", e)
+            return {"unlocked": False, "error": str(e)}
+
+    def _acpi_gate_ok(self) -> bool:
+        """True se le tabelle ACPI per gli 8 core (CST+PST) sono presenti.
+
+        Fail-closed: senza SSDT-CST/PST l'unlock 8-core manda la scheda in
+        boot loop (docs/BUGS.md #18, ricetta docs/COMMUNITY_NOTES.md §2c).
+        In mock usa lo stato simulato; in modalità reale legge /sys.
+        """
+        if self.mock and self.hardware is not None:
+            return bool(self.hardware.state.is_acpi_fixed)
+        if self.dry_run:
+            return True  # simulazione: nessun blocco in dry-run
+        acpi = self.audit.run().get("acpi", {})
+        return bool(acpi.get("cst_present") and acpi.get("pst_present"))
+
+    def _suggest_40cu_persistence(self, results: Dict[str, Any],
+                                  gpu: Dict[str, Any]) -> None:
+        """Suggerisce (e opzionalmente esegue) la persistenza 40-CU.
+
+        Il runtime UMR è VOLATILE: al reboot le 40 CU tornano a 24. La
+        persistenza (install-service + write-service-table) è validata
+        sul campo e stabile, ma richiede un reboot per l'attivazione.
+        Semi-automatico: in modalità interattiva BUO chiede conferma,
+        altrimenti si limita ad avvisare con le istruzioni.
+        """
+        if gpu.get("method") != "runtime_umr":
+            return  # kernel patch: la persistenza è nel modulo, non serve
+        self.logger.warning(
+            "💾 40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
+            "Persistenza validata (install-service + write-service-table).")
+        if not self.interactive or self.mock or self.dry_run:
+            results["gpu"]["persistence"] = {
+                "suggested": True,
+                "note": "Per rendere persistenti le 40 CU al boot: esegui "
+                        "la persistenza manuale (install-service + "
+                        "write-service-table) — docs/COMMUNITY_NOTES.md §2b",
+            }
+            self.results["notes"].append(
+                "40 CU attive ma VOLATILI (runtime UMR): al reboot tornano "
+                "a 24. Persistenza manuale disponibile (install-service + "
+                "write-service-table)"
+            )
+            return
+        try:
+            resp = input(
+                "   Rendere persistenti le 40 CU al boot? [y/N] "
+            ).strip().lower()
+        except EOFError:
+            resp = "n"
+        if resp not in ("y", "yes"):
+            self.logger.info("Persistenza 40-CU annullata (resterà volatile)")
+            results["gpu"]["persistence"] = {"suggested": True, "applied": False}
+            return
+        p = self.gpu_unlock.persist()
+        results["gpu"]["persistence"] = p
+        if p.get("persisted"):
+            self.logger.info(
+                "✅ 40 CU persistenti al boot (attive al prossimo reboot)")
+        else:
+            self.logger.warning("Persistenza non riuscita: %s",
+                                p.get("error") or "errore sconosciuto")
 
     def _phase_fix(self) -> Dict[str, Any]:
         """FASE 1b — FIX: TLB, ACE, IOMMU, ACPI, VRAM, GTT, ventole.

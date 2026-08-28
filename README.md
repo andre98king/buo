@@ -180,6 +180,23 @@ buo tui --mock             # Cockpit con hardware simulato
 
 ---
 
+## 🛡️ Avvisi automatici (semi-automaticità)
+
+BUO trasforma i passi manuali in **avvisi automatici** con conferma
+esplicita solo dove serve. Nessuna modifica parte senza verifiche:
+
+| Situazione rilevata | Comportamento di BUO |
+|:---|:---|
+| Unlock 8 core **senza** fix ACPI (SSDT-CST/PST) | ⛔ **BLOCCATO** (fail-closed): l'unlock CPU non parte; istruzioni per e-tho/bc250-acpi-fix. In `--interactive` puoi confermare il rischio |
+| 8 core + 40 CU con PSU < 350W | ⚠️ Avviso budget di potenza (picco FurMark 250-320W); consigliati undervolt + cap GPU 1500 MHz |
+| 40 CU attive via runtime UMR (ostree) | 💾 Avviso: restano **volatili** al reboot; in `--interactive` BUO chiede se persisterle (install-service + write-service-table) |
+| Toolchain 40-CU mancante (`umr`, live-manager) | ⚠️ Avviso con istruzioni (`sudo buo install-deps` / `rpm-ostree install umr`) |
+| Governor GPU non attivo | ⚠️ Problema `governor_missing` nel pre-audit |
+
+Tutti gli avvisi compaiono nel log di esecuzione e nel report finale.
+
+---
+
 ## ⚙️ Configurazione
 
 File: `/etc/buo/buo.yaml` (esempio in `config/buo.yaml`)

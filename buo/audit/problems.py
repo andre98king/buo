@@ -34,6 +34,7 @@ class ProblemDetector(LoggerMixin):
         "mesa_old",
         "iommu_disabled",
         "acpi_cst_missing",
+        "acpi_pst_missing",
         "governor_missing",
         "amdgpu_not_patched",
         "tlb_fault",
@@ -110,7 +111,21 @@ class ProblemDetector(LoggerMixin):
                 "id": "acpi_cst_missing",
                 "severity": "media",
                 "title": "C-State ACPI mancanti",
-                "detail": "Installare SSDT-CST (risparmio energetico in idle)",
+                "detail": "Installare SSDT-CST (risparmio energetico in idle). "
+                          "Con 8 core sbloccati è richiesta la fix ACPI completa "
+                          "(e-tho/bc250-acpi-fix: SSDT-CPU/PST/STUBS), altrimenti "
+                          "la scheda va in boot loop (docs/BUGS.md #18).",
+                "fix": "acpi",
+            })
+        if not acpi.get("pst_present", True):
+            problems.append({
+                "id": "acpi_pst_missing",
+                "severity": "media",
+                "title": "P-State ACPI mancanti",
+                "detail": "SSDT-PST assente: gli 8 core sbloccati non hanno "
+                          "frequency scaling stabile (800-3200 MHz). Installare "
+                          "e-tho/bc250-acpi-fix (SSDT-CPU/PST/STUBS) PRIMA di "
+                          "sbloccare la CPU, altrimenti boot loop.",
                 "fix": "acpi",
             })
 
@@ -188,6 +203,8 @@ class ProblemDetector(LoggerMixin):
             if pid == "iommu_disabled" and not hw.state.iommu_off:
                 continue
             if pid == "acpi_cst_missing" and hw.state.is_acpi_fixed:
+                continue
+            if pid == "acpi_pst_missing" and hw.state.is_acpi_fixed:
                 continue
             if pid == "tlb_fault" and hw.state.is_tlb_fixed:
                 continue

@@ -23,6 +23,9 @@ class TestOrchestrator(unittest.TestCase):
 
     def _make(self, dry_run=True):
         hw = MockHardware(seed=42)
+        # Scheda simulata "pronta": fix ACPI già presenti (prerequisito
+        # per l'unlock 8-core, vedi test_acpi_gate.py)
+        hw.state.is_acpi_fixed = True
         cfg = BUOConfig()
         cfg.validation_stress_duration = 0
         cfg.benchmark_enabled = True
