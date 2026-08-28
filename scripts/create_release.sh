@@ -13,10 +13,17 @@ echo "📦 Creazione pacchetto BUO v${VERSION}..."
 rm -rf "/tmp/${OUT}"
 mkdir -p "/tmp/${OUT}"
 
-# Copia il progetto (escludendo artefatti)
+# Copia il progetto rispettando .gitignore (--exclude-from): i file interni
+# (research/, reference/, PROJECT_STATUS.md, docs/BUGS.md, ...) restano fuori
+# dall'archivio. Gli exclude espliciti sotto sono una rete di sicurezza.
 rsync -a \
+  --exclude-from=.gitignore \
   --exclude='*.pyc' --exclude='__pycache__' --exclude='.git' \
   --exclude='venv' --exclude='.venv' --exclude='*.egg-info' \
+  --exclude='research/' --exclude='reference/' \
+  --exclude='PROJECT_STATUS.md' \
+  --exclude='docs/BUGS.md' --exclude='docs/COMMUNITY_NOTES.md' \
+  --exclude='docs/8CORE_PLAN.md' --exclude='docs/TEST_PLAN.md' \
   ./ "/tmp/${OUT}/"
 
 cd /tmp
