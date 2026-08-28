@@ -5,7 +5,7 @@
 """
 Wrapper per bc250-cu-live-manager.sh — 40 CU via RUNTIME UMR.
 
-METODO CORRETTO SU BAZZITE/OSTREE (docs/COMMUNITY_NOTES.md §2b):
+METODO CORRETTO SU BAZZITE/OSTREE:
     il kernel patch (bc250-enable-40cu.sh) NON funziona su ostree perché
     /usr è read-only (il build fallisce scrivendo amdgpu_trace.h nei
     kernel headers). Su ostree si usa il runtime UMR: scrive i registri

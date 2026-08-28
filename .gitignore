@@ -40,3 +40,6 @@ docs/TEST_PLAN.md
 
 # Script temporanei di monitoraggio
 /tmp-*.sh
+
+# Benchmark/temp scripts locali
+/tmp-bench/

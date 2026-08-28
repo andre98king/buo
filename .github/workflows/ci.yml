@@ -22,13 +22,23 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install click rich pyyaml
+          pip install click rich pyyaml tomli
 
       - name: Compile check
         run: python -m compileall -q buo/
 
       - name: Run unit tests
-        run: python -m unittest discover tests -v
+        run: python -m unittest discover tests -v > /tmp/t.log 2>&1
+      - name: Debug - publish failure log
+        if: failure()
+        run: |
+          git config user.email "ci@local"
+          git config user.name "ci-debug"
+          git checkout -B ci-debug
+          cp /tmp/t.log ci-failure-py${{ matrix.python-version }}.log
+          git add ci-failure-py${{ matrix.python-version }}.log
+          git commit -m "ci: failure log py${{ matrix.python-version }} $(date +%s)"
+          git push origin ci-debug --force
 
   test-extras:
     runs-on: ubuntu-latest
@@ -42,7 +52,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install click rich pyyaml numpy scikit-learn textual
       - name: Run unit tests (optional deps present)
-        run: python -m unittest discover tests -q
+        run: python -m unittest discover tests -q > /tmp/t.log 2>&1
+      - name: Debug - publish failure log
+        if: failure()
+        run: |
+          git config user.email "ci@local"
+          git config user.name "ci-debug"
+          git checkout -B ci-debug
+          cp /tmp/t.log ci-failure-extras.log
+          git add ci-failure-extras.log
+          git commit -m "ci: failure log extras $(date +%s)"
+          git push origin ci-debug --force
 
   lint:
     runs-on: ubuntu-latest

@@ -57,7 +57,7 @@ class TestMesaDetection(unittest.TestCase):
 
     def test_detector_kernel_regression_bad_ranges(self):
         """Kernel nei range difettosi (6.15.0-6.15.6, 6.17.8-6.17.10)
-        → kernel_regression segnalato (community: docs/COMMUNITY_NOTES.md)."""
+        → kernel_regression segnalato (community-reported)."""
         det = ProblemDetector(mock=True)
         for rel in ["6.15.0-generic", "6.15.6-arch1", "6.17.8-ba29.fc43",
                     "6.17.10-cachyos"]:

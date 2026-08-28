@@ -56,7 +56,7 @@ class TestAntiLoop(unittest.TestCase):
         calls = self._count_reboots(orch, orch._phase_fix)
         self.assertEqual(len(calls), 1, f"reboot schedulati: {calls}")
         # IOMMU è un no-op (verify già attivo): il primo fix che richiede
-        # reboot è acpi_fix (docs/BUGS.md #2)
+        # reboot è acpi_fix
         self.assertIn("acpi_fix", calls[0])
 
     def test_fix_phase_skips_applied_steps_on_resume(self):

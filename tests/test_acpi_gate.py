@@ -3,7 +3,7 @@
 """
 Gate ACPI per l'unlock CPU 8-core + avvisi semi-automatici.
 
-Fail-closed (docs/BUGS.md #18): senza le fix ACPI (SSDT-CST/PST, repo
+Fail-closed: senza le fix ACPI (SSDT-CST/PST, repo
 e-tho/bc250-acpi-fix) l'unlock 8-core manda la BC-250 in boot loop.
 BUO quindi BLOCCA l'unlock CPU in automatico e avvisa; la conferma
 esplicita è possibile solo in modalità interattiva.

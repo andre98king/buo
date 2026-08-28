@@ -60,7 +60,7 @@ class BUOConfig:
             safety.get("power_budget", LIMITS.power.power_budget)
         )
         # Tetto globale ai reboot per run (difesa in profondità contro i
-        # boot loop; vedi docs/BUGS.md #14). Un ciclo completo legittimo
+        # boot loop). Un ciclo completo legittimo
         # richiede al massimo ~4 reboot (CPU, GPU, ACPI, IOMMU non-ostree).
         self.max_reboots: int = max(1, int(safety.get("max_reboots", 5)))
 

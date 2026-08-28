@@ -5,7 +5,7 @@
 """
 GPU 40-CU Unlock — metodo per distro (kernel patch o runtime UMR).
 
-METODO CORRETTO PER DISTRO (docs/COMMUNITY_NOTES.md §2b):
+METODO CORRETTO PER DISTRO:
     • NON-ostree (Fedora/Arch standard): kernel patch amdgpu via
       `bc250-enable-40cu.sh` (build + enable, richiede reboot).
     • OSTREE (Bazzite/SteamOS): /usr è READ-ONLY → il kernel patch NON

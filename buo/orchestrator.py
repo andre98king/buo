@@ -385,8 +385,8 @@ class Orchestrator(LoggerMixin):
             self.logger.warning("⚠️ CPU a %.1f°C: verifica il raffreddamento",
                                 cpu_t)
 
-        # Budget di potenza: la combo 8 core + 40 CU ha un picco noto
-        # (docs/COMMUNITY_NOTES.md §2c). Avviso NON bloccante: la decisione
+        # Budget di potenza: la combo 8 core + 40 CU ha un picco noto.
+        # Avviso NON bloccante: la decisione
         # finale resta al governor/limiti immutabili.
         self._check_power_budget()
 
@@ -400,7 +400,7 @@ class Orchestrator(LoggerMixin):
     def _check_power_budget(self) -> None:
         """Avvisa se la combo 8 core + 40 CU può superare il PSU dichiarato.
 
-        Numeri misurati sul campo (docs/COMMUNITY_NOTES.md §2c):
+        Numeri misurati sul campo:
             • gaming 200-220W (undervolt + cap 1500 MHz)
             • FurMark 250-320W senza cap
             • GPU idle 48W, PSU Metalfish 300W
@@ -414,7 +414,7 @@ class Orchestrator(LoggerMixin):
                     "⚠️ POTENZA: PSU dichiarato %dW con 8 core + 40 CU "
                     "abilitati. Picco misurato: FurMark 250-320W SENZA cap. "
                     "Per restare sotto i %dW: undervolt + cap GPU 1500 MHz "
-                    "(≈125-220W). docs/COMMUNITY_NOTES.md §2c.", psu, psu)
+                    "(≈125-220W).", psu, psu)
             else:
                 self.logger.info(
                     "✅ Potenza: PSU %dW sufficiente per 8 core + 40 CU "
@@ -631,8 +631,7 @@ class Orchestrator(LoggerMixin):
             if not self._acpi_gate_ok():
                 self.logger.warning(
                     "⚠️ GATE ACPI: fix SSDT-PST/CST mancanti — senza di esse "
-                    "l'unlock 8-core porta la BC-250 in BOOT LOOP "
-                    "(docs/BUGS.md #18).")
+                    "l'unlock 8-core porta la BC-250 in BOOT LOOP.")
                 proceed = False
                 if self.interactive:
                     try:
@@ -653,7 +652,7 @@ class Orchestrator(LoggerMixin):
                     self.results["notes"].append(
                         "CPU unlock bloccato dal gate ACPI: fix SSDT-CST/PST "
                         "mancanti (e-tho/bc250-acpi-fix) — necessario prima "
-                        "di sbloccare gli 8 core (boot loop, docs/BUGS.md #18)"
+                        "di sbloccare gli 8 core (boot loop)"
                     )
                 else:
                     results["cpu"] = self._do_cpu_unlock()
@@ -721,7 +720,7 @@ class Orchestrator(LoggerMixin):
         """True se le tabelle ACPI per gli 8 core (CST+PST) sono presenti.
 
         Fail-closed: senza SSDT-CST/PST l'unlock 8-core manda la scheda in
-        boot loop (docs/BUGS.md #18, ricetta docs/COMMUNITY_NOTES.md §2c).
+        boot loop.
         In mock usa lo stato simulato; in modalità reale legge /sys.
         """
         if self.mock and self.hardware is not None:
@@ -751,7 +750,7 @@ class Orchestrator(LoggerMixin):
                 "suggested": True,
                 "note": "Per rendere persistenti le 40 CU al boot: esegui "
                         "la persistenza manuale (install-service + "
-                        "write-service-table) — docs/COMMUNITY_NOTES.md §2b",
+                        "write-service-table)",
             }
             self.results["notes"].append(
                 "40 CU attive ma VOLATILI (runtime UMR): al reboot tornano "
@@ -1168,9 +1167,9 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.increment_reboot_count()
             self.logger.info("♻️ [MOCK] reboot simulato: %s", reason)
             return
-        # Tetto globale anti-boot-loop (difesa in profondità, docs/BUGS.md
-        # #14): oltre il limite il pipeline si FERMA invece di riavviare
-        # ancora, evitando loop infiniti causati da bug futuri.
+        # Tetto globale anti-boot-loop (difesa in profondità): oltre il
+        # limite il pipeline si FERMA invece di riavviare ancora, evitando
+        # loop infiniti causati da bug futuri.
         count = self.checkpoint.get_reboot_count()
         if count >= self.config.max_reboots:
             msg = (f"Tetto globale reboot raggiunto ({count}/"
@@ -1193,7 +1192,7 @@ class Orchestrator(LoggerMixin):
     def _restore_results_from_checkpoint(self) -> None:
         """Ripresa dopo reboot: ricarica i dati in-memory delle fasi già
         completate dal checkpoint. Senza questo, il report finale perde
-        "before", "problems" e "applied_fixes" (bug #12 — docs/BUGS.md)."""
+        "before", "problems" e "applied_fixes"."""
         pa = self.checkpoint.get_phase("pre_audit")
         if pa.get("completed"):
             data = pa.get("data", {}) or {}

@@ -62,7 +62,7 @@ class TestOrchestrator(unittest.TestCase):
         orch = self._make()
         orch.run()
         ids = [p["id"] for p in orch.results["problems"]]
-        # IOMMU attivo è lo stato CORRETTO (docs/BUGS.md #2): non deve
+        # IOMMU attivo è lo stato CORRETTO: non deve
         # comparire come problema; il problema è iommu_disabled (kernel)
         self.assertNotIn("iommu_disabled", ids)
         self.assertIn("tlb_fault", ids)

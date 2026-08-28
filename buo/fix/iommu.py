@@ -5,7 +5,7 @@
 """
 IOMMU — nessuna modifica a livello kernel (fix BIOS manuale).
 
-⚠️ CORREZIONE DA EVIDENZA DI CAMPO (docs/BUGS.md #2):
+⚠️ CORREZIONE DA EVIDENZA DI CAMPO:
     la community (elektricM/amd-bc250-docs) consiglia di DISABILITARE
     L'IOMMU NEL BIOS per curare crash/black-screen della GPU
     ("IOMMU is broken - causes display failures and crashes").
@@ -53,14 +53,14 @@ class IOMMUFix(LoggerMixin):
             return False
 
     def apply(self) -> Dict[str, Any]:
-        """Nessuna modifica: l'IOMMU va lasciato attivo (docs/BUGS.md #2)."""
+        """Nessuna modifica: l'IOMMU va lasciato attivo."""
         if self.mock and self.mock_hw is not None:
             return {
                 "applied": False,
                 "needs_reboot": False,
                 "warning": (
                     "IOMMU: nessuna modifica (mock). La fix per i crash GPU "
-                    "è il BIOS, non iommu=off (docs/BUGS.md #2)."
+                    "è il BIOS, non iommu=off."
                 ),
             }
         return {
@@ -70,7 +70,7 @@ class IOMMUFix(LoggerMixin):
                 "IOMMU: nessuna modifica a livello kernel. La community "
                 "consiglia di disabilitare l'IOMMU NEL BIOS per i crash GPU "
                 "(elektricM/amd-bc250-docs), ma il parametro kernel "
-                "`iommu=off` rompe USB e rete su BC-250 (docs/BUGS.md #2): "
+                "`iommu=off` rompe USB e rete su BC-250: "
                 "NON va usato. Se `iommu=off` è già presente, rimuovilo: "
                 "sudo rpm-ostree kargs --delete=iommu=off && reboot. "
                 "Per i crash GPU usa il toggle BIOS manuale "

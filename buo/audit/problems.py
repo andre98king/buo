@@ -8,7 +8,7 @@ della BC-250 (dall'analisi approfondita della chat, messaggi 90-94):
 
     • kernel < 6.11 o versioni con regressioni note
     • Mesa < 25.1
-    • IOMMU disattivato (iommu=off rompe USB/rete — docs/BUGS.md #2)
+    • IOMMU disattivato (iommu=off rompe USB/rete)
     • tabelle ACPI C-State mancanti
     • governor non installato/attivo
     • modulo amdgpu non patchato (40-CU)
@@ -100,8 +100,7 @@ class ProblemDetector(LoggerMixin):
                 "title": "iommu=off nel kernel — rompe USB/rete su BC-250",
                 "detail": "Rimuovere il parametro kernel iommu=off "
                           "(rpm-ostree kargs --delete=iommu=off). "
-                          "La fix per i crash GPU è il BIOS, non il kernel "
-                          "(docs/BUGS.md #2).",
+                          "La fix per i crash GPU è il BIOS, non il kernel.",
                 "fix": "iommu",
             })
 
@@ -114,7 +113,7 @@ class ProblemDetector(LoggerMixin):
                 "detail": "Installare SSDT-CST (risparmio energetico in idle). "
                           "Con 8 core sbloccati è richiesta la fix ACPI completa "
                           "(e-tho/bc250-acpi-fix: SSDT-CPU/PST/STUBS), altrimenti "
-                          "la scheda va in boot loop (docs/BUGS.md #18).",
+                          "la scheda va in boot loop.",
                 "fix": "acpi",
             })
         if not acpi.get("pst_present", True):
