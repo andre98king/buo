@@ -10,27 +10,45 @@ Dal design finale:
     • GPU: furmark (o glmark2 come fallback)
     • monitor: temperature, consumi, errori
     • abort se temp > limiti o consumo > budget
+
+Fix C2: il carico viene eseguito con campionamento LIVE ogni secondo
+(letture reali hwmon via RealHardwareReader, o mock nei test). Al
+superamento di un limite o su violazione del safety monitor il processo
+di stress viene TERMINATO e si solleva SafetyViolation — non si aspetta
+la fine del run.
 """
 
+import subprocess
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..constants import LIMITS
 from ..exceptions import SafetyViolation
 from ..utils.logging import LoggerMixin
-from ..utils.shell import run_command, which
+from ..utils.shell import which
 
 
 class StressTest(LoggerMixin):
     """Esegue lo stress test di validazione."""
 
     def __init__(self, mock: bool = False, mock_hardware=None,
-                 safety_monitor=None):
+                 safety_monitor=None, reader=None):
         self.mock = mock
         self.mock_hw = mock_hardware
         self.safety_monitor = safety_monitor
+        self._reader_override = reader  # iniettabile nei test
+        self.deadline_grace = 60  # secondi oltre la durata (iniettabile)
 
     # ------------------------------------------------------------------ #
+
+    def _get_reader(self) -> Any:
+        """Reader: override nei test, altrimenti mock o reale."""
+        if self._reader_override is not None:
+            return self._reader_override
+        if self.mock_hw is not None:
+            return self.mock_hw
+        from ..safety.reader import RealHardwareReader
+        return RealHardwareReader()
 
     def run(self, duration_minutes: int = 30,
             power_budget: int = 300) -> Dict[str, Any]:
@@ -47,56 +65,38 @@ class StressTest(LoggerMixin):
         duration_s = duration_minutes * 60
         self.logger.info("🔥 Stress test: %d minuti (CPU+GPU)", duration_minutes)
 
-        cpu_temp_max, gpu_temp_max, power_max, errors = 0.0, 0.0, 0.0, 0
-        start = time.monotonic()
+        reader = self._get_reader()
+        cpu_temp_max, gpu_temp_max, power_max = 0.0, 0.0, 0.0
 
-        # Carico CPU
+        # Carico CPU (con campionamento live)
         cpu_rc = 1
         if which("stress-ng"):
-            rc, _, stderr = run_command(
+            cpu_rc, t1, t2, p = self._run_loaded(
                 ["stress-ng", "--cpu", "0", "--timeout", str(duration_s),
-                 "--metrics-brief"], timeout=duration_s + 60)
-            cpu_rc = rc
+                 "--metrics-brief"], duration_s, reader, power_budget)
+            cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
         elif which("stress"):
-            rc, _, _ = run_command(
+            cpu_rc, t1, t2, p = self._run_loaded(
                 ["stress", "--cpu", "0", "--timeout", str(duration_s)],
-                timeout=duration_s + 60)
-            cpu_rc = rc
+                duration_s, reader, power_budget)
+            cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
 
         # Carico GPU (FurMark o glmark2)
         gpu_rc = 1
         if which("glmark2"):
-            rc, out, _ = run_command(
+            gpu_rc, t1, t2, p = self._run_loaded(
                 ["glmark2", "--run-forever", "--seconds", str(duration_s)],
-                timeout=duration_s + 60)
-            gpu_rc = rc
+                duration_s, reader, power_budget)
+            cpu_temp_max = max(cpu_temp_max, t1)
+            gpu_temp_max = max(gpu_temp_max, t2)
+            power_max = max(power_max, p)
         elif which("furmark"):
-            rc, _, _ = run_command(
+            gpu_rc, t1, t2, p = self._run_loaded(
                 ["furmark", "--benchmark", "--duration", str(duration_s)],
-                timeout=duration_s + 60)
-            gpu_rc = rc
-
-        # Durante lo stress si campiona (safety monitor esterno);
-        # qui simuliamo il monitoraggio con l'hardware se disponibile.
-        if self.mock_hw is not None:
-            for _ in range(min(duration_s, 30)):
-                cpu_temp_max = max(cpu_temp_max, self.mock_hw.get_cpu_temp())
-                gpu_temp_max = max(gpu_temp_max, self.mock_hw.get_gpu_temp())
-                power_max = max(power_max, self.mock_hw.get_total_power())
-                time.sleep(1)
-
-        if cpu_temp_max > LIMITS.cpu.temp_max:
-            raise SafetyViolation(
-                f"CPU temp {cpu_temp_max:.1f}°C > {LIMITS.cpu.temp_max}°C",
-                cpu_temp_max, LIMITS.cpu.temp_max)
-        if gpu_temp_max > LIMITS.gpu.temp_max:
-            raise SafetyViolation(
-                f"GPU temp {gpu_temp_max:.1f}°C > {LIMITS.gpu.temp_max}°C",
-                gpu_temp_max, LIMITS.gpu.temp_max)
-        if power_max > power_budget:
-            raise SafetyViolation(
-                f"Potenza {power_max:.1f}W > {power_budget}W",
-                power_max, power_budget)
+                duration_s, reader, power_budget)
+            cpu_temp_max = max(cpu_temp_max, t1)
+            gpu_temp_max = max(gpu_temp_max, t2)
+            power_max = max(power_max, p)
 
         passed = cpu_rc == 0 and gpu_rc == 0
         return {
@@ -105,8 +105,76 @@ class StressTest(LoggerMixin):
             "cpu_temp_max": round(cpu_temp_max, 1),
             "gpu_temp_max": round(gpu_temp_max, 1),
             "power_max": round(power_max, 1),
-            "errors": errors,
+            "errors": 0,
         }
+
+    # ------------------------------------------------------------------ #
+
+    def _run_loaded(self, cmd: List[str], duration_s: int, reader: Any,
+                    power_budget: int) -> Tuple[int, float, float, float]:
+        """Esegue un comando di stress con campionamento LIVE e abort.
+
+        Ogni secondo campiona temperature/potenza (reali o mock). Se un
+        limite viene superato, o il safety monitor segnala violazione, il
+        processo viene TERMINATO e si solleva SafetyViolation (C2).
+        Sensori non leggibili (None) → avviso e limite saltato, MAI
+        valori fittizi.
+        """
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        cpu_temp_max = gpu_temp_max = power_max = 0.0
+        deadline = (time.monotonic() + duration_s
+                    + self.deadline_grace)
+        warned = set()
+        try:
+            while proc.poll() is None:
+                if time.monotonic() > deadline:
+                    self.logger.error("Stress oltre la deadline, terminato")
+                    proc.terminate()
+                    break
+                if (self.safety_monitor is not None
+                        and self.safety_monitor.is_violation()):
+                    proc.terminate()
+                    raise SafetyViolation(
+                        self.safety_monitor.get_violation_reason() or
+                        "SafetyMonitor: violazione")
+                for label, value, limit, bucket in (
+                        ("CPU", reader.get_cpu_temp(), LIMITS.cpu.temp_max,
+                         "cpu"),
+                        ("GPU", reader.get_gpu_temp(), LIMITS.gpu.temp_max,
+                         "gpu"),
+                        ("Potenza", reader.get_total_power(), power_budget,
+                         "power")):
+                    if value is None:
+                        if label not in warned:
+                            warned.add(label)
+                            self.logger.warning(
+                                "Stress: sensore %s non leggibile — limite "
+                                "non verificabile", label)
+                        continue
+                    if bucket == "cpu":
+                        cpu_temp_max = max(cpu_temp_max, value)
+                    elif bucket == "gpu":
+                        gpu_temp_max = max(gpu_temp_max, value)
+                    else:
+                        power_max = max(power_max, value)
+                    if value > limit:
+                        proc.terminate()
+                        raise SafetyViolation(
+                            f"{label} temp {value:.1f}°C > {limit}°C"
+                            if bucket != "power" else
+                            f"Potenza {value:.1f}W > {limit}W",
+                            value, limit)
+                time.sleep(1)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        return proc.returncode, cpu_temp_max, gpu_temp_max, power_max
 
     def _mock_run(self, duration_minutes: int) -> Dict[str, Any]:
         hw = self.mock_hw
