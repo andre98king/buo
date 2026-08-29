@@ -667,9 +667,22 @@ class Orchestrator(LoggerMixin):
             )
         failed = [n for n, s in result.items() if s.get("status") == "failed"]
         if failed:
+            # UX (bug sul campo): riporta il DETTAGLIO di ogni dep
+            # fallito (es. "binario non prodotto: ...", "make fallito:
+            # ..."), non solo il nome — altrimenti il problema reale
+            # resta invisibile e va riprodotto a mano.
+            pieces = []
+            for n in failed:
+                detail = (result[n].get("detail") or "").strip()
+                if not detail:
+                    pieces.append(n)
+                elif detail.startswith(f"{n}:"):
+                    pieces.append(detail)  # il dettaglio include già il nome
+                else:
+                    pieces.append(f"{n}: {detail}")
             raise ConfigurationError(
                 "Impossibile scaricare i tool necessari: "
-                f"{', '.join(failed)}."
+                f"{', '.join(pieces)}."
                 + ("" if bundle else OFFLINE_HINT)
             )
         self.logger.info("✅ Tool scaricati e installati automaticamente")

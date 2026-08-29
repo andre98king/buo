@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 from buo.config import BUOConfig
+from buo.exceptions import ConfigurationError
 from buo.install.deps import DEPS, DependencyManager
 from buo.orchestrator import Orchestrator
 from buo.utils.paths import state_dir
@@ -491,6 +492,31 @@ class TestOfflineOrchestratorConfig(unittest.TestCase):
             with mock.patch.object(orch3, "_configure_installed_governor"):
                 orch3._ensure_dependencies()
         self.assertEqual(calls[-1], "/tmp/flag.tar.gz")
+
+    def test_ensure_deps_error_includes_failed_detail(self):
+        """Gap 3 (UX): il ConfigurationError per un dep fallito deve
+        riportare il DETAIL (es. 'binario non prodotto: ...'), non solo
+        il nome — è ciò che avrebbe fatto capire sul campo il problema
+        bc250_memcfg senza dover riprodurre il make a mano."""
+        def fake_check(self, deps=None):
+            return {d["name"]: {"present": False, "type": d["type"]}
+                    for d in DEPS}
+
+        def fake_install(self, deps=None, sudo=True, offline_bundle=None):
+            return {"bc250_memcfg": {"status": "failed",
+                                     "detail": "binario non prodotto: "
+                                               "bc250memcfg"}}
+
+        with mock.patch.object(DependencyManager, "check", fake_check), \
+             mock.patch.object(DependencyManager, "install", fake_install):
+            orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False)
+            with mock.patch.object(orch, "_configure_installed_governor"):
+                with self.assertRaises(ConfigurationError) as ctx:
+                    orch._ensure_dependencies()
+        msg = str(ctx.exception)
+        self.assertIn("bc250_memcfg", msg)
+        self.assertIn("binario non prodotto", msg)
+        self.assertIn("bc250memcfg", msg)
 
     def test_config_parses_offline_bundle(self):
         cfg = BUOConfig({"deps": {"offline_bundle": "/x/bundle.tar.gz"}})

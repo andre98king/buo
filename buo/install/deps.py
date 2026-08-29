@@ -147,7 +147,13 @@ def _build_deps() -> List[Dict[str, Any]]:
             "commit": "829e8d64f23c5ad1e1d662f4eab488f31e0daa72",
             "required_for": "fix VRAM (split VRAM dedicata via "
                            "bc250_memcfg --set-vram)",
-            "binary": "bc250_memcfg",
+            # G6/build (bug sul campo): `binary` è il nome PRODOTTO dal
+            # make di fanoush — `gcc -Os -s main.cpp -o bc250memcfg`
+            # (SENZA underscore); `install_as` è il nome CANONICO con cui
+            # BUO lo installa in bin_dir — il contratto di vram.py e
+            # della doc utente è `bc250_memcfg --set-vram <N>G`.
+            "binary": "bc250memcfg",
+            "install_as": "bc250_memcfg",
         },
         {
             "name": "bc250-acpi-fix",
@@ -278,6 +284,25 @@ class DependencyManager(LoggerMixin):
                 "missing": missing,
                 "detail": "binari: " + ", ".join(bins),
                 "note": dep.get("note", ""),
+            }
+        if dep["type"] == "build":
+            # G6/build: presente = BINARIO installato in bin_dir, NON il
+            # checkout. Bug sul campo: dopo un make fallito il checkout
+            # esiste ma il binario no → col vecchio check (checkout
+            # presente) i run successivi credevano il dep installato e
+            # non lo recompilavano mai. Il checkout serve solo per
+            # ricompilare: binario presente = dep presente anche senza
+            # checkout. Nome atteso: install_as (canonico, es.
+            # bc250_memcfg) oppure binary (nome prodotto dal make).
+            binary_name = (dep.get("install_as")
+                           or dep.get("binary") or dep["name"])
+            installed = self.bin_dir / binary_name
+            return {
+                "present": installed.exists(),
+                "type": dep["type"],
+                "required_for": dep["required_for"],
+                "missing": [] if installed.exists() else [binary_name],
+                "checkout": str(checkout) if checkout.exists() else None,
             }
         # instruct: presente = checkout clonato
         return {
@@ -621,7 +646,12 @@ class DependencyManager(LoggerMixin):
             return {"status": "failed",
                     "detail": f"{dep['name']}: binario non prodotto: "
                               f"{dep.get('binary')}"}
-        dest = self.bin_dir / binary.name
+        # install_as (canonico, es. bc250_memcfg) se dichiarato, altrimenti
+        # il nome prodotto dal make — bug sul campo: fanoush produce
+        # `bc250memcfg` ma il contratto con vram.py/doc utente è
+        # `bc250_memcfg`, quindi la destinazione DEVE essere install_as.
+        dest_name = dep.get("install_as") or binary.name
+        dest = self.bin_dir / dest_name
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if self._writable(self.bin_dir):
@@ -642,8 +672,10 @@ class DependencyManager(LoggerMixin):
             dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP |
                        stat.S_IXOTH)
             self._record_hash(dep, {"src": "binary"}, dest)
-            return {"status": "ok",
-                    "detail": f"{binary.name} compilato e installato"}
+            detail = f"{binary.name} compilato e installato"
+            if dest_name != binary.name:
+                detail += f" come {dest_name}"
+            return {"status": "ok", "detail": detail}
         except Exception as e:
             return {"status": "failed", "detail": f"{binary.name}: {e}"}
 
