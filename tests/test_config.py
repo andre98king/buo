@@ -70,6 +70,43 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(loaded.cooling_type, "custom")
 
 
+class TestCpuTargetVid(unittest.TestCase):
+    """phases.undervolt.cpu_target_vid — VID target della ricerca CPU
+    (vero undervolt = scale NEGATIVA; scoperta sul campo 30/08: col
+    default 1300 la misura stock resta sotto il target e la scale non va
+    mai negativa → solo downclock; target 1000 → 3500@999 scale -14
+    validato L2). Default conservativo = vid_recommended_max (1300),
+    clamp a [vid_min, vid_recommended_max]."""
+
+    def test_cpu_target_vid_default_is_recommended_max(self):
+        cfg = BUOConfig()
+        self.assertEqual(cfg.undervolt_cpu_target_vid,
+                         LIMITS.cpu.vid_recommended_max)
+
+    def test_cpu_target_vid_custom_value_accepted(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 1000}}})
+        self.assertEqual(cfg.undervolt_cpu_target_vid, 1000)
+
+    def test_cpu_target_vid_above_recommended_clamped(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 2000}}})
+        self.assertEqual(cfg.undervolt_cpu_target_vid,
+                         LIMITS.cpu.vid_recommended_max)
+
+    def test_cpu_target_vid_below_vid_min_clamped(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 500}}})
+        self.assertEqual(cfg.undervolt_cpu_target_vid, LIMITS.cpu.vid_min)
+
+    def test_cpu_target_vid_is_known_key(self):
+        """Chiave nota dello schema piatto: nessun avviso fail-soft."""
+        with self.assertNoLogs("buo.config", level="WARNING"):
+            BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 1000}}})
+
+    def test_cpu_target_vid_in_to_dict(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 1000}}})
+        d = cfg.to_dict()
+        self.assertEqual(d["phases"]["undervolt"]["cpu_target_vid"], 1000)
+
+
 class TestUnknownConfigKeys(unittest.TestCase):
     """Avviso fail-soft (MAI bloccante) per chiavi config sconosciute o
     strutture annidate (fix 30/08): BUO legge chiavi PIATTE sotto safety:

@@ -70,6 +70,41 @@ class TestDetectParser(unittest.TestCase):
         self.assertEqual(result["v_f_points"][0]["vid"], 1087)
         self.assertEqual(result["v_f_points"][0]["scale"], 0)
 
+    def test_optimizer_log_reports_real_vid_target(self):
+        """Il log di avvio riporta il VID target REALE passato (1000),
+        non il default 1300: con 1300 la scale non scende mai in negativo
+        (scoperta sul campo 30/08, target 1000 → 3500@999 scale -14)."""
+        from buo.optimize.cpu import CPUUndervoltOptimizer
+        from buo.unlock.wrappers.bc250_overclock import BC250DetectWrapper
+
+        class FakeDetect(BC250DetectWrapper):
+            def __init__(self):
+                super().__init__()
+
+            @property
+            def available(self):
+                return True
+
+            def detect(self, target_freq, max_vid, max_temp, keep=False):
+                return {
+                    "returncode": 0,
+                    "stdout": ("Final Result: 3500 MHz @ 999 mV "
+                               "using scale -14\n"),
+                    "stderr": "",
+                    "parsed_output": self.parse_output(
+                        "Final Result: 3500 MHz @ 999 mV "
+                        "using scale -14\n", ""),
+                }
+
+        opt = CPUUndervoltOptimizer(mock=False, use_wrapper=False)
+        opt.detect_wrapper = FakeDetect()
+        with self.assertLogs("buo.CPUUndervoltOptimizer",
+                             level="INFO") as cm:
+            opt.optimize(max_freq=3500, max_vid=1000)
+        joined = "\n".join(cm.output)
+        self.assertIn("VID max 1000 mV", joined)
+        self.assertNotIn("VID max 1300 mV", joined)
+
     def test_detect_runs_in_writable_cwd(self):
         """bc250-detect scrive overclock.conf: cwd sempre scrivibile (/tmp),
         altrimenti via systemd la cwd '/' è read-only (bug sul campo)."""

@@ -135,7 +135,7 @@ _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
     "fix": frozenset({"tlb", "ace", "iommu", "acpi", "vram", "gtt",
                       "fan"}),
     "undervolt": frozenset({
-        "gpu_start_freq", "persist", "gpu_sweep_enabled",
+        "cpu_target_vid", "gpu_start_freq", "persist", "gpu_sweep_enabled",
         "gpu_sweep_freqs", "gpu_sweep_step_mv", "gpu_sweep_floor_mv",
         "gpu_sweep_max_steps", "gpu_sweep_test_seconds",
         "gpu_sweep_confirm_seconds", "gpu_sweep_max_minutes",
@@ -258,6 +258,17 @@ class BUOConfig:
         self.fix_fan: bool = bool(fix.get("fan", True))
 
         undervolt = phases.get("undervolt", {})
+        # ---- VID target della ricerca CPU (vero undervolt = scale
+        # NEGATIVA, scoperta sul campo 30/08): col default
+        # vid_recommended_max la misura stock resta sotto il target e la
+        # scale non va mai negativa (solo downclock). Target più basso
+        # (es. 1000) spinge bc250-detect nel negativo. Clamp a
+        # [vid_min, vid_recommended_max] (mai sotto il minimo sicuro, mai
+        # oltre il consigliato), default conservativo.
+        self.undervolt_cpu_target_vid: int = _sweep_clamp(
+            undervolt.get("cpu_target_vid", LIMITS.cpu.vid_recommended_max),
+            LIMITS.cpu.vid_min, LIMITS.cpu.vid_recommended_max,
+            LIMITS.cpu.vid_recommended_max, "cpu_target_vid")
         self.undervolt_gpu_start_freq: int = int(undervolt.get("gpu_start_freq", 1200))
         # G3: rende PERSISTENTE l'undervolt al boot (bc250-apply --install).
         # Default ON: "BUO si occupa di tutto" — il profilo deve sopravvivere
@@ -393,6 +404,7 @@ class BUOConfig:
                     "fan": self.fix_fan,
                 },
                 "undervolt": {
+                    "cpu_target_vid": self.undervolt_cpu_target_vid,
                     "gpu_start_freq": self.undervolt_gpu_start_freq,
                     "gpu_sweep_enabled": self.undervolt_gpu_sweep_enabled,
                     "gpu_sweep_freqs": self.undervolt_gpu_sweep_freqs,

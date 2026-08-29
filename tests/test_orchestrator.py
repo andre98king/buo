@@ -143,6 +143,24 @@ class TestOrchestrator(unittest.TestCase):
         _, s4 = orch._clamp_cpu(3500, scale=-80)
         self.assertEqual(s4, -50)
 
+    def test_phase_optimize_passes_cpu_target_vid(self):
+        """_phase_optimize passa max_vid=undervolt_cpu_target_vid alla
+        ricerca CPU (es. 1000): senza un target sotto la misura stock la
+        scale non va mai negativa e l'"undervolt" è solo downclock."""
+        from unittest import mock
+        orch = self._make(dry_run=True)
+        orch.config.undervolt_cpu_target_vid = 1000
+        result = {
+            "v_f_points": [{"freq": 3500, "vid": 999}],
+            "best_efficiency": {"freq": 3500, "vid": 999},
+            "source": "mock",
+        }
+        with mock.patch.object(orch.uv_cpu, "optimize",
+                               return_value=result) as spy:
+            orch._phase_optimize()
+        spy.assert_called_once_with(
+            max_freq=orch.config.cpu_freq_max, max_vid=1000)
+
     def test_phase_apply_passes_gpu_freq_max_to_write_config(self):
         """_phase_apply deve passare a write_config il cap della config
         (safety.gpu_freq_max): senza, a ogni apply il range tornerebbe a

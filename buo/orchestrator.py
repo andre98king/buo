@@ -1116,6 +1116,7 @@ class Orchestrator(LoggerMixin):
         # CPU undervolt
         uv_cpu = self.uv_cpu.optimize(
             max_freq=self.config.cpu_freq_max,
+            max_vid=self.config.undervolt_cpu_target_vid,
         )
         results["undervolt_cpu"] = uv_cpu
 
