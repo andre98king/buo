@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Test C2: lo stress test campiona LIVE e ABORTA il processo reale."""
 
+import logging
 import subprocess
 import unittest
 
+from buo.config import BUOConfig
 from buo.exceptions import SafetyViolation
 from buo.validate.stress import StressTest
 
@@ -124,6 +126,121 @@ class TestStressAbort(unittest.TestCase):
             result = stress.run(duration_minutes=1, power_budget=300)
         self.assertTrue(spawned, "durata > 0 deve spawnare lo stress")
         self.assertTrue(result["passed"])
+
+
+class TestStressScope(unittest.TestCase):
+    """Stress test SEPARABILE CPU/GPU (richiesta utente 30/08): validare
+    un solo componente (es. overclock/undervolt CPU) non deve caricare
+    l'altro — spike termici e consumi non reali. Spia su which/Popen:
+    i comandi effettivamente spawnati devono riflettere lo scope."""
+
+    def _spawn_spy(self):
+        """Patch which (tutti i tool presenti) e Popen (spia che registra
+        i comandi ed esegue un processo innocuo): ritorna la lista dei
+        comandi spawnati."""
+        import unittest.mock as mock
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def _fake_popen(cmd, **kwargs):
+            # i kwargs (stdout/stderr=pipe) vengono ignorati: il processo
+            # innocuo non crea pipe → niente ResourceWarning
+            spawned.append(cmd)
+            return real_popen(["sleep", "0.2"])
+
+        patches = [
+            mock.patch("buo.validate.stress.which",
+                       side_effect=lambda name: f"/usr/bin/{name}"),
+            mock.patch("buo.validate.stress.subprocess.Popen",
+                       side_effect=_fake_popen),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(patches[0].stop)
+        self.addCleanup(patches[1].stop)
+        return spawned
+
+    def test_scope_cpu_skips_gpu(self):
+        """scope="cpu" → spawna SOLO stress-ng, NESSUN tool GPU; il
+        risultato indica lo scope usato."""
+        spawned = self._spawn_spy()
+        result = StressTest(reader=_CoolReader()).run(
+            duration_minutes=1, power_budget=300, scope="cpu")
+        self.assertEqual(result["scope"], "cpu")
+        self.assertTrue(result["passed"])
+        cmds = [" ".join(c) for c in spawned]
+        self.assertTrue(any("stress-ng" in c for c in cmds),
+                        f"manca stress-ng in: {cmds}")
+        self.assertFalse(any(("glmark2" in c or "furmark" in c) for c in cmds),
+                         f"GPU stressata con scope cpu: {cmds}")
+
+    def test_scope_gpu_skips_cpu(self):
+        """scope="gpu" → spawna SOLO il tool GPU, NESSUN stress-ng; il
+        risultato indica lo scope usato."""
+        spawned = self._spawn_spy()
+        result = StressTest(reader=_CoolReader()).run(
+            duration_minutes=1, power_budget=300, scope="gpu")
+        self.assertEqual(result["scope"], "gpu")
+        self.assertTrue(result["passed"])
+        cmds = [" ".join(c) for c in spawned]
+        self.assertTrue(any(("glmark2" in c or "furmark" in c) for c in cmds),
+                        f"manca tool GPU in: {cmds}")
+        self.assertFalse(any(("stress-ng" in c or " stress " in c)
+                             for c in cmds),
+                         f"CPU stressata con scope gpu: {cmds}")
+
+    def test_scope_both_runs_both(self):
+        """scope="both" (default) → CPU E GPU spawnati (comportamento
+        storico invariato)."""
+        spawned = self._spawn_spy()
+        result = StressTest(reader=_CoolReader()).run(
+            duration_minutes=1, power_budget=300)
+        self.assertEqual(result["scope"], "both")
+        self.assertTrue(result["passed"])
+        cmds = [" ".join(c) for c in spawned]
+        self.assertTrue(any("stress-ng" in c for c in cmds))
+        self.assertTrue(any(("glmark2" in c or "furmark" in c) for c in cmds))
+
+
+class TestStressScopeConfig(unittest.TestCase):
+    """Config validation.stress_scope: default both, valori noti
+    accettati, valori sconosciuti → warning + default both (fail-soft,
+    mai bloccante)."""
+
+    def test_default_is_both(self):
+        cfg = BUOConfig()
+        self.assertEqual(cfg.validation_stress_scope, "both")
+        self.assertEqual(cfg.to_dict()["phases"]["validation"]
+                         ["stress_scope"], "both")
+
+    def test_known_values_accepted(self):
+        for scope in ("both", "cpu", "gpu"):
+            cfg = BUOConfig({"phases": {"validation": {
+                "stress_scope": scope}}})
+            self.assertEqual(cfg.validation_stress_scope, scope)
+
+    def test_invalid_value_warns_and_defaults_to_both(self):
+        with self.assertLogs("buo.config", level="WARNING") as cm:
+            cfg = BUOConfig({"phases": {"validation": {
+                "stress_scope": "apu"}}})
+        self.assertEqual(cfg.validation_stress_scope, "both")
+        self.assertTrue(any("stress_scope" in m for m in cm.output),
+                        f"manca l'avviso stress_scope in: {cm.output}")
+
+    def test_stress_scope_is_a_known_key(self):
+        """stress_scope è nello schema _KNOWN_PHASE_KEYS: nessun avviso
+        'chiave IGNORATA' (schema piatto, fix 30/08)."""
+        logger = logging.getLogger("buo.config")
+        records = []
+        handler = logging.Handler()
+        handler.emit = lambda r: records.append(r.getMessage())
+        logger.addHandler(handler)
+        try:
+            BUOConfig({"phases": {"validation": {"stress_scope": "cpu"}}})
+        finally:
+            logger.removeHandler(handler)
+        self.assertFalse(any("IGNORATA" in m for m in records),
+                         f"avvisi inattesi: {records}")
 
 
 if __name__ == "__main__":

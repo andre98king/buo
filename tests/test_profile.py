@@ -270,11 +270,11 @@ class TestRestoreMode(unittest.TestCase):
     def _recording_stress(self, orch, durations):
         """Sostituisce orch.stress.run con una spia che registra le durate
         (stessa firma di StressTest.run, nessuno spawn)."""
-        def fake_run(duration_minutes=30, power_budget=300):
+        def fake_run(duration_minutes=30, power_budget=300, scope="both"):
             durations.append(duration_minutes)
             return {
                 "passed": True, "skipped": duration_minutes == 0,
-                "duration_minutes": duration_minutes,
+                "duration_minutes": duration_minutes, "scope": scope,
                 "cpu_temp_max": None, "gpu_temp_max": None,
                 "power_max": None, "errors": 0,
             }

@@ -51,19 +51,32 @@ class StressTest(LoggerMixin):
         return RealHardwareReader()
 
     def run(self, duration_minutes: int = 30,
-            power_budget: int = 300) -> Dict[str, Any]:
+            power_budget: int = 300,
+            scope: str = "both") -> Dict[str, Any]:
         """
-        Esegue lo stress test.
+        Esegue lo stress test di validazione.
+
+        Args:
+            duration_minutes: durata del test (0 = skip VERO: nessuno
+                spawn, fix 5ff85f3 — mai `--timeout 0`).
+            power_budget: tetto di potenza per l'abort live (C2).
+            scope: componenti da stressare — "both" (CPU+GPU, default),
+                "cpu" (SOLO stress-ng: nessun carico GPU), "gpu" (SOLO il
+                tool GPU: nessun carico CPU). Richiesta utente 30/08:
+                overclock/undervolt di UN SOLO componente non deve
+                stressare l'altro (spike termici e consumi non reali).
+                Il componente saltato riporta rc=0 sintetico.
 
         Returns:
-            {"passed": bool, "cpu_temp_max":..., "gpu_temp_max":...,
-             "power_max":..., "errors": int}
+            {"passed": bool, "scope": scope, "cpu_temp_max":...,
+             "gpu_temp_max":..., "power_max":..., "errors": int}
         """
         if self.mock and self.mock_hw is not None:
-            return self._mock_run(duration_minutes)
+            return self._mock_run(duration_minutes, scope)
 
         duration_s = duration_minutes * 60
-        self.logger.info("🔥 Stress test: %d minuti (CPU+GPU)", duration_minutes)
+        self.logger.info("🔥 Stress test: %d minuti (scope=%s)",
+                         duration_minutes, scope)
 
         # BUG DI CAMPO (29/08/2026): con durata 0 si spawnava comunque
         # `stress-ng --timeout 0`, che in stress-ng significa NESSUN
@@ -75,7 +88,7 @@ class StressTest(LoggerMixin):
             self.logger.info("   Stress test saltato (durata 0)")
             return {
                 "passed": True, "skipped": True,
-                "duration_minutes": duration_minutes,
+                "duration_minutes": duration_minutes, "scope": scope,
                 "cpu_temp_max": None, "gpu_temp_max": None,
                 "power_max": None, "errors": 0,
             }
@@ -83,40 +96,46 @@ class StressTest(LoggerMixin):
         reader = self._get_reader()
         cpu_temp_max, gpu_temp_max, power_max = 0.0, 0.0, 0.0
 
-        # Carico CPU (con campionamento live)
-        cpu_rc = 1
-        if which("stress-ng"):
-            cpu_rc, t1, t2, p = self._run_loaded(
-                ["stress-ng", "--cpu", "0", "--timeout", str(duration_s),
-                 "--metrics-brief"], duration_s, reader, power_budget)
-            cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
-        elif which("stress"):
-            cpu_rc, t1, t2, p = self._run_loaded(
-                ["stress", "--cpu", "0", "--timeout", str(duration_s)],
-                duration_s, reader, power_budget)
-            cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
+        # Carico CPU (con campionamento live) — saltato con scope="gpu"
+        # (rc=0 sintetico: il componente non è in validazione)
+        cpu_rc = 0
+        if scope != "gpu":
+            cpu_rc = 1
+            if which("stress-ng"):
+                cpu_rc, t1, t2, p = self._run_loaded(
+                    ["stress-ng", "--cpu", "0", "--timeout", str(duration_s),
+                     "--metrics-brief"], duration_s, reader, power_budget)
+                cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
+            elif which("stress"):
+                cpu_rc, t1, t2, p = self._run_loaded(
+                    ["stress", "--cpu", "0", "--timeout", str(duration_s)],
+                    duration_s, reader, power_budget)
+                cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
 
-        # Carico GPU (FurMark o glmark2)
-        gpu_rc = 1
-        if which("glmark2"):
-            gpu_rc, t1, t2, p = self._run_loaded(
-                ["glmark2", "--run-forever", "--seconds", str(duration_s)],
-                duration_s, reader, power_budget)
-            cpu_temp_max = max(cpu_temp_max, t1)
-            gpu_temp_max = max(gpu_temp_max, t2)
-            power_max = max(power_max, p)
-        elif which("furmark"):
-            gpu_rc, t1, t2, p = self._run_loaded(
-                ["furmark", "--benchmark", "--duration", str(duration_s)],
-                duration_s, reader, power_budget)
-            cpu_temp_max = max(cpu_temp_max, t1)
-            gpu_temp_max = max(gpu_temp_max, t2)
-            power_max = max(power_max, p)
+        # Carico GPU (FurMark o glmark2) — saltato con scope="cpu"
+        gpu_rc = 0
+        if scope != "cpu":
+            gpu_rc = 1
+            if which("glmark2"):
+                gpu_rc, t1, t2, p = self._run_loaded(
+                    ["glmark2", "--run-forever", "--seconds", str(duration_s)],
+                    duration_s, reader, power_budget)
+                cpu_temp_max = max(cpu_temp_max, t1)
+                gpu_temp_max = max(gpu_temp_max, t2)
+                power_max = max(power_max, p)
+            elif which("furmark"):
+                gpu_rc, t1, t2, p = self._run_loaded(
+                    ["furmark", "--benchmark", "--duration", str(duration_s)],
+                    duration_s, reader, power_budget)
+                cpu_temp_max = max(cpu_temp_max, t1)
+                gpu_temp_max = max(gpu_temp_max, t2)
+                power_max = max(power_max, p)
 
         passed = cpu_rc == 0 and gpu_rc == 0
         return {
             "passed": passed,
             "duration_minutes": duration_minutes,
+            "scope": scope,
             "cpu_temp_max": round(cpu_temp_max, 1),
             "gpu_temp_max": round(gpu_temp_max, 1),
             "power_max": round(power_max, 1),
@@ -197,7 +216,8 @@ class StressTest(LoggerMixin):
                     proc.wait()
         return proc.returncode, cpu_temp_max, gpu_temp_max, power_max
 
-    def _mock_run(self, duration_minutes: int) -> Dict[str, Any]:
+    def _mock_run(self, duration_minutes: int,
+                  scope: str = "both") -> Dict[str, Any]:
         hw = self.mock_hw
         for _ in range(10):
             hw.get_cpu_temp()
@@ -208,6 +228,7 @@ class StressTest(LoggerMixin):
         return {
             "passed": True,
             "duration_minutes": duration_minutes,
+            "scope": scope,
             "cpu_temp_max": info["cpu_temp"],
             "gpu_temp_max": info["gpu_temp"],
             "power_max": info["total_power"],

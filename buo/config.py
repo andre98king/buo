@@ -102,6 +102,19 @@ def _sweep_freqs(value, default: Optional[List[int]] = None) -> List[int]:
     return valid
 
 
+def _stress_scope(value, default: str = "both") -> str:
+    """validation.stress_scope: both|cpu|gpu (default both). Stress test
+    separabile (richiesta utente 30/08): validare un solo componente non
+    deve caricare l'altro. Valori sconosciuti → warning + default
+    (fail-soft, mai bloccante)."""
+    if isinstance(value, str) and value in ("both", "cpu", "gpu"):
+        return value
+    logging.getLogger(__name__).warning(
+        "Config: validation.stress_scope=%r non valido (both|cpu|gpu) → "
+        "default %s", value, default)
+    return default
+
+
 # --------------------------------------------------------------------- #
 # Chiavi note dello schema PIATTO (config/buo.yaml). Avviso fail-soft
 # (MAI bloccante) per chiavi sconosciute o strutture annidate: un valore
@@ -129,7 +142,7 @@ _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
         "gpu_sweep_temp_gate",
     }),
     "overclock": frozenset({"enable", "power_budget"}),
-    "validation": frozenset({"stress_duration"}),
+    "validation": frozenset({"stress_duration", "stress_scope"}),
 }
 
 
@@ -290,6 +303,12 @@ class BUOConfig:
         self.validation_stress_duration: int = int(
             validation.get("stress_duration", 30)
         )
+        # Stress test separabile CPU/GPU (richiesta utente 30/08):
+        # "both" (default) | "cpu" | "gpu" — un valore sconosciuto viene
+        # segnalato e ricade su "both" (fail-soft).
+        self.validation_stress_scope: str = _stress_scope(
+            validation.get("stress_scope", "both")
+        )
 
         benchmark = data.get("benchmark", {})
         self.benchmark_enabled: bool = bool(benchmark.get("enabled", True))
@@ -391,6 +410,7 @@ class BUOConfig:
                 },
                 "validation": {
                     "stress_duration": self.validation_stress_duration,
+                    "stress_scope": self.validation_stress_scope,
                 },
             },
             "benchmark": {

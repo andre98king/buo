@@ -1357,6 +1357,7 @@ class Orchestrator(LoggerMixin):
             stress = self.stress.run(
                 duration_minutes=stress_duration,
                 power_budget=self.config.power_budget,
+                scope=self.config.validation_stress_scope,
             )
         results["stress"] = stress
 
