@@ -1042,6 +1042,21 @@ class Orchestrator(LoggerMixin):
                 return str(value)
         return ""
 
+    def _gpu_sweep_params(self) -> Dict[str, Any]:
+        """Opzioni della ricerca per-silicio GPU (design GPU_UV §6) da
+        passare a uv_gpu.optimize(sweep=...)."""
+        return {
+            "enabled": self.config.undervolt_gpu_sweep_enabled,
+            "freqs": list(self.config.undervolt_gpu_sweep_freqs),
+            "step_mv": self.config.undervolt_gpu_sweep_step_mv,
+            "floor_mv": self.config.undervolt_gpu_sweep_floor_mv,
+            "max_steps": self.config.undervolt_gpu_sweep_max_steps,
+            "test_seconds": self.config.undervolt_gpu_sweep_test_seconds,
+            "confirm_seconds": self.config.undervolt_gpu_sweep_confirm_seconds,
+            "max_minutes": self.config.undervolt_gpu_sweep_max_minutes,
+            "temp_gate": self.config.undervolt_gpu_sweep_temp_gate,
+        }
+
     def _phase_optimize(self) -> Dict[str, Any]:
         """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited."""
         self.logger.info("⚡ OTTIMIZZAZIONE (undervolt → overclock)")
@@ -1058,8 +1073,30 @@ class Orchestrator(LoggerMixin):
         results["undervolt_cpu"] = uv_cpu
 
         # GPU undervolt
+        sweep = self._gpu_sweep_params()
+        if sweep["enabled"] and not self.mock:
+            # Budget comunicato PRIMA dello sweep (design §8)
+            n_freq = len([f for f in sweep["freqs"]
+                          if f >= self.config.undervolt_gpu_start_freq
+                          and f <= self.config.gpu_freq_max])
+            if n_freq > 0:
+                est_s = (n_freq
+                         * (sweep["max_steps"]
+                            * (sweep["test_seconds"] + 5)
+                            + sweep["confirm_seconds"]))
+                self.logger.info(
+                    "Sweep GPU per-silicio: %d freq × fino a %d candidati × "
+                    "%ds (+ conferma %ds per freq) + ciclo governor ~5s/"
+                    "candidato → stimato ~%d min (tetto wall-clock %d min)",
+                    n_freq, sweep["max_steps"], sweep["test_seconds"],
+                    sweep["confirm_seconds"], (est_s + 59) // 60,
+                    sweep["max_minutes"])
         uv_gpu = self.uv_gpu.optimize(
             start_freq=self.config.undervolt_gpu_start_freq,
+            max_voltage=self.config.gpu_voltage_recommended_max,
+            sweep=sweep,
+            power_budget=self.config.power_budget,
+            monitor=self.safety_monitor,
         )
         results["undervolt_gpu"] = uv_gpu
 

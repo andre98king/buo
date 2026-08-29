@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 # ============================================================================
 
 
+# Griglia delle frequenze di sweep GPU (sottoinsiemi configurabili via
+# `phases.undervolt.gpu_sweep_freqs`). Fonte unica per config e ottimizzatore.
+GPU_FREQ_STEPS = [1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200]
+
+
 @dataclass(frozen=True)
 class CPULimits:
     """Limiti CPU confermati dallo studio (README + codice)."""

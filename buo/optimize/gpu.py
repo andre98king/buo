@@ -14,16 +14,36 @@ PRINCIPIO DI SICUREZZA (fail-closed e valori verificati):
 
     In modalità mock esegue un binary search simulato su MockHardware.
 
-    NOTA: la ricerca per-chip (binary search sul voltage della singola
-    scheda) richiede un livello di accesso hardware dedicato; quando
-    sarà integrato, sostituirà i default della community mantenendo lo
-    stesso contratto di output.
+    NOTA (ricerca per-silicio, design research/DESIGN_GPU_UV.md): lo
+    sweep governor-based misura la curva V/F del singolo chip e sostituisce
+    i default della community mantenendo lo stesso contratto di output. Se
+    QUALSIASI prerequisito manca (tool di stress, governor gestibile) o il
+    punto di partenza community fallisce → tabella community invariata
+    (`source="community_defaults"`, MAI punti non testati).
 """
 
-from typing import Any, Dict, List, Optional
+import re
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..constants import LIMITS
+from ..constants import GOVERNOR_CONFIG, GPU_FREQ_STEPS, LIMITS
+from ..exceptions import SafetyViolation
 from ..utils.logging import LoggerMixin
+from ..utils.shell import which
+from .governor import GovernorWrapper
+from ..validate.stress import StressTest
+
+
+@dataclass
+class ProbeResult:
+    """Esito di un singolo probe (f, v): stabilità + metriche."""
+    stable: bool
+    reason: Optional[str] = None
+    gpu_temp_max: Optional[float] = None
+    power_max: Optional[float] = None
 
 
 class GPUUndervoltOptimizer(LoggerMixin):
@@ -39,19 +59,46 @@ class GPUUndervoltOptimizer(LoggerMixin):
         {"freq": 2000, "voltage": 1000},
     ]
 
-    FREQ_STEPS = [1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000, 2100, 2200]
+    FREQ_STEPS = GPU_FREQ_STEPS
 
-    def __init__(self, mock: bool = False, mock_hardware=None):
+    def __init__(self, mock: bool = False, mock_hardware=None,
+                 governor=None, stress=None, monitor=None,
+                 reader=None, probe=None):
         self.mock = mock
         self.mock_hw = mock_hardware
+        # Dipendenze iniettabili (design §7): nei test si passano i fake;
+        # in modalità reale senza override si creano i wrapper reali.
+        # In mock le dipendenze vengono IGNORATE.
+        if not mock:
+            self.governor = governor if governor is not None else GovernorWrapper()
+            self.stress = stress if stress is not None else StressTest()
+        else:
+            self.governor = governor
+            self.stress = stress
+        self.monitor = monitor
+        self._reader_override = reader
+        self.probe = probe          # callable (f, v, seconds) o None → self._probe
+        self._active_monitor: Optional[Any] = None
 
     def optimize(self, start_freq: int = 1200,
-                 max_voltage: Optional[int] = None) -> Dict[str, Any]:
+                 max_voltage: Optional[int] = None,
+                 sweep: Optional[Dict[str, Any]] = None,
+                 power_budget: Optional[int] = None,
+                 monitor=None) -> Dict[str, Any]:
         """
         Restituisce i safe-points della GPU.
 
         - mock: binary search simulato su MockHardware
-        - reale: tabella community-verified (mai oltre i limiti)
+        - reale + sweep abilitato: ricerca per-silicio (design GPU_UV)
+        - reale senza sweep: tabella community-verified (mai oltre i limiti)
+
+        Args:
+            start_freq: soglia minima delle frequenze della curva
+            max_voltage: tetto di tensione (default recommended max 1050)
+            sweep: opzioni della ricerca per-silicio (§6 del design);
+                assente o `enabled` false → tabella community
+            power_budget: tetto di potenza per i probe (default LIMITS)
+            monitor: SafetyMonitor dell'orchestratore (abort immediato)
 
         Returns:
             {"safe_points": [...], "best_efficiency": {...}, "source": ...}
@@ -63,23 +110,16 @@ class GPUUndervoltOptimizer(LoggerMixin):
         if self.mock:
             return self._mock_optimize()
 
+        if sweep and sweep.get("enabled"):
+            # monitor: priorità a quello passato a runtime (orchestratore),
+            # poi a quello iniettato nel costruttore (test)
+            self._active_monitor = (monitor if monitor is not None
+                                    else self.monitor)
+            return self._sweep_real(sweep, start_freq, max_voltage,
+                                    power_budget or LIMITS.power.power_budget)
+
         # ---- MODALITÀ REALE: tabella community, clampata ai limiti ----
-        safe_points = [
-            {"freq": p["freq"], "voltage": min(p["voltage"], max_voltage)}
-            for p in self.COMMUNITY_SAFE_POINTS
-            if p["freq"] >= start_freq
-        ]
-
-        self.logger.info(
-            "GPU safe-points: tabella community (%d punti, "
-            "voltage max %d mV) — validati dallo stress test",
-            len(safe_points), max_voltage)
-
-        return {
-            "safe_points": safe_points,
-            "best_efficiency": self._find_best_efficiency(safe_points),
-            "source": "community_defaults",
-        }
+        return self._community_result(start_freq, max_voltage)
 
     # ------------------------------------------------------------------ #
 
@@ -101,3 +141,399 @@ class GPUUndervoltOptimizer(LoggerMixin):
         if not points:
             return {}
         return min(points, key=lambda p: p.get("voltage", 1000) / p.get("freq", 1000))
+
+    # ------------------------------------------------------------------ #
+    # Ricerca per-silicio (design GPU_UV §3–§5)
+    # ------------------------------------------------------------------ #
+
+    def _community_result(self, start_freq: int,
+                          max_voltage: int) -> Dict[str, Any]:
+        """Tabella community filtrata e clampata (percorso reale attuale)."""
+        safe_points = [
+            {"freq": p["freq"], "voltage": min(p["voltage"], max_voltage)}
+            for p in self.COMMUNITY_SAFE_POINTS
+            if p["freq"] >= start_freq
+        ]
+        self.logger.info(
+            "GPU safe-points: tabella community (%d punti, "
+            "voltage max %d mV) — validati dallo stress test",
+            len(safe_points), max_voltage)
+        return {
+            "safe_points": safe_points,
+            "best_efficiency": self._find_best_efficiency(safe_points),
+            "source": "community_defaults",
+        }
+
+    def _sweep_real(self, sweep: Dict[str, Any], start_freq: int,
+                    max_voltage: int, power_budget: int) -> Dict[str, Any]:
+        """Sweep per-silicio governor-based (design §3).
+
+        Fail-closed: se manca un prerequisito (tool di stress, governor
+        gestibile) o il punto di partenza community fallisce, si ripiega
+        sulla tabella community — MAI punti non testati. La config.toml
+        viene SEMPRE ripristinata ai bytes originali a fine sweep (anche
+        su eccezione/KeyboardInterrupt) e il governor resta FERMO.
+        """
+        # ---- prerequisiti (fail-closed: nessuna scrittura se mancano) ----
+        if self._gpu_stress_tool() is None:
+            self.logger.warning(
+                "GPU non stressabile (nessun tool furmark/glmark2) → "
+                "tabella community")
+            return self._community_result(start_freq, max_voltage)
+        if not self.governor.stop():
+            self.logger.warning(
+                "Governor non gestibile (stop fallito) → tabella community")
+            return self._community_result(start_freq, max_voltage)
+
+        freqs = [f for f in sweep["freqs"]
+                 if start_freq <= f <= LIMITS.gpu.freq_max]
+        if not freqs:
+            self.logger.warning(
+                "Nessuna frequenza di sweep nel range [%d, %d] → "
+                "tabella community", start_freq, LIMITS.gpu.freq_max)
+            return self._community_result(start_freq, max_voltage)
+
+        step = sweep["step_mv"]
+        floor = max(LIMITS.gpu.voltage_min,
+                    min(sweep["floor_mv"], max_voltage))
+
+        # backup fail-closed: a fine sweep si riscrivono i BYTES originali
+        backup = self._read_config_bytes()
+        if backup is not None and b"# buo-sweep" in backup:
+            # residuo di un run crashato (kill -9 durante lo stress):
+            # sostituito con i default community prima di ripartire
+            self.logger.warning(
+                "Config.toml marcata '# buo-sweep' (run precedente "
+                "crashato): riscritti i default community")
+            if not self.governor.write_default_config():
+                self.logger.error(
+                    "Ripristino default community fallito → tabella community")
+                return self._community_result(start_freq, max_voltage)
+            backup = self._read_config_bytes()
+
+        # stato per i probe (temp gate, budget, backup da ripristinare)
+        self._probe_temp_gate = sweep["temp_gate"]
+        self._probe_power_budget = power_budget
+        self._probe_backup = backup
+
+        found: List[Tuple[int, int]] = []
+        results: List[Dict[str, Any]] = []
+        points_tested = 0
+        failed_points = 0
+        t_start = time.monotonic()
+        try:
+            for f in freqs:
+                if self._monitor_violation():
+                    self._raise_monitor()
+                start_v = self._community_voltage(f, step)
+                start_v = max(floor, min(start_v, max_voltage))
+                candidates = self._descend(start_v, step, floor,
+                                           sweep["max_steps"])
+                stable_v = None
+                for v in candidates:
+                    if self._monitor_violation():
+                        self._raise_monitor()
+                    r = self._probe_call(f, v, sweep["test_seconds"])
+                    points_tested += 1
+                    results.append({
+                        "freq": f, "voltage": v, "stable": r.stable,
+                        "gpu_temp_max": r.gpu_temp_max,
+                        "power_max": r.power_max, "reason": r.reason,
+                    })
+                    if r.stable:
+                        stable_v = v
+                        self.logger.info(
+                            "  Sweep (f=%d, v=%d) STABILE — GPU %.0f°C, "
+                            "%.0fW", f, v,
+                            r.gpu_temp_max or 0.0, r.power_max or 0.0)
+                    else:
+                        failed_points += 1
+                        self.logger.info(
+                            "  Sweep (f=%d, v=%d) INSTABILE: %s — step back",
+                            f, v, r.reason)
+                        break
+                    if (time.monotonic() - t_start
+                            > sweep["max_minutes"] * 60):
+                        self.logger.warning(
+                            "Budget sweep (%d min) esaurito: tengo l'ultimo "
+                            "stabile per frequenza", sweep["max_minutes"])
+                        break
+                if stable_v is None:
+                    # il punto di PARTENZA (community) è fallito: ambiente
+                    # compromesso (calore/raffreddamento/tool) → MAI punti
+                    # non testati
+                    self.logger.error(
+                        "Sweep: punto di partenza community fallito a %d MHz "
+                        "(chip instabile a %d mV) — ambiente compromesso → "
+                        "tabella community", f, start_v)
+                    return self._community_result(start_freq, max_voltage)
+                if sweep["confirm_seconds"] > 0:
+                    (stable_v, points_tested, failed_points) = self._confirm(
+                        f, stable_v, start_v, step, sweep["confirm_seconds"],
+                        max_voltage, results, points_tested, failed_points)
+                found.append((f, stable_v))
+        finally:
+            # SEMPRE: bytes originali (o delete se prima non esisteva) e
+            # governor fermo (stato atteso da _phase_apply)
+            self._restore_config(backup)
+            self.governor.stop()
+
+        points = self._build_curve(found, floor, max_voltage)
+        return {
+            "safe_points": points,
+            "best_efficiency": self._find_best_efficiency(points),
+            "source": "per-silicon",
+            # ---- metadati ADDITIVI (non letti da nessun consumatore) ----
+            "sweep": {
+                "enabled": True,
+                "freqs": freqs,
+                "step_mv": step,
+                "floor_mv": floor,
+                "points_tested": points_tested,
+                "failed_points": failed_points,
+                "duration_s": int(time.monotonic() - t_start),
+                "results": results,
+            },
+        }
+
+    def _confirm(self, f: int, winner: int, start_v: int, step: int,
+                 seconds: int, max_voltage: int,
+                 results: List[Dict[str, Any]], points_tested: int,
+                 failed_points: int) -> Tuple[int, int, int]:
+        """Rievidenza del vincitore (§3): se fallisce, un gradino su
+        (+step); se fallisce anche quello → valore community per questa
+        frequenza (sanity già passato a durata breve) con warning."""
+        r = self._probe_call(f, winner, seconds)
+        points_tested += 1
+        results.append({
+            "freq": f, "voltage": winner, "stable": r.stable,
+            "gpu_temp_max": r.gpu_temp_max, "power_max": r.power_max,
+            "reason": r.reason,
+        })
+        if r.stable:
+            return winner, points_tested, failed_points
+        failed_points += 1
+        up_v = winner + step
+        if up_v <= max_voltage:      # mai probe oltre max_voltage
+            r2 = self._probe_call(f, up_v, seconds)
+            points_tested += 1
+            results.append({
+                "freq": f, "voltage": up_v, "stable": r2.stable,
+                "gpu_temp_max": r2.gpu_temp_max, "power_max": r2.power_max,
+                "reason": r2.reason,
+            })
+            if r2.stable:
+                return up_v, points_tested, failed_points
+            failed_points += 1
+        self.logger.warning(
+            "Sweep: conferma fallita a %d MHz — chip marginale, tengo il "
+            "valore community %d mV", f, start_v)
+        return start_v, points_tested, failed_points
+
+    def _probe(self, f: int, v: int, seconds: int) -> ProbeResult:
+        """Ciclo di vita di un candidato (design §3): stop → curva FLAT a v
+        su [f-200, f] con max_freq=f → start → stress → stop → ripristino
+        della config ORIGINALE (bytes)."""
+        self.governor.stop()                     # idempotente
+        try:
+            f_lo = max(LIMITS.gpu.freq_min, f - 200)
+            curve = [{"freq": f_lo, "voltage": v},
+                     {"freq": f, "voltage": v}]
+            if not self.governor.write_config(curve, min_freq=f_lo,
+                                              max_freq=f):
+                return ProbeResult(False, "write_config fallita")
+            self._mark_sweep_config()
+            if not self.governor.start():
+                return ProbeResult(False, "governor start fallito")
+            if not self._wait_active():
+                return ProbeResult(False, "governor non attivo dopo 10s")
+            time.sleep(2)                        # settle
+            cmd = self._gpu_stress_cmd(seconds)  # furmark → glmark2
+            reader = self._get_reader()
+            before_dmesg = self._read_dmesg()
+            try:
+                rc, _cpu_t, gpu_t, pw = self.stress._run_loaded(
+                    cmd, seconds + 30, reader, self._probe_power_budget)
+            except SafetyViolation as e:
+                return ProbeResult(False, str(e))
+            after_dmesg = self._read_dmesg()
+            fault = self._dmesg_fault_detected(before_dmesg, after_dmesg)
+            return self._interpret_probe(rc, gpu_t, self._probe_temp_gate,
+                                         fault, pw)
+        finally:
+            self.governor.stop()
+            self._restore_config(self._probe_backup)
+
+    @staticmethod
+    def _interpret_probe(rc: int, gpu_t: Optional[float], temp_gate: int,
+                         dmesg_fault: bool = False,
+                         power_max: Optional[float] = None) -> ProbeResult:
+        """Stabilità di un probe: rc==0, GPU sotto il gate, nessun fault
+        dmesg. Sensore non leggibile (None) → criterio saltato (C1, mai
+        valori fittizi)."""
+        stable = rc == 0
+        reason = None
+        if stable and gpu_t is not None and gpu_t >= temp_gate:
+            stable, reason = False, f"GPU {gpu_t:.0f}°C ≥ {temp_gate}°C"
+        if stable and dmesg_fault:
+            stable, reason = False, "GPU fault rilevato in dmesg"
+        return ProbeResult(stable, reason or "ok", gpu_t, power_max)
+
+    # -------------------------- prerequisiti -------------------------- #
+
+    def _gpu_stress_tool(self) -> Optional[str]:
+        """Tool di stress GPU: furmark preferito, glmark2 fallback."""
+        if which("furmark"):
+            return "furmark"
+        if which("glmark2"):
+            return "glmark2"
+        return None
+
+    def _gpu_stress_cmd(self, seconds: int) -> List[str]:
+        if which("furmark"):
+            return ["furmark", "--benchmark", "--duration", str(seconds)]
+        return ["glmark2", "--run-forever", "--seconds", str(seconds)]
+
+    # ------------------------- curva e candidate ---------------------- #
+
+    def _community_voltage(self, freq: int, step: int) -> int:
+        """Valore community interpolato linearmente da COMMUNITY_SAFE_POINTS
+        alla frequenza, arrotondato al multiplo dello step (design: es.
+        1200 → 850)."""
+        pts = self.COMMUNITY_SAFE_POINTS
+        if freq <= pts[0]["freq"]:
+            v = pts[0]["voltage"]
+        elif freq >= pts[-1]["freq"]:
+            v = pts[-1]["voltage"]
+        else:
+            v = pts[-1]["voltage"]
+            for lo, hi in zip(pts, pts[1:]):
+                if lo["freq"] <= freq <= hi["freq"]:
+                    frac = (freq - lo["freq"]) / (hi["freq"] - lo["freq"])
+                    v = lo["voltage"] + frac * (hi["voltage"] - lo["voltage"])
+                    break
+        return int(round(v / step) * step)
+
+    def _descend(self, start_v: int, step: int, floor: int,
+                 max_steps: int) -> List[int]:
+        """Candidati [start, start-step, …] finché ≥ floor e ≤ max_steps."""
+        candidates: List[int] = []
+        v = start_v
+        while v >= floor and len(candidates) < max_steps:
+            candidates.append(v)
+            v -= step
+        return candidates
+
+    def _build_curve(self, found: List[Tuple[int, int]], floor: int,
+                     max_voltage: int) -> List[Dict[str, int]]:
+        """Ordina per frequenza, monotonizza (non-decrescente in voltage),
+        clamp a [floor, max_voltage]. Mai punti non testati."""
+        found = sorted(found, key=lambda p: p[0])
+        points: List[Dict[str, int]] = []
+        prev_v = floor
+        for f, v in found:
+            v = max(prev_v, v)
+            v = max(floor, min(v, max_voltage))
+            points.append({"freq": f, "voltage": v})
+            prev_v = v
+        return points
+
+    # --------------------- config/governor lifecycle ------------------- #
+
+    def _probe_call(self, f: int, v: int, seconds: int) -> ProbeResult:
+        if self.probe is not None:
+            return self.probe(f, v, seconds)
+        return self._probe(f, v, seconds)
+
+    def _config_path(self) -> Path:
+        path = getattr(self.governor, "config_path", None)
+        return Path(path) if path else Path(GOVERNOR_CONFIG)
+
+    def _read_config_bytes(self) -> Optional[bytes]:
+        try:
+            return self._config_path().read_bytes()
+        except OSError:
+            return None
+
+    def _restore_config(self, backup: Optional[bytes]) -> None:
+        """Riscrive i bytes originali della config, o cancella il file se
+        prima non esisteva (fail-closed: SEMPRE curva originale a fine
+        sweep, anche su eccezione/KeyboardInterrupt)."""
+        path = self._config_path()
+        try:
+            if backup is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(backup)
+        except OSError as e:
+            self.logger.error("Ripristino config.toml fallito: %s", e)
+
+    def _mark_sweep_config(self) -> None:
+        """Marca la config candidata con '# buo-sweep' in testa (sanazione
+        del rischio kill -9: al prossimo run la curva marcata viene
+        rilevata e sostituita con i default community)."""
+        path = self._config_path()
+        try:
+            data = path.read_bytes()
+            if not data.startswith(b"# buo-sweep"):
+                path.write_bytes(b"# buo-sweep\n" + data)
+        except OSError:
+            self.logger.debug("Marcatura config non riuscita (best-effort)")
+
+    def _wait_active(self, timeout_s: float = 10.0) -> bool:
+        """Attende il governor attivo (poll is_running, ≤10s); il settle
+        di 2s è gestito dal chiamante (_probe)."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.governor.is_running():
+                return True
+            time.sleep(0.2)
+        return False
+
+    # ----------------------------- monitor ----------------------------- #
+
+    def _monitor_violation(self) -> bool:
+        m = self._active_monitor
+        return m is not None and m.is_violation()
+
+    def _raise_monitor(self) -> None:
+        m = self._active_monitor
+        raise SafetyViolation(
+            m.get_violation_reason() if m is not None else
+            "SafetyMonitor: violazione")
+
+    # ------------------------------ dmesg ------------------------------ #
+
+    _DMESG_FAULT_RE = re.compile(
+        r"amdgpu.*(GPU reset|fault|timeout)|ring gfx|VM_L2_PROTECTION")
+
+    def _read_dmesg(self) -> List[str]:
+        """Best-effort (design §4): [] se dmesg non leggibile (non root /
+        dmesg_restrict) → criterio saltato, mai valori fittizi."""
+        try:
+            r = subprocess.run(["dmesg"], capture_output=True, text=True,
+                               timeout=10)
+            if r.returncode != 0:
+                return []
+            return r.stdout.splitlines()
+        except Exception:
+            return []
+
+    def _dmesg_fault_detected(self, before: List[str],
+                              after: List[str]) -> bool:
+        """True se tra prima e dopo il probe compare un pattern di GPU
+        fault (amdgpu reset/fault/timeout, ring gfx, VM_L2_PROTECTION)."""
+        if not before or not after:
+            return False
+        new_lines = [ln for ln in after if ln not in set(before)]
+        return any(self._DMESG_FAULT_RE.search(ln) for ln in new_lines)
+
+    # ------------------------------ reader ----------------------------- #
+
+    def _get_reader(self) -> Any:
+        """Reader: override nei test, altrimenti lettore hardware reale."""
+        if self._reader_override is not None:
+            return self._reader_override
+        from ..safety.reader import RealHardwareReader
+        return RealHardwareReader()

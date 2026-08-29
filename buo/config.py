@@ -15,15 +15,91 @@ immutabili (sicurezza assoluta).
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
-from .constants import CONFIG_FILE, LIMITS
+from .constants import CONFIG_FILE, GPU_FREQ_STEPS, LIMITS
 
 
 def _yaml():
     """Import pigro di pyyaml (il core si importa anche senza)."""
     import yaml
     return yaml
+
+
+# --------------------------------------------------------------------- #
+# Helper delle opzioni gpu_sweep_* (design GPU_UV §6): cast + clamp con
+# logger.warning, MAI errore bloccante. Nessun valore può violare gli
+# hard limits immutabili di constants.py.
+# --------------------------------------------------------------------- #
+
+def _sweep_int(value, default: int, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Config: %s non numerico (%r) → default %d", name, value, default)
+        return default
+
+
+def _sweep_clamp(value, lo: int, hi: int, default: int,
+                 name: str) -> int:
+    v = _sweep_int(value, default, name)
+    if v < lo or v > hi:
+        logging.getLogger(__name__).warning(
+            "Config: %s=%d fuori range [%d, %d] → clampato",
+            name, v, lo, hi)
+        return max(lo, min(v, hi))
+    return v
+
+
+def _sweep_at_most(value, cap: int, default: int, name: str) -> int:
+    v = _sweep_int(value, default, name)
+    if v > cap:
+        logging.getLogger(__name__).warning(
+            "Config: %s=%d > %d → clampato a %d", name, v, cap, cap)
+        return cap
+    return v
+
+
+def _sweep_step(value) -> int:
+    """step 10–50 mV, multiplo di 5 (design §6)."""
+    v = _sweep_clamp(value, 10, 50, 25, "gpu_sweep_step_mv")
+    return max(10, min(50, int(round(v / 5.0) * 5)))
+
+
+def _sweep_bool(value, default: bool) -> bool:
+    """gpu_sweep_enabled accetta SOLO bool/1/0 (design §6)."""
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    logging.getLogger(__name__).warning(
+        "Config: gpu_sweep_enabled=%r non valido (solo bool/1/0) → default %s",
+        value, default)
+    return default
+
+
+def _sweep_freqs(value, default: Optional[List[int]] = None) -> List[int]:
+    """Sottoinsieme di GPU_FREQ_STEPS, strettamente crescente; altrimenti
+    default (design §6: "freqs non numeriche/non crescente → default")."""
+    default = list(default) if default is not None else [1200, 1500, 2000]
+    if not isinstance(value, (list, tuple)):
+        logging.getLogger(__name__).warning(
+            "Config: gpu_sweep_freqs non è una lista → default %s", default)
+        return default
+    try:
+        freqs = [int(v) for v in value]
+    except (TypeError, ValueError):
+        logging.getLogger(__name__).warning(
+            "Config: gpu_sweep_freqs non numeriche → default %s", default)
+        return default
+    valid = [f for f in freqs if f in GPU_FREQ_STEPS]
+    if not valid or any(a >= b for a, b in zip(freqs, freqs[1:])):
+        logging.getLogger(__name__).warning(
+            "Config: gpu_sweep_freqs=%s non valide (fuori da FREQ_STEPS o "
+            "non crescenti) → default %s", freqs, default)
+        return default
+    return valid
 
 
 class BUOConfig:
@@ -111,6 +187,35 @@ class BUOConfig:
         # Default ON: "BUO si occupa di tutto" — il profilo deve sopravvivere
         # al reboot, altrimenti dopo un riavvio la CPU torna a tensione stock.
         self.undervolt_persist: bool = bool(undervolt.get("persist", True))
+        # ---- Ricerca per-silicio dell'undervolt GPU (design GPU_UV §6) ----
+        self.undervolt_gpu_sweep_enabled: bool = _sweep_bool(
+            undervolt.get("gpu_sweep_enabled", True), True)
+        self.undervolt_gpu_sweep_freqs: List[int] = _sweep_freqs(
+            undervolt.get("gpu_sweep_freqs", [1200, 1500, 2000]))
+        self.undervolt_gpu_sweep_step_mv: int = _sweep_step(
+            undervolt.get("gpu_sweep_step_mv", 25))
+        self.undervolt_gpu_sweep_floor_mv: int = _sweep_clamp(
+            undervolt.get("gpu_sweep_floor_mv", 700),
+            LIMITS.gpu.voltage_min, LIMITS.gpu.voltage_recommended_max,
+            700, "gpu_sweep_floor_mv")
+        self.undervolt_gpu_sweep_max_steps: int = _sweep_clamp(
+            undervolt.get("gpu_sweep_max_steps", 5), 2, 10, 5,
+            "gpu_sweep_max_steps")
+        self.undervolt_gpu_sweep_test_seconds: int = _sweep_clamp(
+            undervolt.get("gpu_sweep_test_seconds", 30), 15, 120, 30,
+            "gpu_sweep_test_seconds")
+        _confirm = _sweep_clamp(
+            undervolt.get("gpu_sweep_confirm_seconds", 60), 0, 300, 60,
+            "gpu_sweep_confirm_seconds")
+        if 0 < _confirm < 15:   # 0 = skip conferma; altrimenti 15–300
+            _confirm = 15
+        self.undervolt_gpu_sweep_confirm_seconds: int = _confirm
+        self.undervolt_gpu_sweep_max_minutes: int = _sweep_clamp(
+            undervolt.get("gpu_sweep_max_minutes", 15), 1, 60, 15,
+            "gpu_sweep_max_minutes")
+        self.undervolt_gpu_sweep_temp_gate: int = _sweep_at_most(
+            undervolt.get("gpu_sweep_temp_gate", 85), LIMITS.gpu.temp_max, 85,
+            "gpu_sweep_temp_gate")
 
         overclock = phases.get("overclock", {})
         self.overclock_enable: bool = bool(overclock.get("enable", True))
@@ -208,6 +313,15 @@ class BUOConfig:
                 },
                 "undervolt": {
                     "gpu_start_freq": self.undervolt_gpu_start_freq,
+                    "gpu_sweep_enabled": self.undervolt_gpu_sweep_enabled,
+                    "gpu_sweep_freqs": self.undervolt_gpu_sweep_freqs,
+                    "gpu_sweep_step_mv": self.undervolt_gpu_sweep_step_mv,
+                    "gpu_sweep_floor_mv": self.undervolt_gpu_sweep_floor_mv,
+                    "gpu_sweep_max_steps": self.undervolt_gpu_sweep_max_steps,
+                    "gpu_sweep_test_seconds": self.undervolt_gpu_sweep_test_seconds,
+                    "gpu_sweep_confirm_seconds": self.undervolt_gpu_sweep_confirm_seconds,
+                    "gpu_sweep_max_minutes": self.undervolt_gpu_sweep_max_minutes,
+                    "gpu_sweep_temp_gate": self.undervolt_gpu_sweep_temp_gate,
                 },
                 "overclock": {
                     "enable": self.overclock_enable,

@@ -36,6 +36,9 @@ class MockHardwareState:
     gpu_utilization: float = 50.0
     gpu_stable_cu: List[int] = field(default_factory=lambda: list(range(24)))
     gpu_defective_cu: List[int] = field(default_factory=list)
+    # Ricerca per-silicio GPU (design GPU_UV §7): mappa freq → tensione
+    # minima stabile; default {} = sempre stabile.
+    gpu_stable_voltages: Dict[int, int] = field(default_factory=dict)
     wgp_mask: str = "0x000FFFFF"
 
     vram_temp_real: Optional[float] = None
@@ -165,6 +168,15 @@ class MockHardware:
 
     def test_cu(self, cu_idx: int) -> bool:
         return cu_idx in self.state.gpu_stable_cu
+
+    def probe_gpu_stable(self, freq: int, mv: int) -> bool:
+        """Probe della ricerca per-silicio GPU: stabile se `mv` >= tensione
+        minima stabile per `freq` (freq assente dalla mappa = sempre
+        stabile). Solo per test — mai usata in percorsi reali."""
+        min_stable = self.state.gpu_stable_voltages.get(freq)
+        if min_stable is None:
+            return True
+        return mv >= min_stable
 
     # =========================== VRAM ============================ #
 
