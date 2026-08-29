@@ -1154,7 +1154,8 @@ class Orchestrator(LoggerMixin):
                 self.logger.info("Governor config: [DRY-RUN] simulata")
                 results["governor_config"] = True
             else:
-                ok = self.governor.write_config(safe_points)
+                ok = self.governor.write_config(
+                    safe_points, max_freq=self.config.gpu_freq_max)
                 results["governor_config"] = ok
                 if ok and not self.mock:
                     self.governor.restart()

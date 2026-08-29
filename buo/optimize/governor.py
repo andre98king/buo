@@ -91,11 +91,18 @@ class GovernorWrapper(LoggerMixin):
         Scrive config.toml partendo dal template upstream e adattando solo
         min/max, temperature e la curva [[safe-points]].
 
+        I safe-points con freq > max_freq vengono SCARTATI prima della
+        scrittura: un punto sopra il cap creerebbe interpolazioni fuori
+        range e vanificherebbe il limite termico (es. 2000 MHz sostenuti
+        → 110°C su questa macchina; con max_freq=1500 il punto 2000 va
+        scartato, mai riscritto).
+
         Args:
             safe_points: [{freq, voltage}] in mV
             min_freq/max_freq: range frequenza (MHz)
             throttling/recovery: soglie termiche °C
         """
+        safe_points = [p for p in safe_points if p["freq"] <= max_freq]
         if self.mock:
             self.logger.info("Governor config: simulato (mock) — "
                              "%d safe-points", len(safe_points))

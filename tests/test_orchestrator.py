@@ -122,6 +122,30 @@ class TestOrchestrator(unittest.TestCase):
         _, s = orch._clamp_cpu(3500, vid=1030)
         self.assertEqual(s, 22)  # (1206-1030)/8 = 22
 
+    def test_phase_apply_passes_gpu_freq_max_to_write_config(self):
+        """_phase_apply deve passare a write_config il cap della config
+        (safety.gpu_freq_max): senza, a ogni apply il range tornerebbe a
+        2230 e il punto 2000@900 (110°C sotto FurMark su questa macchina)
+        verrebbe riscritto."""
+        from unittest import mock
+        orch = self._make(dry_run=False)
+        orch.config = BUOConfig({"safety": {"gpu_freq_max": 1500}})
+        points = [
+            {"freq": 1200, "voltage": 800},
+            {"freq": 1500, "voltage": 900},
+            {"freq": 2000, "voltage": 1000},
+        ]
+        orch.checkpoint.set_phase("optimize", {
+            "undervolt_gpu": {"safe_points": points},
+            "undervolt_cpu": {},
+            "overclock_cpu": {},
+        })
+        with mock.patch.object(orch.governor, "write_config",
+                               return_value=True) as spy:
+            r = orch._phase_apply()
+        spy.assert_called_once_with(points, max_freq=1500)
+        self.assertTrue(r["governor_config"])
+
 
 if __name__ == "__main__":
     unittest.main()

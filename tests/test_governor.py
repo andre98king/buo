@@ -72,6 +72,21 @@ class TestGovernorConfig(unittest.TestCase):
         self.assertEqual(data["temperature"]["throttling"], 88)
         self.assertEqual(data["temperature"]["throttling_recovery"], 78)
 
+    def test_safe_points_above_max_freq_filtered(self):
+        """Con max_freq=1500 i punti oltre il cap vanno SCARTATI, non
+        scritti: un punto sopra il cap creerebbe interpolazioni fuori
+        range (il punto 2000@900 → 110°C su questa macchina)."""
+        ok = self._write([
+            {"freq": 1200, "voltage": 800},
+            {"freq": 1500, "voltage": 900},
+            {"freq": 2000, "voltage": 1000},
+        ], max_freq=1500)
+        self.assertTrue(ok)
+        data = _parse_toml(self.cfg.read_text())
+        pts = data["safe-points"]
+        self.assertEqual([p["frequency"] for p in pts], [1200, 1500])
+        self.assertEqual(data["frequency-range"]["max"], 1500)
+
 
 if __name__ == "__main__":
     unittest.main()
