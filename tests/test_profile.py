@@ -261,6 +261,114 @@ class TestRestoreMode(unittest.TestCase):
         self.assertEqual(len(called), 1, "il tuning deve girare")
         self.assertFalse(orch.checkpoint.get("restore_active"))
 
+    # ---------------- FIX: "stress saltato" persistente al resume -------- #
+    # `buo restore` (senza --validate) imposta validation_stress_duration=0
+    # nel processo CLI; dopo un reboot il resume (NUOVO processo) ricarica
+    # la config con lo stress_duration REALE (3) e rifaceva lo stress
+    # completo. Il marcatore persistente estende lo skip al resume.
+
+    def _recording_stress(self, orch, durations):
+        """Sostituisce orch.stress.run con una spia che registra le durate
+        (stessa firma di StressTest.run, nessuno spawn)."""
+        def fake_run(duration_minutes=30, power_budget=300):
+            durations.append(duration_minutes)
+            return {
+                "passed": True, "skipped": duration_minutes == 0,
+                "duration_minutes": duration_minutes,
+                "cpu_temp_max": None, "gpu_temp_max": None,
+                "power_max": None, "errors": 0,
+            }
+        orch.stress.run = fake_run
+
+    def test_restore_with_stress_zero_writes_marker(self):
+        """restore con stress 0 (CLI senza --validate) → marcatore
+        validation_stress_skip scritto nel checkpoint (solo run reali);
+        con stress 3 (--validate) il marcatore NON viene scritto."""
+        for stress_duration, expected in ((0, True), (3, False)):
+            cfg = BUOConfig()
+            cfg.validation_stress_duration = stress_duration
+            cfg.benchmark_enabled = False
+            orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                                mock_hardware=MockHardware(seed=11))
+            orch.checkpoint.clear()
+            with mock.patch.object(orch, "_finalize"):
+                rc = orch.run(restore=self._profile(), stop_after="optimize")
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                bool(orch.checkpoint.get("validation_stress_skip")),
+                expected)
+
+    def test_restore_with_stress_zero_skips_stress_and_clears_marker(self):
+        """Run restore completo (stress 0): _phase_validate usa durata 0
+        (skip vero) e a finalize il marcatore è pulito."""
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        orch.checkpoint.clear()
+        durations = []
+        self._recording_stress(orch, durations)
+        rc = orch.run(restore=self._profile())
+        self.assertEqual(rc, 0)
+        self.assertEqual(durations, [0],
+                         "lo stress deve essere chiamato con durata 0")
+        self.assertFalse(orch.checkpoint.get("validation_stress_skip"),
+                         "marcatore pulito a finalize")
+
+    def test_resume_after_restore_keeps_stress_skipped(self):
+        """Dopo reboot il resume (NUOVO Orchestrator SENZA restore, config
+        con stress_duration=3 reale) NON esegue lo stress: il marcatore
+        prevale → durata 0 (mai chiamato con 3)."""
+        cm = CheckpointManager()
+        cm.seed_phase("optimize", OPTIMIZE_DATA)
+        cm.set("validation_stress_skip", True)
+        cm.set_current_phase("validate")
+
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 3   # valore REALE della macchina
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        durations = []
+        self._recording_stress(orch, durations)
+        rc = orch.run()                       # resume, niente restore
+        self.assertEqual(rc, 0)
+        self.assertEqual(durations, [0],
+                         "stress saltato al resume (mai chiamato con 3)")
+        self.assertFalse(orch.checkpoint.get("validation_stress_skip"))
+
+    def test_fresh_unleash_clears_marker_and_runs_stress(self):
+        """Unleash nuovo da init senza restore: il marcatore residuo viene
+        pulito e lo stress gira con la durata normale (3)."""
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 3
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        orch.checkpoint.clear()
+        orch.checkpoint.set("validation_stress_skip", True)  # residuo
+        durations = []
+        self._recording_stress(orch, durations)
+        rc = orch.run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(durations, [3], "stress normale al nuovo unleash")
+        self.assertFalse(orch.checkpoint.get("validation_stress_skip"))
+
+    def test_restore_stress_zero_marker_not_written_in_dry_run(self):
+        """F-A: come restore_active, il marcatore stress-skip è scritto
+        SOLO nei run reali (mai in dry-run)."""
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=True,
+                            mock_hardware=MockHardware(seed=11))
+        orch.checkpoint.clear()
+        with mock.patch.object(orch, "_finalize"):
+            rc = orch.run(restore=self._profile(), stop_after="optimize")
+        self.assertEqual(rc, 0)
+        self.assertFalse(orch.checkpoint.get("validation_stress_skip"))
+
 
 if __name__ == "__main__":
     unittest.main()

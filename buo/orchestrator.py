@@ -234,6 +234,14 @@ class Orchestrator(LoggerMixin):
             # set() salva l'intero stato, incluse le fasi seedate.
             if not self.dry_run:
                 self.checkpoint.set("restore_active", True)
+                # FIX (30/08): il restore con stress saltato (CLI senza
+                # --validate imposta validation_stress_duration=0 SOLO nel
+                # processo CLI) deve restare saltato anche al resume: il
+                # nuovo processo ricarica la config con lo stress_duration
+                # reale e rifaceva lo stress completo. Marcatore persistente
+                # (stesso pattern di restore_active).
+                if self.config.validation_stress_duration <= 0:
+                    self.checkpoint.set("validation_stress_skip", True)
             self.logger.info(
                 "♻️ RESTORE: profilo applicato (%d fix, %s)",
                 len(restore.get("applied_fixes", []) or []),
@@ -293,6 +301,11 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("unlock_blocked_acpi", False)
             if restore is None:
                 self.checkpoint.set("restore_active", False)
+                # FIX (30/08): stesso pattern — un run nuovo SENZA restore
+                # pulisce anche il marcatore di stress saltato residuo (se
+                # un restore è abortito e l'utente rilancia `buo unleash`,
+                # la validate deve girare con lo stress normale).
+                self.checkpoint.set("validation_stress_skip", False)
 
         # RIPRESA (fase > init): ricarica i dati delle fasi già completate
         # dal checkpoint (before/problemi/fix applicati), altrimenti il
@@ -1321,18 +1334,28 @@ class Orchestrator(LoggerMixin):
         self.logger.info("🔥 VALIDAZIONE")
         results: Dict[str, Any] = {}
 
+        # FIX (30/08): il restore con stress saltato resta saltato anche al
+        # resume — il marcatore persistente (scritto dal restore quando la
+        # CLI ha impostato durata 0) prevale sulla config ricaricata dal
+        # nuovo processo: durata 0 = skip VERO (fix 5ff85f3, nessuno
+        # spawn). Il marcatore viene pulito a finalize / nei run nuovi.
+        stress_duration = self.config.validation_stress_duration
+        if self.checkpoint.get("validation_stress_skip"):
+            stress_duration = 0
+            self.logger.info("   Stress test saltato (restore)")
+
         # Stress test (in dry-run viene solo simulato: niente 30 min reali)
         if self.dry_run:
             stress = {
                 "passed": True, "simulated": True,
-                "duration_minutes": self.config.validation_stress_duration,
+                "duration_minutes": stress_duration,
                 "cpu_temp_max": None, "gpu_temp_max": None,
                 "power_max": None, "errors": 0,
             }
             self.logger.info("   [DRY-RUN] stress test simulato")
         else:
             stress = self.stress.run(
-                duration_minutes=self.config.validation_stress_duration,
+                duration_minutes=stress_duration,
                 power_budget=self.config.power_budget,
             )
         results["stress"] = stress
@@ -1422,6 +1445,10 @@ class Orchestrator(LoggerMixin):
             # restore (optimize restituirebbe i dati seedati senza girare
             # l'auto-tuning).
             self.checkpoint.set("restore_active", False)
+            # FIX (30/08): a ciclo completato anche il marcatore di stress
+            # saltato va rimosso, altrimenti un unleash successivo
+            # erediterebbe lo skip della validate.
+            self.checkpoint.set("validation_stress_skip", False)
             # F-C: a ciclo completato anche il marcatore di retry unlock va
             # pulito: l'unlock è stato ritentato (o saltato definitivamente)
             # e un run successivo non deve ereditare il retry.
@@ -1442,8 +1469,11 @@ class Orchestrator(LoggerMixin):
             # reboot programmato): il marcatore restore deve essere pulito
             # qui, altrimenti un `buo unleash` successivo che riprende
             # dalla fase interrotta erediterebbe la modalità restore e
-            # saltarebbe l'auto-tuning.
+            # saltarebbe l'auto-tuning. Stesso pattern per lo stress
+            # saltato: un restore abortito non deve lasciare la validate
+            # saltata ai run successivi.
             self.checkpoint.set("restore_active", False)
+            self.checkpoint.set("validation_stress_skip", False)
             self.rollback.rollback(reason=self.safety_reason,
                                    applied=self._applied_steps())
             from .state.reboot import RebootManager
@@ -1458,7 +1488,10 @@ class Orchestrator(LoggerMixin):
         if not self.dry_run:
             # F-A: come per l'abort di sicurezza — niente resume service,
             # il marcatore restore va pulito (vedi _handle_safety_violation).
+            # Anche lo stress saltato: il run è fallito, non deve ereditare
+            # lo skip della validate.
             self.checkpoint.set("restore_active", False)
+            self.checkpoint.set("validation_stress_skip", False)
             self.rollback.rollback(from_phase=None,
                                    reason=f"errore in {phase}: {error}",
                                    applied=self._applied_steps())
