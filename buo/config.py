@@ -102,6 +102,62 @@ def _sweep_freqs(value, default: Optional[List[int]] = None) -> List[int]:
     return valid
 
 
+# --------------------------------------------------------------------- #
+# Chiavi note dello schema PIATTO (config/buo.yaml). Avviso fail-soft
+# (MAI bloccante) per chiavi sconosciute o strutture annidate: un valore
+# ignorato SILENZIOSAMENTE è pericoloso — l'utente crede di aver
+# alzato/abbassato un limite che invece non viene applicato (verificato
+# sul campo 30/08: safety.cpu.freq_max annidato ignorato senza avvisi).
+# --------------------------------------------------------------------- #
+
+_KNOWN_SAFETY_KEYS = frozenset({
+    "cpu_vid_recommended_max", "cpu_temp_max", "cpu_freq_max",
+    "gpu_voltage_recommended_max", "gpu_temp_max", "gpu_freq_max",
+    "power_budget", "max_reboots",
+})
+
+_KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
+    "probe": frozenset({"cpu_unlock", "gpu_unlock", "health_test",
+                        "health_reboot_max"}),
+    "fix": frozenset({"tlb", "ace", "iommu", "acpi", "vram", "gtt",
+                      "fan"}),
+    "undervolt": frozenset({
+        "gpu_start_freq", "persist", "gpu_sweep_enabled",
+        "gpu_sweep_freqs", "gpu_sweep_step_mv", "gpu_sweep_floor_mv",
+        "gpu_sweep_max_steps", "gpu_sweep_test_seconds",
+        "gpu_sweep_confirm_seconds", "gpu_sweep_max_minutes",
+        "gpu_sweep_temp_gate",
+    }),
+    "overclock": frozenset({"enable", "power_budget"}),
+    "validation": frozenset({"stress_duration"}),
+}
+
+
+def _warn_unknown(section: str, data: Any, known_keys: frozenset) -> None:
+    """Segnala con logger.warning le chiavi sconosciute o i sottodizionari
+    inattesi in una sezione della config (schema PIATTO, vedi
+    config/buo.yaml). Fail-soft: solo avviso, MAI bloccante."""
+    if not isinstance(data, dict):
+        return
+    for key, value in data.items():
+        if key in known_keys:
+            continue
+        if isinstance(value, dict):
+            # sottodizionario inatteso (es. safety.cpu: {...}): elenca i
+            # figli con la chiave PIATTA suggerita
+            for sub in value:
+                logging.getLogger(__name__).warning(
+                    "Config: chiave di configurazione IGNORATA: "
+                    "%s.%s.%s — usare %s.%s_%s (schema piatto), "
+                    "vedi config/buo.yaml",
+                    section, key, sub, section, key, sub)
+        else:
+            logging.getLogger(__name__).warning(
+                "Config: chiave di configurazione IGNORATA: %s.%s — "
+                "chiave sconosciuta (schema piatto, vedi config/buo.yaml)",
+                section, key)
+
+
 class BUOConfig:
     """Configurazione dell'orchestratore con limiti immutabili."""
 
@@ -120,6 +176,9 @@ class BUOConfig:
         # ----- Safety: partono dagli hard limits immutabili -----
         # I valori del file YAML NON possono alzare gli hard limits.
         safety = data.get("safety", {})
+        # Avviso fail-soft per chiavi sconosciute/annidate (schema
+        # PIATTO): mai ignorare silenziosamente un limite configurato.
+        _warn_unknown("safety", safety, _KNOWN_SAFETY_KEYS)
         self.cpu_vid_absolute_max: int = LIMITS.cpu.vid_absolute_max
         self.cpu_vid_recommended_max: int = int(
             safety.get("cpu_vid_recommended_max", LIMITS.cpu.vid_recommended_max)
@@ -166,6 +225,10 @@ class BUOConfig:
 
         # ----- Fasi -----
         phases = data.get("phases", {})
+        # Avviso fail-soft anche per le sezioni delle fasi (stesso
+        # principio dello schema piatto per sezione).
+        for _section, _known in _KNOWN_PHASE_KEYS.items():
+            _warn_unknown(_section, phases.get(_section), _known)
         probe = phases.get("probe", {})
         self.probe_cpu_unlock: bool = bool(probe.get("cpu_unlock", True))
         self.probe_gpu_unlock: bool = bool(probe.get("gpu_unlock", True))
@@ -272,18 +335,17 @@ class BUOConfig:
                 "cooling_type": self.cooling_type,
             },
             "safety": {
-                "cpu": {
-                    "vid_absolute_max": self.cpu_vid_absolute_max,
-                    "vid_recommended_max": self.cpu_vid_recommended_max,
-                    "temp_max": self.cpu_temp_max,
-                    "freq_max": self.cpu_freq_max,
-                },
-                "gpu": {
-                    "voltage_absolute_max": self.gpu_voltage_absolute_max,
-                    "voltage_recommended_max": self.gpu_voltage_recommended_max,
-                    "temp_max": self.gpu_temp_max,
-                    "freq_max": self.gpu_freq_max,
-                },
+                # Schema PIATTO (config/buo.yaml): il parser legge chiavi
+                # piatte. La vecchia forma annidata (safety.cpu.{...},
+                # safety.gpu.{...}) non veniva letta e i valori andavano
+                # persi nel round-trip save/load (fix 30/08: avviso
+                # _warn_unknown per chi la usa ancora).
+                "cpu_vid_recommended_max": self.cpu_vid_recommended_max,
+                "cpu_temp_max": self.cpu_temp_max,
+                "cpu_freq_max": self.cpu_freq_max,
+                "gpu_voltage_recommended_max": self.gpu_voltage_recommended_max,
+                "gpu_temp_max": self.gpu_temp_max,
+                "gpu_freq_max": self.gpu_freq_max,
                 "power_budget": self.power_budget,
                 "max_reboots": self.max_reboots,
             },
