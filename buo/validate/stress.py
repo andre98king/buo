@@ -65,6 +65,21 @@ class StressTest(LoggerMixin):
         duration_s = duration_minutes * 60
         self.logger.info("🔥 Stress test: %d minuti (CPU+GPU)", duration_minutes)
 
+        # BUG DI CAMPO (29/08/2026): con durata 0 si spawnava comunque
+        # `stress-ng --timeout 0`, che in stress-ng significa NESSUN
+        # timeout (stress all'infinito): il "test saltato" caricava tutti
+        # i core CPU per fino a deadline_grace secondi, portando la CPU a
+        # ~90°C e facendo scattare un falso abort termico (3 volte sul
+        # campo). Durata 0 = SKIP vero: nessun spawn, nessun carico.
+        if duration_s <= 0:
+            self.logger.info("   Stress test saltato (durata 0)")
+            return {
+                "passed": True, "skipped": True,
+                "duration_minutes": duration_minutes,
+                "cpu_temp_max": None, "gpu_temp_max": None,
+                "power_max": None, "errors": 0,
+            }
+
         reader = self._get_reader()
         cpu_temp_max, gpu_temp_max, power_max = 0.0, 0.0, 0.0
 

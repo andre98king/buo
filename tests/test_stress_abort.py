@@ -92,6 +92,39 @@ class TestStressAbort(unittest.TestCase):
         self.assertLess(rc, 0)  # terminato con segnale (SIGTERM)
         self.assertLess(__import__("time").monotonic() - t0, 10)
 
+    def test_zero_duration_skips_without_spawning(self):
+        """BUG di campo: durata 0 deve saltare SENZA spawnare alcun
+        processo (stress-ng --timeout 0 = stress infinito)."""
+        import unittest.mock as mock
+        with mock.patch("buo.validate.stress.subprocess.Popen",
+                        side_effect=AssertionError(
+                            "durata 0 NON deve spawnare processi")):
+            stress = StressTest(reader=_CoolReader())
+            result = stress.run(duration_minutes=0, power_budget=300)
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["skipped"])
+        self.assertIsNone(result["cpu_temp_max"])
+        self.assertIsNone(result["gpu_temp_max"])
+
+    def test_positive_duration_still_spawns(self):
+        """Durata > 0: il percorso normale resta invariato (spawn reale)."""
+        import unittest.mock as mock
+        spawned = []
+        real_popen = __import__("subprocess").Popen
+
+        def _fake_popen(cmd, **kwargs):
+            spawned.append(cmd)
+            return real_popen(["sleep", "0.2"], **kwargs)
+
+        with mock.patch("buo.validate.stress.subprocess.Popen",
+                        side_effect=_fake_popen), \
+             mock.patch("buo.validate.stress.which",
+                        side_effect=lambda name: f"/usr/bin/{name}"):
+            stress = StressTest(reader=_CoolReader())
+            result = stress.run(duration_minutes=1, power_budget=300)
+        self.assertTrue(spawned, "durata > 0 deve spawnare lo stress")
+        self.assertTrue(result["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()
