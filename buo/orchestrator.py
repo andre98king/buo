@@ -26,7 +26,7 @@ from .audit.problems import ProblemDetector
 from .benchmark.runner import BenchmarkRunner
 from .config import BUOConfig
 from .constants import (EXIT_ERROR, EXIT_REBOOT, EXIT_SAFETY_VIOLATION,
-                        EXIT_SUCCESS, LIMITS, PHASES)
+                        EXIT_SUCCESS, LIMITS, PHASES, SMU_OC_SERVICE)
 from .exceptions import ConfigurationError, SafetyViolation
 from .fix.ace import ACEComputeFix
 from .fix.acpi import ACPIFix
@@ -1220,9 +1220,12 @@ class Orchestrator(LoggerMixin):
         (VOLATILE). Con persist=True esegue anche `bc250-apply --install`
         (G3): il profilo viene applicato automaticamente a ogni boot —
         è ciò che fa sopravvivere l'undervolt a un riavvio/format.
-        Fail-closed ma NON bloccante: se lo script manca o fallisce,
-        logga e continua (l'undervolt è un guadagno, non un requisito
-        di sicurezza).
+        L'upstream crea l'unità SENZA abilitarla (BUG F-D): BUO esegue
+        `systemctl enable` esplicito, altrimenti l'undervolt non torna
+        al boot.
+        Fail-closed ma NON bloccante: se lo script manca o fallisce
+        (install o enable), logga e continua (l'undervolt è un guadagno,
+        non un requisito di sicurezza).
         """
         if self.dry_run:
             self.logger.info("CPU config: [DRY-RUN] simulata")
@@ -1263,13 +1266,30 @@ class Orchestrator(LoggerMixin):
                 "method": "bc250-apply (volatile)",
             }
             if persist:
+                from .utils.shell import run_command
                 inst = w.install(str(conf))
                 if inst.get("returncode") == 0:
-                    out["persistent"] = True
-                    out["method"] = "bc250-apply --apply + --install"
-                    self.logger.info(
-                        "♻️ Undervolt PERSISTENTE installato: %d MHz, "
-                        "scale %d (riapplicato a ogni boot)", f, s)
+                    # BUG F-D: `--install` crea l'unità systemd ma NON la
+                    # abilita → senza `systemctl enable` l'undervolt non
+                    # viene riapplicato al boot (verificato sul campo).
+                    en_rc, _, en_err = run_command(
+                        ["systemctl", "enable", SMU_OC_SERVICE],
+                        sudo=True, check=False)
+                    if en_rc == 0:
+                        out["persistent"] = True
+                        out["method"] = "bc250-apply --apply + --install"
+                        self.logger.info(
+                            "♻️ Undervolt PERSISTENTE installato: %d MHz, "
+                            "scale %d (riapplicato a ogni boot)", f, s)
+                    else:
+                        out["persistent"] = False
+                        out["persist_error"] = (
+                            f"systemctl enable {SMU_OC_SERVICE} fallito: "
+                            + (en_err or "errore sconosciuto"))[:200]
+                        self.logger.warning(
+                            "Persistenza undervolt NON riuscita "
+                            "(unità non abilitata al boot): %s",
+                            out["persist_error"])
                 else:
                     out["persistent"] = False
                     out["persist_error"] = (

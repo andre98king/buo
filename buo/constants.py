@@ -143,6 +143,11 @@ SCRIPT_APPLY = "/usr/local/bin/bc250-apply"
 GOVERNOR_SERVICE = "cyan-skillfish-governor-smu"
 GOVERNOR_CONFIG = "/etc/cyan-skillfish-governor-smu/config.toml"
 
+# Unità systemd creata da `bc250-apply --install` (upstream): riapplica
+# l'undervolt a ogni boot. L'upstream la crea ma NON la abilita (BUG F-D)
+# → BUO esegue `systemctl enable` esplicito dopo l'install.
+SMU_OC_SERVICE = "bc250-smu-oc"
+
 # File di stato degli script esterni
 HEALTH_RESULTS_FILE = "/var/lib/bc250-cu-health-test/results.tsv"
 

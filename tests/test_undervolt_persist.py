@@ -43,25 +43,33 @@ class TestPersistentUndervolt(unittest.TestCase):
         w = self._fake_wrapper()
         with mock.patch("buo.unlock.wrappers.bc250_overclock."
                         "BC250ApplyWrapper", return_value=w):
-            out = orch._apply_cpu_config(3800, scale=0, vid=1224,
-                                         persist=True)
+            with mock.patch("buo.utils.shell.run_command",
+                            return_value=(0, "", "")) as run_cmd:
+                out = orch._apply_cpu_config(3800, scale=0, vid=1224,
+                                             persist=True)
         self.assertTrue(out["applied"])
         self.assertTrue(out.get("persistent"))
         w.apply.assert_called_once()
         w.install.assert_called_once()
         self.assertIn("--install", out["method"])
+        # BUG F-D: --install crea l'unità ma NON la abilita → serve
+        # `systemctl enable` esplicito perché l'undervolt torni al boot.
+        run_cmd.assert_called_once_with(
+            ["systemctl", "enable", "bc250-smu-oc"], sudo=True, check=False)
 
     def test_persist_false_does_not_install(self):
         orch = self._make()
         w = self._fake_wrapper()
         with mock.patch("buo.unlock.wrappers.bc250_overclock."
                         "BC250ApplyWrapper", return_value=w):
-            out = orch._apply_cpu_config(3800, scale=0, vid=1224,
-                                         persist=False)
+            with mock.patch("buo.utils.shell.run_command") as run_cmd:
+                out = orch._apply_cpu_config(3800, scale=0, vid=1224,
+                                             persist=False)
         self.assertTrue(out["applied"])
         self.assertNotIn("persistent", out)
         w.apply.assert_called_once()
         w.install.assert_not_called()
+        run_cmd.assert_not_called()
 
     def test_install_failure_reported_but_apply_kept(self):
         """--install fallisce → avviso esplicito, il volatile resta."""
@@ -70,11 +78,30 @@ class TestPersistentUndervolt(unittest.TestCase):
         w.install.return_value = {"returncode": 1, "stderr": "boom"}
         with mock.patch("buo.unlock.wrappers.bc250_overclock."
                         "BC250ApplyWrapper", return_value=w):
-            out = orch._apply_cpu_config(3800, scale=0, vid=1224,
-                                         persist=True)
+            with mock.patch("buo.utils.shell.run_command") as run_cmd:
+                out = orch._apply_cpu_config(3800, scale=0, vid=1224,
+                                             persist=True)
         self.assertTrue(out["applied"])
         self.assertFalse(out["persistent"])
         self.assertIn("boom", out["persist_error"])
+        # install fallito → `systemctl enable` NON deve essere invocato
+        run_cmd.assert_not_called()
+
+    def test_enable_failure_reported_but_apply_kept(self):
+        """BUG F-D: install ok ma `systemctl enable` fallisce → avviso
+        esplicito (persist_error), il volatile resta (NON bloccante)."""
+        orch = self._make()
+        w = self._fake_wrapper()
+        with mock.patch("buo.unlock.wrappers.bc250_overclock."
+                        "BC250ApplyWrapper", return_value=w):
+            with mock.patch("buo.utils.shell.run_command",
+                            return_value=(1, "", "cannot enable")):
+                out = orch._apply_cpu_config(3800, scale=0, vid=1224,
+                                             persist=True)
+        self.assertTrue(out["applied"])
+        self.assertFalse(out["persistent"])
+        self.assertIn("bc250-smu-oc", out["persist_error"])
+        self.assertIn("cannot enable", out["persist_error"])
 
     def test_dry_run_never_touches_wrapper(self):
         orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=True)
