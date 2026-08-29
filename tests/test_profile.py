@@ -130,6 +130,81 @@ class TestRestoreMode(unittest.TestCase):
             orch.run()
         self.assertEqual(len(called), 1)
 
+    # ------------------------- BUG F-A (restore + resume) ------------- #
+
+    def test_restore_marker_not_persisted_in_dry_run(self):
+        """F-A: il marcatore restore_active viene scritto SOLO nei run
+        reali (mai in dry-run, coerente con le altre scritture
+        checkpoint)."""
+        hw = MockHardware(seed=11)
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=True,
+                            mock_hardware=hw)
+        orch.checkpoint.clear()
+        with mock.patch.object(orch, "_phase_optimize",
+                               side_effect=AssertionError(
+                                   "optimize NON deve girare in restore")):
+            rc = orch.run(restore=self._profile())
+        self.assertEqual(rc, 0)
+        self.assertFalse(orch.checkpoint.get("restore_active"))
+
+    def test_restore_mode_survives_resume_via_checkpoint(self):
+        """F-A: dopo reboot il resume (NUOVO Orchestrator SENZA restore)
+        rileva il marcatore restore_active e NON rilancia l'auto-tuning.
+
+        Simula il resume reale: checkpoint con fase a metà (fix),
+        marcatore restore_active e dati optimize seedati → il run riparte
+        da fix e optimize restituisce i dati del profilo (3800) invece di
+        girare il tuning (bc250-detect).
+        """
+        cm = CheckpointManager()
+        cm.seed_phase("optimize", OPTIMIZE_DATA)
+        cm.set("restore_active", True)
+        cm.set_current_phase("fix")
+
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        # il resume NON passa restore → run() senza argomenti
+        with mock.patch.object(
+                orch, "_phase_optimize",
+                side_effect=AssertionError(
+                    "auto-tuning NON deve girare al resume di un restore")):
+            rc = orch.run()
+
+        self.assertEqual(rc, 0)
+        data = orch.checkpoint.get_phase("optimize").get("data", {})
+        self.assertEqual(data["undervolt_cpu"]["best_efficiency"]["freq"],
+                         3800)
+
+    def test_restore_marker_cleared_after_completed_run(self):
+        """F-A: a run completo il marcatore è pulito: un unleash successivo
+        NON eredita la modalità restore e rilancia il tuning."""
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        orch.checkpoint.clear()
+        rc = orch.run(restore=self._profile())
+        self.assertEqual(rc, 0)
+        self.assertFalse(orch.checkpoint.get("restore_active"))
+
+        # unleash nuovo (processo nuovo, senza restore): il tuning gira
+        orch2 = Orchestrator(config=cfg, mock=True, dry_run=False,
+                             mock_hardware=MockHardware(seed=11))
+        called = []
+        with mock.patch.object(orch2, "_phase_optimize",
+                               side_effect=lambda: called.append(1) or {}):
+            rc2 = orch2.run()
+        self.assertEqual(rc2, 0)
+        self.assertEqual(len(called), 1,
+                         "l'unleash successivo deve rilanciare il tuning")
+
 
 if __name__ == "__main__":
     unittest.main()

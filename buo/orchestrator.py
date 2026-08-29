@@ -227,6 +227,13 @@ class Orchestrator(LoggerMixin):
         if restore is not None:
             optimize_data = restore.get("optimize", {})
             self.checkpoint.seed_phase("optimize", optimize_data)
+            # F-A: marcatore PERSISTENTE — la modalità restore deve
+            # sopravvivere al reboot (buo-resume/recovery riparte con un
+            # NUOVO processo SENZA il parametro restore). Solo nei run
+            # reali: il dry-run non deve toccare lo stato persistente.
+            # set() salva l'intero stato, incluse le fasi seedate.
+            if not self.dry_run:
+                self.checkpoint.set("restore_active", True)
             self.logger.info(
                 "♻️ RESTORE: profilo applicato (%d fix, %s)",
                 len(restore.get("applied_fixes", []) or []),
@@ -340,9 +347,14 @@ class Orchestrator(LoggerMixin):
     # ================================================================== #
 
     def _execute_phase(self, phase: str) -> Dict[str, Any]:
-        if phase == "optimize" and self._restore_mode:
-            # G2: in restore NON si rilancia l'auto-tuning; si riapplicano
-            # i punti salvati nel profilo (già seedati nel checkpoint).
+        if phase == "optimize" and (self._restore_mode
+                                    or self.checkpoint.get("restore_active")):
+            # G2 + F-A: in restore NON si rilancia l'auto-tuning; si
+            # riapplicano i punti salvati nel profilo (già seedati nel
+            # checkpoint). Il marcatore persistente `restore_active`
+            # estende la modalità al resume dopo reboot (il nuovo processo
+            # non ha il parametro restore).
+            self._restore_mode = True
             return self.checkpoint.get_phase("optimize").get("data", {})
         handlers = {
             "init": self._phase_init,
@@ -910,11 +922,15 @@ class Orchestrator(LoggerMixin):
     def _phase_fix(self) -> Dict[str, Any]:
         """FASE 1b — FIX: TLB, ACE, IOMMU, ACPI, VRAM, GTT, ventole.
 
-        ANTI-LOOP: ogni fix è registrato nel ledger `applied_steps` PRIMA
-        del reboot; al resume i fix già eseguiti (o già attivi via verify)
-        vengono saltati, e per ogni rientro di fase scatta AL MASSIMO UN
+        ANTI-LOOP: ogni fix APPLICATO è registrato nel ledger
+        `applied_steps` PRIMA del reboot; al resume i fix già eseguiti
+        vengono saltati e per ogni rientro di fase scatta AL MASSIMO UN
         reboot. Senza questo, un fix che richiede reboot faceva rientrare
         la fase all'infinito (bug trovato sul campo: loop di riavvii).
+        NOTA F-B: un fix SOLO VERIFICATO (già attivo, NON applicato da
+        questo run) NON entra nel ledger: al resume viene ri-verificato e
+        saltato di nuovo, e il rollback non deve annullare modifiche
+        pre-esistenti che il run non ha mai fatto.
         """
         self.logger.info("🔧 FIX di sistema")
         results: Dict[str, Any] = {}
@@ -944,8 +960,11 @@ class Orchestrator(LoggerMixin):
                     results[name] = {"applied": True, "dry_run": True}
                     continue
                 if fixer.verify():
+                    # F-B: fix già attivo → NON nel ledger (non è una
+                    # modifica di QUESTO run): il rollback non deve
+                    # annullarlo. Al resume viene ri-verificato (verify è
+                    # idempotente e senza effetti collaterali) e saltato.
                     self.logger.info("Fix %s: già attivo — salto", name)
-                    self._mark_step(name)
                     results[name] = {"applied": True, "skipped_verified": True}
                     continue
                 result = fixer.apply()
@@ -1298,6 +1317,11 @@ class Orchestrator(LoggerMixin):
             self.logger.info("✅ OTTIMIZZAZIONE COMPLETATA!")
         if not self.dry_run:
             self.checkpoint.set_phase("complete", {"done": True}, completed=True)
+            # F-A: a ciclo completato il marcatore restore va RIMOSSO,
+            # altrimenti un unleash successivo erediterebbe la modalità
+            # restore (optimize restituirebbe i dati seedati senza girare
+            # l'auto-tuning).
+            self.checkpoint.set("restore_active", False)
             # Cleanup anti-loop: a ciclo completato il servizio di ripresa
             # va rimosso, altrimenti al prossimo boot `buo resume` vede
             # "complete" → riparte da init → riesegue tutto → reboot → loop

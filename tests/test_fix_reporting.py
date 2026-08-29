@@ -32,8 +32,10 @@ class _FakeFixer:
             self._result["error"] = error
         if warning is not None:
             self._result["warning"] = warning
+        self.verify_calls = 0
 
     def verify(self):
+        self.verify_calls += 1
         return self._verify
 
     def apply(self):
@@ -143,6 +145,48 @@ class TestFixSummaryClassification(unittest.TestCase):
         orch._finalize()
         # nessuna nota extra oltre a quelle preesistenti
         self.assertEqual(len(orch.results["notes"]), n_before)
+
+    # ------------------------- BUG F-B (ledger e rollback) ------------ #
+
+    def test_verified_fix_not_in_ledger_and_not_rolled_back(self):
+        """F-B: un fix GIÀ ATTIVO (verify True, NON applicato dal run) NON
+        finisce in applied_steps; il rollback non deve toccarlo. Al resume
+        viene semplicemente ri-verificato e saltato di nuovo (verify
+        idempotente, senza effetti collaterali)."""
+        orch = self._make()
+        # tutti gli altri fixer già attivi: nessuno finisce nel ledger
+        for attr in ("fix_iommu", "fix_tlb", "fix_ace", "fix_vram",
+                     "fix_gtt", "fix_fan"):
+            setattr(orch, attr, _FakeFixer(verify=True))
+        verified = _FakeFixer(verify=True)
+        verified.rollback = mock.Mock(return_value=True)
+        orch.fix_acpi = verified
+
+        orch._phase_fix()
+        orch._phase_fix()  # resume: ri-verificato e saltato di nuovo
+
+        self.assertEqual(verified.verify_calls, 2)
+        self.assertNotIn("acpi_fix", orch._applied_steps())
+
+        orch.rollback.rollback(applied=orch._applied_steps())
+        verified.rollback.assert_not_called()
+
+    def test_applied_fix_in_ledger_and_rolled_back(self):
+        """F-B: un fix APPLICATO dal run resta nel ledger e viene
+        rollback-ato (il rollback agisce solo su modifiche reali)."""
+        orch = self._make()
+        for attr in ("fix_iommu", "fix_tlb", "fix_ace", "fix_vram",
+                     "fix_gtt", "fix_fan"):
+            setattr(orch, attr, _FakeFixer(verify=True))
+        applied = _FakeFixer(verify=False, applied=True)
+        applied.rollback = mock.Mock(return_value=True)
+        orch.fix_acpi = applied
+
+        orch._phase_fix()
+        self.assertIn("acpi_fix", orch._applied_steps())
+
+        orch.rollback.rollback(applied=orch._applied_steps())
+        applied.rollback.assert_called_once()
 
 
 class Test40CUServiceGuard(unittest.TestCase):
