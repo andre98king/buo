@@ -553,6 +553,32 @@ class TestSmuFloor(_SweepBase):
         self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 700}])
         self.assertNotIn("smu_floor_mv", res["sweep"])
 
+    def test_read_vddgfx_parses_real_output_format(self):
+        """BUG di campo (30/08): il regex cercava 'VDDGFX: <n> mV' ma la
+        riga REALE di amdgpu_pm_info è '\\t824 mV (VDDGFX)' (label DOPO il
+        valore, senza prefisso) → il reader restituiva SEMPRE None → floor
+        mai rilevato. Il parsing deve leggere il formato reale."""
+        import re as _re
+        from buo.optimize.gpu import GPUUndervoltOptimizer
+        real_output = (
+            "0 MHz (PSTATE_MCLK)\n"
+            "\t824 mV (VDDGFX)\n"
+            "\t1081 mV (VDDNB)\n"
+        )
+        opt = GPUUndervoltOptimizer(mock=True)
+        with mock.patch("buo.utils.shell.run_command",
+                        return_value=(0, real_output, "")):
+            value = opt._read_vddgfx(800)
+        self.assertEqual(value, 824)
+        # output senza la riga VDDGFX → None (fail-soft)
+        with mock.patch("buo.utils.shell.run_command",
+                        return_value=(0, "0 MHz (PSTATE_MCLK)\n", "")):
+            self.assertIsNone(opt._read_vddgfx(800))
+        # comando fallito → None
+        with mock.patch("buo.utils.shell.run_command",
+                        return_value=(1, "", "err")):
+            self.assertIsNone(opt._read_vddgfx(800))
+
 
 if __name__ == "__main__":
     unittest.main()

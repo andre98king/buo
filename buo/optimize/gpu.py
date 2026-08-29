@@ -674,7 +674,11 @@ class GPUUndervoltOptimizer(LoggerMixin):
                 sudo=True, check=False)
             if rc != 0 or not out:
                 return None
-            m = re.search(r"VDDGFX:\s*(\d+)\s*mV", out)
+            # Formato REALE della riga (verificato sul campo, 30/08):
+            # "\t824 mV (VDDGFX)" — il label viene DOPO il valore, senza
+            # prefisso "VDDGFX:" (il regex precedente non matchava mai →
+            # None → floor mai rilevato → sweep sotto il floor).
+            m = re.search(r"(\d+)\s*mV\s*\(VDDGFX\)", out)
             return int(m.group(1)) if m else None
         except Exception:
             return None
