@@ -252,6 +252,30 @@ class Orchestrator(LoggerMixin):
         if current not in PHASES or current == "complete":
             current = "init"
 
+        # F-C (bug sul campo 29/08): se al PRE-reboot il gate ACPI ha
+        # bloccato l'unlock CPU (marcatore `unlock_blocked_acpi`) e la fix
+        # è stata applicata (il gate ora passa), al RESUME si ritenta la
+        # fase unlock PRIMA di proseguire — altrimenti la macchina resta
+        # a 12 thread fino a un secondo run manuale. Il marcatore viene
+        # consumato al retry: l'unlock viene ritentato UNA volta (anti-loop);
+        # se il gate è ancora chiuso, il marcatore resta per il resume
+        # successivo. Solo riprese automatiche (start_phase None): i comandi
+        # fase standalone non devono essere dirottati verso l'unlock.
+        if (not self.dry_run and start_phase is None
+                and current != "init"
+                and self.checkpoint.get("unlock_blocked_acpi")):
+            if self._acpi_gate_ok():
+                self.checkpoint.set("unlock_blocked_acpi", False)
+                self.logger.info(
+                    "♻️ F-C: fix ACPI applicata — RETRY della fase unlock "
+                    "CPU (bloccata dal gate al run precedente)")
+                current = "unlock"
+            else:
+                self.logger.warning(
+                    "⚠️ F-C: unlock CPU bloccato dal gate ACPI al run "
+                    "precedente ma la fix NON risulta ancora applicata — "
+                    "si prosegue; il retry avverrà a un prossimo resume")
+
         # Un run completo NUOVO (da init) azzera il ledger delle modifiche
         # e il contatore dei reboot (per-run): i fix ripartono da zero.
         # In caso di RIPRESA (fase intermedia) restano e impediscono loop.
@@ -261,9 +285,12 @@ class Orchestrator(LoggerMixin):
         # il tuning deve ripartire). Il blocco restore sopra (che imposta
         # il marcatore) viene eseguito PRIMA di questo, quindi il guard
         # `restore is None` evita di cancellarlo nei run di restore.
+        # F-C: anche il marcatore di retry unlock va azzerato nei run nuovi
+        # da init, per non inquinare run successivi.
         if current == "init" and not self.dry_run:
             self.checkpoint.set("applied_steps", [])
             self.checkpoint.set("reboot_count", 0)
+            self.checkpoint.set("unlock_blocked_acpi", False)
             if restore is None:
                 self.checkpoint.set("restore_active", False)
 
@@ -799,6 +826,13 @@ class Orchestrator(LoggerMixin):
                         "mancanti (e-tho/bc250-acpi-fix) — necessario prima "
                         "di sbloccare gli 8 core (boot loop)"
                     )
+                    # F-C (bug sul campo 29/08): il blocco va RICORDATO nel
+                    # checkpoint (SOLO run reali) — al resume dopo il reboot
+                    # in cui acpi_fix viene applicata, la fase unlock verrà
+                    # RITENTATA (vedi run()). Il dry-run non tocca lo stato
+                    # persistente.
+                    if not self.dry_run:
+                        self.checkpoint.set("unlock_blocked_acpi", True)
                 else:
                     results["cpu"] = self._do_cpu_unlock()
             else:
@@ -1368,6 +1402,10 @@ class Orchestrator(LoggerMixin):
             # restore (optimize restituirebbe i dati seedati senza girare
             # l'auto-tuning).
             self.checkpoint.set("restore_active", False)
+            # F-C: a ciclo completato anche il marcatore di retry unlock va
+            # pulito: l'unlock è stato ritentato (o saltato definitivamente)
+            # e un run successivo non deve ereditare il retry.
+            self.checkpoint.set("unlock_blocked_acpi", False)
             # Cleanup anti-loop: a ciclo completato il servizio di ripresa
             # va rimosso, altrimenti al prossimo boot `buo resume` vede
             # "complete" → riparte da init → riesegue tutto → reboot → loop
