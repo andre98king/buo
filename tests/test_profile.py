@@ -205,6 +205,62 @@ class TestRestoreMode(unittest.TestCase):
         self.assertEqual(len(called), 1,
                          "l'unleash successivo deve rilanciare il tuning")
 
+    def test_restore_marker_cleared_on_safety_abort(self):
+        """F-A: su abort di sicurezza il marcatore restore viene pulito —
+        un unleash successivo che riprende dalla fase interrotta NON
+        eredita la modalità restore (l'abort non crea resume service)."""
+        from buo.exceptions import SafetyViolation
+        from buo.constants import EXIT_SAFETY_VIOLATION
+
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        orch.checkpoint.clear()
+        orch.checkpoint.set("restore_active", True)
+        orch.checkpoint.set_current_phase("fix")
+
+        def _boom():
+            raise SafetyViolation("test abort")
+
+        with mock.patch.object(orch, "_phase_fix", side_effect=_boom), \
+             mock.patch.object(orch.rollback, "rollback") as rb:
+            rc = orch.run()
+        self.assertEqual(rc, EXIT_SAFETY_VIOLATION)
+        self.assertFalse(orch.checkpoint.get("restore_active"),
+                         "l'abort deve pulire il marcatore restore")
+        rb.assert_called_once()
+
+        # unleash successivo: resume da fix, optimize RILANCIA il tuning
+        orch2 = Orchestrator(config=cfg, mock=True, dry_run=False,
+                             mock_hardware=MockHardware(seed=11))
+        called = []
+        with mock.patch.object(orch2, "_phase_optimize",
+                               side_effect=lambda: called.append(1) or {}):
+            rc2 = orch2.run()
+        self.assertEqual(rc2, 0)
+        self.assertEqual(len(called), 1,
+                         "l'unleash post-abort deve rilanciare il tuning")
+
+    def test_restore_marker_cleared_on_fresh_init_without_restore(self):
+        """F-A: un run nuovo da init (checkpoint 'complete') SENZA restore
+        pulisce il marcatore anche se era rimasto attivo."""
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        orch = Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=MockHardware(seed=11))
+        orch.checkpoint.clear()
+        orch.checkpoint.set("restore_active", True)  # stato anomalo
+        called = []
+        with mock.patch.object(orch, "_phase_optimize",
+                               side_effect=lambda: called.append(1) or {}):
+            rc = orch.run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(called), 1, "il tuning deve girare")
+        self.assertFalse(orch.checkpoint.get("restore_active"))
+
 
 if __name__ == "__main__":
     unittest.main()

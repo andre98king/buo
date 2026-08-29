@@ -255,9 +255,17 @@ class Orchestrator(LoggerMixin):
         # Un run completo NUOVO (da init) azzera il ledger delle modifiche
         # e il contatore dei reboot (per-run): i fix ripartono da zero.
         # In caso di RIPRESA (fase intermedia) restano e impediscono loop.
+        # F-A: un run nuovo SENZA restore deve anche pulire il marcatore
+        # restore_active (se un restore è abortito/fallito e l'utente
+        # rilancia `buo unleash`, NON deve ereditare la modalità restore:
+        # il tuning deve ripartire). Il blocco restore sopra (che imposta
+        # il marcatore) viene eseguito PRIMA di questo, quindi il guard
+        # `restore is None` evita di cancellarlo nei run di restore.
         if current == "init" and not self.dry_run:
             self.checkpoint.set("applied_steps", [])
             self.checkpoint.set("reboot_count", 0)
+            if restore is None:
+                self.checkpoint.set("restore_active", False)
 
         # RIPRESA (fase > init): ricarica i dati delle fasi già completate
         # dal checkpoint (before/problemi/fix applicati), altrimenti il
@@ -1334,6 +1342,12 @@ class Orchestrator(LoggerMixin):
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
         if not self.dry_run:
+            # F-A: un abort NON crea servizi di resume (a differenza del
+            # reboot programmato): il marcatore restore deve essere pulito
+            # qui, altrimenti un `buo unleash` successivo che riprende
+            # dalla fase interrotta erediterebbe la modalità restore e
+            # saltarebbe l'auto-tuning.
+            self.checkpoint.set("restore_active", False)
             self.rollback.rollback(reason=self.safety_reason,
                                    applied=self._applied_steps())
             from .state.reboot import RebootManager
@@ -1346,6 +1360,9 @@ class Orchestrator(LoggerMixin):
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
         if not self.dry_run:
+            # F-A: come per l'abort di sicurezza — niente resume service,
+            # il marcatore restore va pulito (vedi _handle_safety_violation).
+            self.checkpoint.set("restore_active", False)
             self.rollback.rollback(from_phase=None,
                                    reason=f"errore in {phase}: {error}",
                                    applied=self._applied_steps())
