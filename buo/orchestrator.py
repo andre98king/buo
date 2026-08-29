@@ -1320,13 +1320,21 @@ class Orchestrator(LoggerMixin):
     def _clamp_cpu(freq: int, scale: Optional[int] = None,
                    vid: Optional[int] = None):
         """Clamp della coppia frequenza/scale ai limiti immutabili.
-        Se scale manca ma c'è vid, conversione community scale=(1206-vid)/8."""
+
+        Bounds scale VERIFICATI nel sorgente community (bc250_limits.py:
+        scale_min=-50, scale_max=0; bc250_detect.smu_apply RIFIUTA scale>0).
+        Una scale POSITIVA chiederebbe un overvolt a un'SMU "with minimal
+        validity checking" → mai ammessa. Scale 0 = curva stock; negativa =
+        undervolt vero. Il fallback vid→scale della community produce valori
+        positivi per l'undervolt: incoerente coi bounds → clampato a 0
+        (curva stock, MAI overvolt); il path reale passa scale da bc250-detect.
+        """
         f = max(LIMITS.cpu.freq_min, min(LIMITS.cpu.freq_max, int(freq)))
         s = 0
         if scale is not None:
-            s = max(-8, min(50, int(scale)))
+            s = max(-50, min(0, int(scale)))
         elif vid is not None:
-            s = max(-8, min(50, round((1206 - int(vid)) / 8)))
+            s = max(-50, min(0, round((1206 - int(vid)) / 8)))
         return f, s
 
     def _phase_validate(self) -> Dict[str, Any]:

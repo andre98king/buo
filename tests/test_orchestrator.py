@@ -117,10 +117,31 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(f2, 3500)  # LIMITS.cpu.freq_min
 
     def test_apply_cpu_config_scale_from_vid(self):
-        """Senza scale, conversione da VID: scale = (1206 - vid)/8."""
+        """Senza scale, conversione da VID: la formula community
+        (1206-vid)/8 produce valori POSITIVI per l'undervolt, incoerenti coi
+        bounds reali della scale (bc250_limits.py: -50..0) → clampata a 0
+        (curva stock, MAI overvolt)."""
         orch = self._make(dry_run=True)
         _, s = orch._clamp_cpu(3500, vid=1030)
-        self.assertEqual(s, 22)  # (1206-1030)/8 = 22
+        self.assertEqual(s, 0)  # (1206-1030)/8 = 22 → clamp [−50, 0] → 0
+
+    def test_apply_cpu_config_scale_bounds_never_positive(self):
+        """Bounds scale VERIFICATI nel sorgente community (scale_min=-50,
+        scale_max=0; bc250_detect.smu_apply RIFIUTA scale>0): una scale
+        positiva chiederebbe un overvolt → mai ammessa; i valori validi
+        negativi passano; sotto -50 → clamp a -50."""
+        orch = self._make(dry_run=True)
+        # positiva → 0 (mai overvolt)
+        _, s = orch._clamp_cpu(3500, scale=50)
+        self.assertEqual(s, 0)
+        _, s2 = orch._clamp_cpu(3500, scale=10)
+        self.assertEqual(s2, 0)
+        # negativa valida → preservata
+        _, s3 = orch._clamp_cpu(3500, scale=-20)
+        self.assertEqual(s3, -20)
+        # sotto il floor community → clamp a -50
+        _, s4 = orch._clamp_cpu(3500, scale=-80)
+        self.assertEqual(s4, -50)
 
     def test_phase_apply_passes_gpu_freq_max_to_write_config(self):
         """_phase_apply deve passare a write_config il cap della config
