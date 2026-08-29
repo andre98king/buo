@@ -230,6 +230,44 @@ class TestSweepAlgorithm(_SweepBase):
         self.assertIn((1500, 725, 60), calls)   # confirm fallita sul winner
         self.assertIn((1500, 750, 60), calls)   # gradino su → stabile
 
+    def test_should_clamp_final_points_to_floor(self):
+        """#15: probe vkmark che SCENDE a 700 (chip 'stabile' anche lì,
+        nessun floor SMU rilevato: il probe è troppo leggero) → i
+        safe_points FINALI sono clampati al floor di config (800): mai
+        punti sotto il floor-FurMark; metadata clamped_to_floor;
+        best_efficiency ricalcolato sui punti finali."""
+        probe = FakeProbe(stable_map={})       # sempre stabile (artefatto)
+        opt = self.make_opt(probe=probe)
+        res = opt.optimize(start_freq=1200,
+                           sweep=self.sweep(floor_mv=800, max_steps=10))
+        self.assertEqual(res["source"], "per-silicon")
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 800}])
+        # la discesa è arrivata davvero sotto il floor di config (700)
+        self.assertLessEqual(min(v for _, v, _ in probe.calls), 700)
+        self.assertTrue(res["sweep"]["clamped_to_floor"])
+        self.assertEqual(res["best_efficiency"],
+                         {"freq": 1500, "voltage": 800})
+
+    def test_should_clamp_final_points_to_custom_floor(self):
+        """Override del floor a 750 → il clamp finale applica 750 (non
+        il default 800)."""
+        probe = FakeProbe(stable_map={})
+        opt = self.make_opt(probe=probe)
+        res = opt.optimize(start_freq=1200,
+                           sweep=self.sweep(floor_mv=750, max_steps=10))
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 750}])
+        self.assertTrue(res["sweep"]["clamped_to_floor"])
+
+    def test_should_not_flag_when_winner_not_raised(self):
+        """Vincitore già al floor (max_steps limita la discesa prima di
+        superarlo) → nessun clamp, nessun clamped_to_floor nei metadata."""
+        probe = FakeProbe(stable_map={})
+        opt = self.make_opt(probe=probe)
+        res = opt.optimize(start_freq=1200,
+                           sweep=self.sweep(floor_mv=800, max_steps=5))
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 800}])
+        self.assertNotIn("clamped_to_floor", res["sweep"])
+
 
 class TestTempGate(unittest.TestCase):
     """#6: gate termico per-punto (interpretazione del probe)."""
@@ -303,7 +341,10 @@ class TestConfigOptions(unittest.TestCase):
         self.assertTrue(cfg.undervolt_gpu_sweep_enabled)
         self.assertEqual(cfg.undervolt_gpu_sweep_freqs, [1200, 1500, 2000])
         self.assertEqual(cfg.undervolt_gpu_sweep_step_mv, 25)
-        self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 700)
+        # floor di SICUREZZA (30/08): default = floor FurMark misurato
+        # su Cyan Skillfish (~800 mV) — punti sotto il floor in config
+        # fanno partire il governor in hang
+        self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 800)
         self.assertEqual(cfg.undervolt_gpu_sweep_max_steps, 5)
         self.assertEqual(cfg.undervolt_gpu_sweep_test_seconds, 30)
         self.assertEqual(cfg.undervolt_gpu_sweep_confirm_seconds, 60)
@@ -327,6 +368,25 @@ class TestConfigOptions(unittest.TestCase):
         self.assertEqual(cfg.undervolt_gpu_sweep_confirm_seconds, 15)
         self.assertEqual(cfg.undervolt_gpu_sweep_max_minutes, 1)
         self.assertEqual(cfg.undervolt_gpu_sweep_temp_gate, 85)   # ≤ temp_max
+        # floor oltre l'hard limit assoluto → clampato a 1100
+        cfg = BUOConfig({"phases": {"undervolt": {"gpu_sweep_floor_mv": 1500}}})
+        self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 1100)
+
+    def test_floor_override_750(self):
+        """Override del floor a 750 → applicato (clamp finale a 750,
+        non al default 800)."""
+        cfg = BUOConfig({"phases": {"undervolt": {
+            "gpu_sweep_floor_mv": 750}}})
+        self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 750)
+
+    def test_invalid_floor_warns_and_defaults(self):
+        """Valore non numerico → warning (fail-soft) + default 800."""
+        with self.assertLogs("buo.config", level="WARNING") as cm:
+            cfg = BUOConfig({"phases": {"undervolt": {
+                "gpu_sweep_floor_mv": "abc"}}})
+        self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 800)
+        self.assertTrue(
+            any("gpu_sweep_floor_mv" in msg for msg in cm.output))
 
     def test_confirm_zero_means_skip(self):
         cfg = BUOConfig({"phases": {"undervolt": {

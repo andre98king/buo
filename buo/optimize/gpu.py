@@ -218,8 +218,21 @@ class GPUUndervoltOptimizer(LoggerMixin):
             return self._community_result(start_freq, max_voltage)
 
         step = sweep["step_mv"]
+        # Floor di SICUREZZA (fail-closed): clamp dei safe_points FINALI
+        # a >= max(floor config, floor SMU rilevato dal probe) — mai punti
+        # sotto il floor configurato (default 800 = floor FurMark della
+        # macchina; punti < floor fanno partire il governor in hang).
         floor = max(LIMITS.gpu.voltage_min,
                     min(sweep["floor_mv"], max_voltage))
+        # Floor di DISCESA del probe: si misura fino al minimo sicuro
+        # (700). Il probe vkmark è TROPPO LEGGERO per vedere il floor
+        # FurMark (l'SMU segue il target fino a 700 sotto vkmark) e scende
+        # sotto il floor configurato riportando "STABILE" per artefatto:
+        # è la clamp finale (floor) ad alzare i punti (direzione sicura:
+        # alzare la tensione di un punto validato non può renderlo
+        # instabile, curva V/F monotona). Il floor SMU rilevato
+        # (smu_floor_mv) ferma le discese successive.
+        descend_floor = LIMITS.gpu.voltage_min
 
         # backup fail-closed: a fine sweep si riscrivono i BYTES originali
         backup = self._read_config_bytes()
@@ -255,7 +268,7 @@ class GPUUndervoltOptimizer(LoggerMixin):
                     self._raise_monitor()
                 start_v = self._community_voltage(f, step)
                 start_v = max(floor, min(start_v, max_voltage))
-                candidates = self._descend(start_v, step, floor,
+                candidates = self._descend(start_v, step, descend_floor,
                                            sweep["max_steps"])
                 stable_v = None
                 floor_reached = False
@@ -285,6 +298,7 @@ class GPUUndervoltOptimizer(LoggerMixin):
                         smu_floor_mv = (floor_mv if smu_floor_mv is None
                                         else max(smu_floor_mv, floor_mv))
                         floor = max(floor, smu_floor_mv)
+                        descend_floor = max(descend_floor, smu_floor_mv)
                         floor_reached = True
                         self.logger.warning(
                             "  Sweep (f=%d, v=%d) FLOOR SMU: VDDGFX reale "
@@ -340,6 +354,15 @@ class GPUUndervoltOptimizer(LoggerMixin):
             self.governor.stop()
 
         points = self._build_curve(found, floor, max_voltage, smu_floor_mv)
+        # Clamp al floor (fail-closed): se la clamp finale ha ALZATO un
+        # punto sopra il valore trovato dallo sweep (il probe è sceso
+        # sotto il floor configurato, o il floor SMU è stato rilevato
+        # dopo), lo segnalo nei metadata (mai punti sotto il floor in
+        # output). Alzare la tensione di un punto validato non può
+        # renderlo instabile (curva V/F monotona): direzione sicura.
+        found_map = {f: v for f, v in found}
+        clamped_to_floor = any(
+            p["voltage"] > found_map[p["freq"]] for p in points)
         sweep_meta: Dict[str, Any] = {
             "enabled": True,
             "freqs": freqs,
@@ -352,6 +375,8 @@ class GPUUndervoltOptimizer(LoggerMixin):
         }
         if smu_floor_mv is not None:
             sweep_meta["smu_floor_mv"] = smu_floor_mv
+        if clamped_to_floor:
+            sweep_meta["clamped_to_floor"] = True
         return {
             "safe_points": points,
             "best_efficiency": self._find_best_efficiency(points),

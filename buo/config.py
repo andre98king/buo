@@ -281,10 +281,18 @@ class BUOConfig:
             undervolt.get("gpu_sweep_freqs", [1200, 1500, 2000]))
         self.undervolt_gpu_sweep_step_mv: int = _sweep_step(
             undervolt.get("gpu_sweep_step_mv", 25))
+        # ---- FLOOR di SICUREZZA dei safe_points GPU (fail-closed,
+        # 30/08): il floor SMU DIPENDE DAL CARICO — sotto vkmark (probe
+        # dello sweep) l'SMU segue il target fino a 700 mV, ma sotto
+        # FurMark la VDDGFX non scende sotto ~790-800 mV (misurato su
+        # Cyan Skillfish). Default 800 = floor FurMark della macchina:
+        # una config con punti < floor fa partire il governor in hang.
+        # Clamp a [700, 1100] (minimo sicuro / hard limit assoluto;
+        # mai oltre).
         self.undervolt_gpu_sweep_floor_mv: int = _sweep_clamp(
-            undervolt.get("gpu_sweep_floor_mv", 700),
-            LIMITS.gpu.voltage_min, LIMITS.gpu.voltage_recommended_max,
-            700, "gpu_sweep_floor_mv")
+            undervolt.get("gpu_sweep_floor_mv", 800),
+            LIMITS.gpu.voltage_min, LIMITS.gpu.voltage_absolute_max,
+            800, "gpu_sweep_floor_mv")
         self.undervolt_gpu_sweep_max_steps: int = _sweep_clamp(
             undervolt.get("gpu_sweep_max_steps", 5), 2, 10, 5,
             "gpu_sweep_max_steps")
