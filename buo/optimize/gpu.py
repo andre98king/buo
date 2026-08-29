@@ -36,17 +36,23 @@ from ..utils.shell import which
 from .governor import GovernorWrapper
 from ..validate.stress import StressTest
 
-# Soglia di scostamento VDDGFX reale vs target oltre la quale l'SMU è
-# considerato al suo FLOOR (misurato sul campo 30/08 su Cyan Skillfish:
-# sotto ~800 mV l'SMU NON scende — VDDGFX reale resta 774-824 mV anche
-# con target 700). Se reale > target + soglia, il punto NON è applicabile:
-# un probe sotto il floor riporta "STABILE" per ARTEFATTO (gira sempre a
-# ~800) e una config finale con punti < floor fa partire il governor in
-# hang ("activating" per sempre, GPU senza curva). La lettura avviene a
-# IDLE (dopo il settle del governor): sotto carico l'SMU alza la tensione
-# (VDDGFX ~950 mV sotto FurMark a target 900) e il confronto sarebbe un
-# falso positivo.
-SMU_FLOOR_TOLERANCE_MV = 25
+# Soglia di scostamento VDDGFX reale (SOTTO CARICO) vs target oltre la
+# quale l'SMU è considerato al suo FLOOR (misurato sul campo 30/08 su
+# Cyan Skillfish): sotto ~800 mV l'SMU NON scende. DATI DI CAMPO:
+#   - a target 800 sotto FurMark la VDDGFX reale è 774-799 mV (droop
+#     ~7-25: reale SEMPRE SOTTO il target finché l'SMU segue);
+#   - sotto il floor reale resta ~790-800 mV mentre il target continua
+#     a scendere (reale > target).
+# Soglia 15 mV con confronto >=: seguendo reale - target ≤ -1 (mai un
+# falso positivo); al primo target sotto il floor reale - target ≥ +15
+# (790 a target 775) → il blocco scatta ESATTAMENTE al punto in cui
+# l'SMU smette di seguire. Un punto sotto il floor NON è applicabile:
+# un probe sotto il floor riporta "STABILE" per ARTEFATTO (gira sempre
+# a ~800) e una config finale con punti < floor fa partire il governor
+# in hang ("activating" per sempre, GPU senza curva). La lettura è
+# SEMPRE sotto carico: a idle l'SMU ABBASSA la tensione (743 mV reale
+# a target 800) e il confronto non scatta mai (bug 8b5a062).
+SMU_FLOOR_TOLERANCE_MV = 15
 
 
 @dataclass
@@ -264,21 +270,29 @@ class GPUUndervoltOptimizer(LoggerMixin):
                         "power_max": r.power_max, "reason": r.reason,
                     })
                     if r.smu_floor and r.applied_voltage is not None:
-                        # FLOOR SMU: il punto non è applicabile (l'SMU gira
-                        # sempre a ~800) — il PRECEDENTE è il vincitore e
-                        # le frequenze successive non scendono oltre.
-                        smu_floor_mv = (r.applied_voltage
-                                        if smu_floor_mv is None
-                                        else max(smu_floor_mv,
-                                                 r.applied_voltage))
+                        # FLOOR SMU: il punto (f, v) non è applicabile
+                        # (l'SMU gira sempre a ~790-800) — il vincitore è
+                        # l'ULTIMO punto in cui la tensione ha SEGUITO il
+                        # target (reale ≈ target ± droop), cioè il
+                        # candidato PRECEDENTE (v + step): clamp dei
+                        # safe_points a quel floor, MAI sotto (una config
+                        # < floor fa partire il governor in hang). Se non
+                        # c'è un precedente (primo candidato già sotto il
+                        # floor) si usa la VDDGFX reale misurata. Le
+                        # frequenze successive non scendono oltre.
+                        floor_mv = (v + step if stable_v is not None
+                                    else r.applied_voltage)
+                        smu_floor_mv = (floor_mv if smu_floor_mv is None
+                                        else max(smu_floor_mv, floor_mv))
                         floor = max(floor, smu_floor_mv)
                         floor_reached = True
                         self.logger.warning(
                             "  Sweep (f=%d, v=%d) FLOOR SMU: VDDGFX reale "
-                            "%d mV non segue il target (+%d mV) — stop "
-                            "discesa, il punto precedente è il vincitore",
+                            "%d mV non segue il target sotto carico "
+                            "(+%d mV) — stop discesa, floor %d mV, il "
+                            "punto precedente è il vincitore",
                             f, v, r.applied_voltage,
-                            r.applied_voltage - v)
+                            r.applied_voltage - v, smu_floor_mv)
                         break
                     if r.stable:
                         stable_v = v
@@ -397,35 +411,53 @@ class GPUUndervoltOptimizer(LoggerMixin):
                 return ProbeResult(False, "governor start fallito")
             if not self._wait_active():
                 return ProbeResult(False, "governor non attivo dopo 10s")
-            time.sleep(2)                        # settle
-            # FLOOR SMU (30/08): lettura della VDDGFX REALE a idle (dopo
-            # il settle) vs target. Se l'SMU non segue il target (reale >
-            # target + soglia), il punto NON è applicabile: il probe lo
-            # riporta STABILE (il chip gira al floor) ma marcato
-            # smu_floor → lo sweep si ferma. Lettura non disponibile →
-            # fail-soft (nessun blocco).
-            real_v = self._read_vddgfx(v)
-            if real_v is not None and real_v > v + SMU_FLOOR_TOLERANCE_MV:
-                self.logger.warning(
-                    "  Probe (f=%d, v=%d) FLOOR SMU: VDDGFX reale %d mV "
-                    "non segue il target (+%d mV) — punto inapplicabile, "
-                    "il precedente è il vincitore",
-                    f, v, real_v, real_v - v)
-                return ProbeResult(
-                    True, "smu_floor (VDDGFX reale %d mV, floor SMU)" % real_v,
-                    None, None, smu_floor=True, applied_voltage=real_v)
-            cmd = self._gpu_stress_cmd(seconds)  # furmark → glmark2
+            time.sleep(2)                        # settle del governor
+            cmd = self._gpu_stress_cmd(seconds)  # furmark → vkmark
             reader = self._get_reader()
             before_dmesg = self._read_dmesg()
+            # FLOOR SMU (30/08, fix 2): lettura della VDDGFX REALE SOTTO
+            # CARICO — campionamento live durante lo stress, MASSIMO dei
+            # campioni (sotto carico la tensione sale verso il target: il
+            # massimo è il valore rappresentativo). A IDLE l'SMU ABBASSA
+            # la tensione (743 mV reale a target 800) e il confronto
+            # reale >= target+soglia non scattava MAI (bug 8b5a062: lo
+            # sweep scendeva sotto il floor). Il campionamento è un tick
+            # di _run_loaded (on_tick, ~1s) — nessun thread.
+            samples: List[int] = []
+
+            def _sample_vddgfx() -> None:
+                real_v = self._read_vddgfx(v)
+                if real_v is not None:
+                    samples.append(real_v)
+
             try:
                 rc, _cpu_t, gpu_t, pw = self.stress._run_loaded(
-                    cmd, seconds + 30, reader, self._probe_power_budget)
+                    cmd, seconds + 30, reader, self._probe_power_budget,
+                    on_tick=_sample_vddgfx)
             except SafetyViolation as e:
                 return ProbeResult(False, str(e))
             after_dmesg = self._read_dmesg()
             fault = self._dmesg_fault_detected(before_dmesg, after_dmesg)
-            return self._interpret_probe(rc, gpu_t, self._probe_temp_gate,
-                                         fault, pw)
+            result = self._interpret_probe(rc, gpu_t, self._probe_temp_gate,
+                                           fault, pw)
+            # FLOOR SMU: confronto SOTTO CARICO. Se l'SMU non segue il
+            # target (reale >= target + soglia), il punto NON è
+            # applicabile: il probe lo riporta (stabile per artefatto)
+            # ma marcato smu_floor → lo sweep si ferma. Lettura non
+            # disponibile → fail-soft (nessun blocco).
+            real_v = max(samples) if samples else None
+            if real_v is not None and real_v >= v + SMU_FLOOR_TOLERANCE_MV:
+                self.logger.warning(
+                    "  Probe (f=%d, v=%d) FLOOR SMU: VDDGFX reale %d mV "
+                    "non segue il target sotto carico (+%d mV) — punto "
+                    "inapplicabile, il precedente è il vincitore",
+                    f, v, real_v, real_v - v)
+                return ProbeResult(
+                    result.stable,
+                    "smu_floor (VDDGFX reale %d mV, floor SMU)" % real_v,
+                    result.gpu_temp_max, result.power_max,
+                    smu_floor=True, applied_voltage=real_v)
+            return result
         finally:
             self.governor.stop()
             self._restore_config(self._probe_backup)

@@ -20,7 +20,7 @@ la fine del run.
 
 import subprocess
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..constants import LIMITS
 from ..exceptions import SafetyViolation
@@ -126,10 +126,14 @@ class StressTest(LoggerMixin):
     # ------------------------------------------------------------------ #
 
     def _run_loaded(self, cmd: List[str], duration_s: int, reader: Any,
-                    power_budget: int) -> Tuple[int, float, float, float]:
+                    power_budget: int,
+                    on_tick: Optional[Callable[[], None]] = None
+                    ) -> Tuple[int, float, float, float]:
         """Esegue un comando di stress con campionamento LIVE e abort.
 
-        Ogni secondo campiona temperature/potenza (reali o mock). Se un
+        Ogni secondo campiona temperature/potenza (reali o mock) e invoca
+        `on_tick` (hook per letture aggiuntive durante il carico, es. la
+        VDDGFX sotto carico del probe sweep GPU — fix 30/08). Se un
         limite viene superato, o il safety monitor segnala violazione, il
         processo viene TERMINATO e si solleva SafetyViolation (C2).
         Sensori non leggibili (None) → avviso e limite saltato, MAI
@@ -147,6 +151,8 @@ class StressTest(LoggerMixin):
                     self.logger.error("Stress oltre la deadline, terminato")
                     proc.terminate()
                     break
+                if on_tick is not None:
+                    on_tick()
                 if (self.safety_monitor is not None
                         and self.safety_monitor.is_violation()):
                     proc.terminate()
