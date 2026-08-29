@@ -420,6 +420,45 @@ class TestPrereqsAndFallbacks(_SweepBase):
         # il governor è stato fermato anche in caso di eccezione
         self.assertGreaterEqual(self.gov.stops, 1)
 
+    def test_stress_cmd_uses_documented_furmark_syntax(self):
+        """Il comando stress usa la sintassi UFFICIALE FurMark 2
+        (stress-and-quit con --max-time, geeks3d.com/furmark/command-line)
+        — mai --duration/--seconds inventati."""
+        with mock.patch("buo.optimize.gpu.which",
+                        return_value="/usr/bin/furmark"):
+            opt = self.make_opt(probe=FakeProbe())
+            cmd = opt._gpu_stress_cmd(30)
+        self.assertEqual(cmd[0], "furmark")
+        self.assertIn("--demo", cmd)
+        self.assertIn("furmark-gl", cmd)
+        self.assertIn("--max-time", cmd)
+        self.assertIn("30", cmd)
+        self.assertNotIn("--seconds", cmd)
+        self.assertNotIn("--duration", cmd)
+
+    def test_stress_cmd_vkmark_fallback(self):
+        """Senza furmark, fallback vkmark con durata per-scena (rc=0 dopo
+        N secondi) — l'unico fallback con controllo durata reale."""
+        def fake_which(tool):
+            return "/usr/bin/vkmark" if tool == "vkmark" else None
+        with mock.patch("buo.optimize.gpu.which", side_effect=fake_which):
+            opt = self.make_opt(probe=FakeProbe())
+            cmd = opt._gpu_stress_cmd(30)
+        self.assertEqual(cmd[0], "vkmark")
+        self.assertIn("desktop:duration=30", cmd)
+
+    def test_stress_tool_excludes_glmark2(self):
+        """glmark2 non ha controllo durata (--seconds inesistente): NON
+        deve essere accettato come tool di stress (fail-closed community)."""
+        def fake_which(tool):
+            return "/usr/bin/glmark2" if tool == "glmark2" else None
+        with mock.patch("buo.optimize.gpu.which", side_effect=fake_which):
+            opt = self.make_opt(probe=FakeProbe())
+            self.assertIsNone(opt._gpu_stress_tool())
+            res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "community_defaults")
+        self.assertEqual(self.gov.writes, [])
+
 
 if __name__ == "__main__":
     unittest.main()

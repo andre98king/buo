@@ -382,17 +382,32 @@ class GPUUndervoltOptimizer(LoggerMixin):
     # -------------------------- prerequisiti -------------------------- #
 
     def _gpu_stress_tool(self) -> Optional[str]:
-        """Tool di stress GPU: furmark preferito, glmark2 fallback."""
+        """Tool di stress GPU con controllo durata REALE: furmark (CLI
+        FurMark 2 documentata) preferito, vkmark fallback. glmark2 NON ha
+        un'opzione di durata (--seconds inesistente: verificato sul campo
+        con glmark2 2023.01 di Fedora) → non può produrre un probe a
+        durata fissa con rc==0 → escluso (fail-closed verso community)."""
         if which("furmark"):
             return "furmark"
-        if which("glmark2"):
-            return "glmark2"
+        if which("vkmark"):
+            return "vkmark"
         return None
 
     def _gpu_stress_cmd(self, seconds: int) -> List[str]:
+        """Comando di stress per `seconds` secondi con rc==0 a fine run.
+
+        Sintassi UFFICIALE FurMark 2 (geeks3d.com/furmark/command-line,
+        esempio n.8: stress-and-quit con --max-time) e vkmark con durata
+        per-scena (rc=0 dopo N secondi). NOTA: richiedono un display
+        (finestra GL/Vulkan); senza display il tool fallisce → probe
+        instabile → fallback community (fail-closed)."""
         if which("furmark"):
-            return ["furmark", "--benchmark", "--duration", str(seconds)]
-        return ["glmark2", "--run-forever", "--seconds", str(seconds)]
+            return ["furmark", "--demo", "furmark-gl",
+                    "--width", "1920", "--height", "1080",
+                    "--max-time", str(seconds),
+                    "--vsync", "0", "--no-gpumon"]
+        return ["vkmark", "--size", "1920x1080",
+                "-b", f"desktop:duration={seconds}"]
 
     # ------------------------- curva e candidate ---------------------- #
 
