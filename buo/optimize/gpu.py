@@ -36,6 +36,18 @@ from ..utils.shell import which
 from .governor import GovernorWrapper
 from ..validate.stress import StressTest
 
+# Soglia di scostamento VDDGFX reale vs target oltre la quale l'SMU è
+# considerato al suo FLOOR (misurato sul campo 30/08 su Cyan Skillfish:
+# sotto ~800 mV l'SMU NON scende — VDDGFX reale resta 774-824 mV anche
+# con target 700). Se reale > target + soglia, il punto NON è applicabile:
+# un probe sotto il floor riporta "STABILE" per ARTEFATTO (gira sempre a
+# ~800) e una config finale con punti < floor fa partire il governor in
+# hang ("activating" per sempre, GPU senza curva). La lettura avviene a
+# IDLE (dopo il settle del governor): sotto carico l'SMU alza la tensione
+# (VDDGFX ~950 mV sotto FurMark a target 900) e il confronto sarebbe un
+# falso positivo.
+SMU_FLOOR_TOLERANCE_MV = 25
+
 
 @dataclass
 class ProbeResult:
@@ -44,6 +56,8 @@ class ProbeResult:
     reason: Optional[str] = None
     gpu_temp_max: Optional[float] = None
     power_max: Optional[float] = None
+    smu_floor: bool = False
+    applied_voltage: Optional[int] = None
 
 
 class GPUUndervoltOptimizer(LoggerMixin):
@@ -63,7 +77,7 @@ class GPUUndervoltOptimizer(LoggerMixin):
 
     def __init__(self, mock: bool = False, mock_hardware=None,
                  governor=None, stress=None, monitor=None,
-                 reader=None, probe=None):
+                 reader=None, probe=None, vddgfx_reader=None):
         self.mock = mock
         self.mock_hw = mock_hardware
         # Dipendenze iniettabili (design §7): nei test si passano i fake;
@@ -78,6 +92,10 @@ class GPUUndervoltOptimizer(LoggerMixin):
         self.monitor = monitor
         self._reader_override = reader
         self.probe = probe          # callable (f, v, seconds) o None → self._probe
+        # Reader della VDDGFX reale (mV) per il rilevamento del floor SMU:
+        # callable target_mv → mV reali o None (non leggibile). In
+        # produzione senza override: debugfs amdgpu_pm_info con sudo.
+        self._vddgfx_reader = vddgfx_reader
         self._active_monitor: Optional[Any] = None
 
     def optimize(self, start_freq: int = 1200,
@@ -221,6 +239,10 @@ class GPUUndervoltOptimizer(LoggerMixin):
         points_tested = 0
         failed_points = 0
         t_start = time.monotonic()
+        # Floor SMU rilevato dal probe (chip-globale, 30/08): appena l'SMU
+        # smette di seguire il target, il punto NON è applicabile e non si
+        # scende oltre (né qui né alle frequenze successive).
+        smu_floor_mv: Optional[int] = None
         try:
             for f in freqs:
                 if self._monitor_violation():
@@ -230,6 +252,7 @@ class GPUUndervoltOptimizer(LoggerMixin):
                 candidates = self._descend(start_v, step, floor,
                                            sweep["max_steps"])
                 stable_v = None
+                floor_reached = False
                 for v in candidates:
                     if self._monitor_violation():
                         self._raise_monitor()
@@ -240,6 +263,23 @@ class GPUUndervoltOptimizer(LoggerMixin):
                         "gpu_temp_max": r.gpu_temp_max,
                         "power_max": r.power_max, "reason": r.reason,
                     })
+                    if r.smu_floor and r.applied_voltage is not None:
+                        # FLOOR SMU: il punto non è applicabile (l'SMU gira
+                        # sempre a ~800) — il PRECEDENTE è il vincitore e
+                        # le frequenze successive non scendono oltre.
+                        smu_floor_mv = (r.applied_voltage
+                                        if smu_floor_mv is None
+                                        else max(smu_floor_mv,
+                                                 r.applied_voltage))
+                        floor = max(floor, smu_floor_mv)
+                        floor_reached = True
+                        self.logger.warning(
+                            "  Sweep (f=%d, v=%d) FLOOR SMU: VDDGFX reale "
+                            "%d mV non segue il target (+%d mV) — stop "
+                            "discesa, il punto precedente è il vincitore",
+                            f, v, r.applied_voltage,
+                            r.applied_voltage - v)
+                        break
                     if r.stable:
                         stable_v = v
                         self.logger.info(
@@ -267,7 +307,14 @@ class GPUUndervoltOptimizer(LoggerMixin):
                         "(chip instabile a %d mV) — ambiente compromesso → "
                         "tabella community", f, start_v)
                     return self._community_result(start_freq, max_voltage)
-                if sweep["confirm_seconds"] > 0:
+                if floor_reached:
+                    # il vincitore è il punto precedente, clampato al floor
+                    # rilevato (mai sotto: una config < floor fa partire il
+                    # governor in hang). Il punto clampato è GIÀ stato
+                    # stressato durante la discesa → conferma non necessaria.
+                    stable_v = (max(stable_v, smu_floor_mv)
+                                if stable_v is not None else smu_floor_mv)
+                elif sweep["confirm_seconds"] > 0:
                     (stable_v, points_tested, failed_points) = self._confirm(
                         f, stable_v, start_v, step, sweep["confirm_seconds"],
                         max_voltage, results, points_tested, failed_points)
@@ -278,22 +325,25 @@ class GPUUndervoltOptimizer(LoggerMixin):
             self._restore_config(backup)
             self.governor.stop()
 
-        points = self._build_curve(found, floor, max_voltage)
+        points = self._build_curve(found, floor, max_voltage, smu_floor_mv)
+        sweep_meta: Dict[str, Any] = {
+            "enabled": True,
+            "freqs": freqs,
+            "step_mv": step,
+            "floor_mv": floor,
+            "points_tested": points_tested,
+            "failed_points": failed_points,
+            "duration_s": int(time.monotonic() - t_start),
+            "results": results,
+        }
+        if smu_floor_mv is not None:
+            sweep_meta["smu_floor_mv"] = smu_floor_mv
         return {
             "safe_points": points,
             "best_efficiency": self._find_best_efficiency(points),
             "source": "per-silicon",
             # ---- metadati ADDITIVI (non letti da nessun consumatore) ----
-            "sweep": {
-                "enabled": True,
-                "freqs": freqs,
-                "step_mv": step,
-                "floor_mv": floor,
-                "points_tested": points_tested,
-                "failed_points": failed_points,
-                "duration_s": int(time.monotonic() - t_start),
-                "results": results,
-            },
+            "sweep": sweep_meta,
         }
 
     def _confirm(self, f: int, winner: int, start_v: int, step: int,
@@ -348,6 +398,22 @@ class GPUUndervoltOptimizer(LoggerMixin):
             if not self._wait_active():
                 return ProbeResult(False, "governor non attivo dopo 10s")
             time.sleep(2)                        # settle
+            # FLOOR SMU (30/08): lettura della VDDGFX REALE a idle (dopo
+            # il settle) vs target. Se l'SMU non segue il target (reale >
+            # target + soglia), il punto NON è applicabile: il probe lo
+            # riporta STABILE (il chip gira al floor) ma marcato
+            # smu_floor → lo sweep si ferma. Lettura non disponibile →
+            # fail-soft (nessun blocco).
+            real_v = self._read_vddgfx(v)
+            if real_v is not None and real_v > v + SMU_FLOOR_TOLERANCE_MV:
+                self.logger.warning(
+                    "  Probe (f=%d, v=%d) FLOOR SMU: VDDGFX reale %d mV "
+                    "non segue il target (+%d mV) — punto inapplicabile, "
+                    "il precedente è il vincitore",
+                    f, v, real_v, real_v - v)
+                return ProbeResult(
+                    True, "smu_floor (VDDGFX reale %d mV, floor SMU)" % real_v,
+                    None, None, smu_floor=True, applied_voltage=real_v)
             cmd = self._gpu_stress_cmd(seconds)  # furmark → glmark2
             reader = self._get_reader()
             before_dmesg = self._read_dmesg()
@@ -440,15 +506,20 @@ class GPUUndervoltOptimizer(LoggerMixin):
         return candidates
 
     def _build_curve(self, found: List[Tuple[int, int]], floor: int,
-                     max_voltage: int) -> List[Dict[str, int]]:
+                     max_voltage: int,
+                     smu_floor_mv: Optional[int] = None) -> List[Dict[str, int]]:
         """Ordina per frequenza, monotonizza (non-decrescente in voltage),
-        clamp a [floor, max_voltage]. Mai punti non testati."""
+        clamp a [max(floor, smu_floor_mv), max_voltage]. Mai punti non
+        testati. Il floor SMU rilevato (30/08) NON può essere scavalcato:
+        un punto sotto il floor non è applicabile (governor in hang)."""
         found = sorted(found, key=lambda p: p[0])
+        eff_floor = (max(floor, smu_floor_mv) if smu_floor_mv is not None
+                     else floor)
         points: List[Dict[str, int]] = []
-        prev_v = floor
+        prev_v = eff_floor
         for f, v in found:
             v = max(prev_v, v)
-            v = max(floor, min(v, max_voltage))
+            v = max(eff_floor, min(v, max_voltage))
             points.append({"freq": f, "voltage": v})
             prev_v = v
         return points
@@ -552,3 +623,26 @@ class GPUUndervoltOptimizer(LoggerMixin):
             return self._reader_override
         from ..safety.reader import RealHardwareReader
         return RealHardwareReader()
+
+    def _read_vddgfx(self, target_mv: int) -> Optional[int]:
+        """VDDGFX REALE (mV) applicata dall'SMU per il rilevamento del
+        floor (30/08): il target scritto in config.toml NON è affidabile
+        sotto ~800 mV (l'SMU non scende). Override nei test; in
+        produzione via debugfs amdgpu_pm_info (serve root → run_command
+        con sudo). None = non leggibile → fail-soft, nessun blocco."""
+        if self._vddgfx_reader is not None:
+            try:
+                return self._vddgfx_reader(target_mv)
+            except Exception:
+                return None
+        try:
+            from ..utils.shell import run_command
+            rc, out, _ = run_command(
+                ["cat", "/sys/kernel/debug/dri/1/amdgpu_pm_info"],
+                sudo=True, check=False)
+            if rc != 0 or not out:
+                return None
+            m = re.search(r"VDDGFX:\s*(\d+)\s*mV", out)
+            return int(m.group(1)) if m else None
+        except Exception:
+            return None

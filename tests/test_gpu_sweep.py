@@ -108,6 +108,19 @@ class FakeMonitor:
         return "test violation"
 
 
+class FakeStress:
+    """Fake di StressTest per il ciclo di vita REALE del probe
+    (probe=None → self._probe): _run_loaded sempre stabile (rc=0)."""
+
+    def __init__(self, rc=0):
+        self.rc = rc
+        self.runs = []   # [(cmd, seconds)]
+
+    def _run_loaded(self, cmd, seconds, reader, budget):
+        self.runs.append((list(cmd), seconds))
+        return (self.rc, 40.0, 40.0, 85.0)
+
+
 class _SweepBase(unittest.TestCase):
     """Base condivisa: config temporanea + FakeGov + which(furmark) finto."""
 
@@ -128,7 +141,7 @@ class _SweepBase(unittest.TestCase):
         self._tmp.cleanup()
 
     def make_opt(self, probe=None, monitor=None, reader=None, stress=None,
-                 governor=None):
+                 governor=None, vddgfx_reader=None):
         return GPUUndervoltOptimizer(
             mock=False,
             governor=governor if governor is not None else self.gov,
@@ -136,6 +149,7 @@ class _SweepBase(unittest.TestCase):
             monitor=monitor,
             reader=reader,
             probe=probe,
+            vddgfx_reader=vddgfx_reader,
         )
 
     def sweep(self, **overrides):
@@ -458,6 +472,77 @@ class TestPrereqsAndFallbacks(_SweepBase):
             res = opt.optimize(start_freq=1200, sweep=self.sweep())
         self.assertEqual(res["source"], "community_defaults")
         self.assertEqual(self.gov.writes, [])
+
+
+class TestSmuFloor(_SweepBase):
+    """FLOOR SMU Cyan Skillfish (misurato sul campo 30/08): sotto ~800 mV
+    l'SMU non scende (VDDGFX reale resta 774-824 mV anche con target 700):
+    un punto sotto il floor riporta "STABILE" per ARTEFATTO e una config
+    finale con punti <800 fa partire il governor in hang. Il probe reale
+    deve confrontare la VDDGFX APPLICATA col target e fermare la discesa.
+
+    Usano il ciclo di vita REALE del probe (probe=None → self._probe) con
+    FakeGov/FakeStress: la lettura VDDGFX è iniettata come `vddgfx_reader`
+    (callable target_mv → mV reali, o None = non leggibile)."""
+
+    def setUp(self):
+        super().setUp()
+        # il probe reale fa un settle di 2s per candidato: nei test si
+        # silenzia il sonno (nessuna dipendenza dal timing reale)
+        self._sleep_patch = mock.patch("buo.optimize.gpu.time.sleep")
+        self._sleep_patch.start()
+        self.addCleanup(self._sleep_patch.stop)
+
+    def test_should_stop_at_smu_floor_and_winner_is_floor(self):
+        """VDDGFX 'incollato' a 800 nonostante target decrescenti → lo
+        sweep si ferma al floor; il vincitore È il floor (800); nessun
+        punto sotto il floor nel risultato."""
+        stress = FakeStress()
+        opt = self.make_opt(probe=None, stress=stress, reader=object(),
+                            vddgfx_reader=lambda target: 800)
+        with mock.patch.object(opt, "_read_dmesg", return_value=[]):
+            res = opt.optimize(start_freq=1200,
+                               sweep=self.sweep(max_steps=10))
+        self.assertEqual(res["source"], "per-silicon")
+        # il vincitore è il floor rilevato, MAI sotto
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 800}])
+        for point in res["safe_points"]:
+            self.assertGreaterEqual(point["voltage"], 800)
+        self.assertEqual(res["sweep"]["smu_floor_mv"], 800)
+        # l'ultimo entry è il punto in cui il floor è stato rilevato:
+        # riportato STABILE con reason smu_floor, MAI stressato
+        entries = res["sweep"]["results"]
+        self.assertEqual(entries[-1]["voltage"], 750)
+        self.assertTrue(entries[-1]["stable"])
+        self.assertIn("smu_floor", entries[-1]["reason"])
+        self.assertEqual(len(stress.runs), 6,
+                         "i 6 candidati sopra il floor vengono stressati, "
+                         "il punto di rilevamento no")
+
+    def test_should_keep_behavior_when_vddgfx_unavailable(self):
+        """Lettura VDDGFX non disponibile (None) → comportamento attuale:
+        nessun blocco, conferma eseguita, nessun smu_floor_mv."""
+        stress = FakeStress()
+        opt = self.make_opt(probe=None, stress=stress, reader=object(),
+                            vddgfx_reader=lambda target: None)
+        with mock.patch.object(opt, "_read_dmesg", return_value=[]):
+            res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "per-silicon")
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 800}])
+        self.assertNotIn("smu_floor_mv", res["sweep"])
+        self.assertEqual(len(stress.runs), 6)   # 5 discese + 1 conferma
+
+    def test_should_not_flag_floor_when_smu_follows_target(self):
+        """SMU che segue il target esattamente (nessun floor) → la discesa
+        arriva al floor di config (700) e NON scatta il blocco SMU."""
+        stress = FakeStress()
+        opt = self.make_opt(probe=None, stress=stress, reader=object(),
+                            vddgfx_reader=lambda target: target)
+        with mock.patch.object(opt, "_read_dmesg", return_value=[]):
+            res = opt.optimize(start_freq=1200,
+                               sweep=self.sweep(max_steps=10))
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 700}])
+        self.assertNotIn("smu_floor_mv", res["sweep"])
 
 
 if __name__ == "__main__":
