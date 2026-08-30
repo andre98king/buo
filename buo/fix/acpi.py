@@ -24,6 +24,33 @@ AGGIORNAMENTO 2 (metodo CONCATENATO validato sul campo, Bazzite/ostree):
     viene toccato e la entry viene sempre backup-ata (rollback sicuro).
     ⚠️ Un cpio SEPARATO scritto su /boot (es. /boot/SSDT_ACPI.cpio) ha
     causato boot failure su ostree: non usarlo.
+
+AGGIORNAMENTO 3 (30/08/2026 — ricerca community, repo ATTIVO):
+    • il repo ATTIVO del fix è e-tho/bc250-acpi-fix, release v1.1.0
+      (18/08/2026). Tabelle: SSDT-CPU (stato idle, include C3),
+      SSDT-PST (frequency scaling 800→3200 MHz) e SSDT-STUBS (metodi
+      mancanti APTS/AWAK/AFN7 come no-op). Copre le 16 definizioni CPU
+      del firmware: funziona su 6-core stock e 8-core sbloccati, ed è
+      compatibile con i BIOS 1-5 (1.00/2.00/3.00/5.00 condividono lo
+      stesso DSDT).
+    • PIN ACPI INVARIATO (fail-closed, supply-chain A7): BUO pinnna
+      ancora bc250-collective/bc250-acpi-fix @ 1594d72 (repo morto dal
+      23/11/2025, unico commit). Motivo: e-tho fornisce i .aml
+      PRECOMPILATI SOLO come asset di release (nel git tree ci sono
+      solo i sorgenti .dsl; .gitignore esclude *.aml), mentre il flusso
+      A7 di BUO clona il checkout pinnato e consuma i file DAL
+      CHECKOUT — non esiste alcun meccanismo di download di asset di
+      release. La migrazione richiederebbe un nuovo percorso
+      supply-chain + adattamento nomi (SSDT-CST.aml → SSDT-CPU.aml) +
+      una decisione funzionale su PST/STUBS: NON forzata finché non c'è
+      un meccanismo compatibile (mai migrare verso qualcosa di
+      incompatibile).
+    ⚠️ WARNING BIOS MODDATI: le tabelle BUO possono CONFLIGGERE con
+      tabelle già fornite dal firmware moddato (es. 8-core via BIOS con
+      tabelle proprie). I duplicati falliscono il load (README e-tho:
+      "duplicates will fail to load"): su un BIOS moddato verificare che
+      il firmware non fornisca già le tabelle prima di applicare il fix
+      BUO, o rimuovere quelle di BUO.
 """
 
 import re
@@ -37,8 +64,11 @@ from ..utils.distro import detect_distro
 from ..utils.logging import LoggerMixin
 
 ACPI_REPO = "https://github.com/bc250-collective/bc250-acpi-fix"
-# Nelle versioni più recenti il fix è in bc250-collective/bc250-acpi-fix;
-# alcune fork (mendesrr) espongono anche SSDT-PST. BUO usa solo CST.
+# Pin A7 invariato (fail-closed): BUO consuma i .aml dal CHECKOUT del
+# repo pinnato (bc250-collective, morto dal 23/11/2025). Il repo ATTIVO
+# e-tho/bc250-acpi-fix (v1.1.0) vende i .aml precompilati solo come
+# asset di release (nel tree solo .dsl) — incompatibile col flusso
+# checkout-based: vedi docstring, AGGIORNAMENTO 3.
 AML_CST = "SSDT-CST.aml"
 
 
