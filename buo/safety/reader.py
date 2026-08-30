@@ -25,7 +25,12 @@ REGOLE HARDWARE (research/SENSORS_BC250.md):
       corrompono letture e scritture del governor);
     • il VID CPU esiste SOLO via SMU mailbox Q3/msg 0x36 (bc250_smu);
     • la potenza SoC totale e il VDDGFX si leggono da debugfs
-      amdgpu_pm_info (root).
+      amdgpu_pm_info (root) — anche il debugfs interroga l'SMU via
+      driver (mailbox UNICO): SOLO a governor inattivo, mai in
+      concorrenza (INCIDENTE 30/08: freeze silenzioso del SoC);
+    • le letture hwmon (amdgpu in0/power1/freq1, k10temp, nct6686)
+      sono SICURE con governor attivo: metrics table cached, nessun
+      mailbox.
 """
 
 import glob
@@ -216,9 +221,12 @@ class RealHardwareReader:
         return v / 1000.0 if v is not None else None
 
     def get_gpu_voltage(self) -> Optional[int]:
-        """Voltaggio GPU (mV): hwmon amdgpu in0_input, fallback VDDGFX da
-        debugfs amdgpu_pm_info (regex identica a buo/optimize/gpu.py,
-        fix 35af68e). Ordine: hwmon in0 → pm_info VDDGFX → None."""
+        """Voltaggio GPU (mV): hwmon amdgpu in0_input — SICURO con
+        governor attivo (metrics table cached, nessun mailbox) — poi
+        fallback VDDGFX da debugfs amdgpu_pm_info SOLO a governor
+        inattivo (regex identica a buo/optimize/gpu.py, fix 35af68e;
+        il debugfs interroga l'SMU: mai in concorrenza col governor).
+        Ordine: hwmon in0 → pm_info VDDGFX (gated) → None."""
         v = self._hwmon_value("amdgpu", "in")
         if v is not None:
             return int(round(v))
@@ -233,7 +241,16 @@ class RealHardwareReader:
         """Testo del primo amdgpu_pm_info leggibile (debugfs, root).
 
         Helper condiviso tra total_power (riga SoC) e gpu_voltage
-        (VDDGFX). Nessun file leggibile → None (fail-soft)."""
+        (VDDGFX). GATE SMU↔governor (INCIDENTE 30/08): il debugfs
+        amdgpu_pm_info interroga l'SMU via driver — mailbox UNICO — e
+        una lettura mentre il governor scrive corrompe letture E
+        scritture (wedge dell'SMU → freeze silenzioso del SoC senza
+        traccia kernel). La lettura è permessa SOLO a governor
+        CONFERMATO inattivo (cache TTL); attivo o stato sconosciuto →
+        None (fail-closed). Nessun file leggibile → None (fail-soft).
+        """
+        if self._governor_active() is not False:
+            return None
         try:
             for path in sorted(
                     glob.glob(f"{self._debugfs}/dri/*/amdgpu_pm_info")):
@@ -476,10 +493,22 @@ class RealHardwareReader:
         return None
 
     def get_total_power(self) -> Optional[float]:
-        """Potenza totale SoC (W) da debugfs amdgpu_pm_info (root).
+        """Potenza totale SoC (W) da debugfs amdgpu_pm_info (root, GATED).
 
         Riga reale: `57.82 W (current SoC including CPU)` → 57.82 W.
-        Nessun file debugfs → None (mai un totale inventato)."""
+        La lettura è un accesso mailbox SMU (il debugfs interroga l'SMU
+        via driver): SOLO a governor CONFERMATO inattivo — attivo o
+        stato sconosciuto → None (fail-closed, incidente 30/08: freeze
+        silenzioso del SoC). Nessun file debugfs → None (mai un totale
+        inventato).
+
+        Candidato FUTURO senza mailbox: sysfs `gpu_metrics`
+        (world-readable, metrics table cached, nessun accesso SMU) per
+        la potenza — riferimento: patch kernel "drm/amd/pm: fill in the
+        data member of v2 gpu metrics table for vangogh". NON introdotto
+        in questo round: gli offset v2_2 non sono verificabili con le
+        fonti disponibili (commento, non parsing).
+        """
         text = self._pm_info_text()
         if not text:
             return None

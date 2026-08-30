@@ -262,10 +262,27 @@ class TestReaderSensors(unittest.TestCase):
         self.assertEqual(self.reader.get_gpu_freq(), 1500)
 
     def test_gpu_voltage_vddgfx_fallback(self):
-        """hwmon in0 assente → fallback VDDGFX da amdgpu_pm_info
-        ('824 mV (VDDGFX)' — regex identica a buo/optimize/gpu.py)."""
+        """hwmon in0 assente + governor INATTIVO → fallback VDDGFX da
+        amdgpu_pm_info ('824 mV (VDDGFX)' — regex identica a
+        buo/optimize/gpu.py, lettura permessa solo a governor fermo)."""
         (self.hwmon / "hwmon0" / "in0_input").unlink()
         self.assertEqual(self.reader.get_gpu_voltage(), 824)
+
+    def test_gpu_voltage_vddgfx_governor_active_returns_none(self):
+        """Governor ATTIVO + in0 assente → VDDGFX MAI letto: None (il
+        debugfs interroga l'SMU — mai letture mailbox in concorrenza
+        col governor, incidente 30/08)."""
+        (self.hwmon / "hwmon0" / "in0_input").unlink()
+        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        with mock.patch("buo.safety.reader.glob.glob") as glob_mock:
+            self.assertIsNone(r.get_gpu_voltage())
+            glob_mock.assert_not_called()  # amdgpu_pm_info non viene aperto
+
+    def test_gpu_voltage_hwmon_safe_with_governor_active(self):
+        """hwmon in0 è SICURO a governor attivo (metrics table cached,
+        nessun mailbox): la lettura NON è gated."""
+        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        self.assertEqual(r.get_gpu_voltage(), 1050)
 
     def test_gpu_voltage_hwmon_wins_over_vddgfx(self):
         """hwmon in0 presente → vince su VDDGFX (ordine: in0 → pm_info)."""
@@ -290,11 +307,31 @@ class TestReaderSensors(unittest.TestCase):
     # ------------------------- POTENZA --------------------------- #
 
     def test_total_power_from_debugfs(self):
-        """amdgpu_pm_info: '57.82 W (current SoC including CPU)' → 57.82."""
+        """Governor INATTIVO → total_power reale da amdgpu_pm_info:
+        '57.82 W (current SoC including CPU)' → 57.82 W."""
         self.assertAlmostEqual(self.reader.get_total_power(), 57.82)
 
+    def test_total_power_governor_active_returns_none(self):
+        """Governor ATTIVO → pm_info MAI letta: total_power None (il
+        debugfs interroga l'SMU via driver — mailbox UNICO — mai in
+        concorrenza col governor: incidente 30/08, freeze silenzioso)."""
+        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        with mock.patch("buo.safety.reader.glob.glob") as glob_mock:
+            self.assertIsNone(r.get_total_power())
+            glob_mock.assert_not_called()  # amdgpu_pm_info non viene aperto
+
+    def test_total_power_governor_check_error_none(self):
+        """Stato governor sconosciuto (systemctl non eseguibile) →
+        pm_info MAI letta: None (fail-closed: si legge solo a governor
+        CONFERMATO inattivo)."""
+        r = self._reader(systemctl_cmd="/nonexistent/systemctl")
+        with mock.patch("buo.safety.reader.glob.glob") as glob_mock:
+            self.assertIsNone(r.get_total_power())
+            glob_mock.assert_not_called()
+
     def test_total_power_none_without_debugfs(self):
-        """Nessun amdgpu_pm_info → None (mai un totale inventato)."""
+        """Governor inattivo ma nessun amdgpu_pm_info → None (mai un
+        totale inventato)."""
         r = self._reader(debugfs_base=str(self.base / "empty-debug"))
         self.assertIsNone(r.get_total_power())
 
