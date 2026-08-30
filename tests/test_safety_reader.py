@@ -9,6 +9,7 @@ assente deve dare None, mai valori inventati.
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from buo.safety.reader import RealHardwareReader
 
@@ -27,9 +28,29 @@ class TestRealHardwareReader(unittest.TestCase):
         (self.amd / "temp1_input").write_text("50000\n")       # 50 °C
         (self.amd / "in0_input").write_text("1050\n")          # 1050 mV
         (self.amd / "power1_average").write_text("85000000\n")  # 85 W
-        self.reader = RealHardwareReader(hwmon_base=str(self.base))
+        # Tutte le altre fonti (sysfs, debugfs, conf, online, cpuinfo,
+        # systemctl) puntano a percorsi INESISTENTI in tmp: i test non
+        # devono mai toccare hardware/sistema reale. Iniettare i percorsi
+        # serve anche a tenere deterministico il risultato dei getter
+        # nuovi (es. cpu_cores leggerebbe /proc/cpuinfo reale).
+        self.reader = RealHardwareReader(
+            hwmon_base=str(self.base),
+            sysfs_base=str(self.base / "sysfs"),
+            debugfs_base=str(self.base / "debugfs"),
+            conf_path=str(self.base / "conf"),
+            online_path=str(self.base / "online"),
+            cpuinfo_path=str(self.base / "cpuinfo"),
+            systemctl_cmd="/nonexistent/systemctl",
+        )
+        # M2: l'import della libreria SMU è forzato a None — il VID
+        # resta non verificabile anche su macchine dove bc250_smu è
+        # installata (mai accesso SMU reale nei test).
+        self._smu_patch = mock.patch("buo.safety.reader._bc250_smu_import",
+                                     return_value=None)
+        self._smu_patch.start()
 
     def tearDown(self):
+        self._smu_patch.stop()
         self._tmp.cleanup()
 
     def test_cpu_temp(self):
@@ -45,11 +66,13 @@ class TestRealHardwareReader(unittest.TestCase):
         self.assertAlmostEqual(self.reader.get_gpu_power(), 85.0)
 
     def test_cpu_vid_not_readable_returns_none(self):
-        """VID via SMN non implementato → None (limite non verificabile)."""
+        """VID via libreria SMU non disponibile nell'ambiente di test
+        (import fallito) → None (limite non verificabile)."""
         self.assertIsNone(self.reader.get_cpu_vid())
 
     def test_total_power_not_readable_returns_none(self):
-        """Potenza CPU non misurabile → None, MAI sottostima del totale."""
+        """amdgpu_pm_info assente (nessun debugfs) → None, MAI un totale
+        inventato (sottostimare sarebbe pericoloso per il budget check)."""
         self.assertIsNone(self.reader.get_total_power())
 
     def test_missing_sensor_returns_none(self):

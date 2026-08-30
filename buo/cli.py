@@ -363,16 +363,23 @@ def status(mock: bool) -> None:
 
     table.add_row("CPU Core", _fmt(cpu_cores, "/8"),
                   _status_ge(cpu_cores, 8, "✅ OK", "⚠️ Parziale"))
+    table.add_row("Core Mask", _fmt(hardware.get("core_mask")), "—")
     table.add_row("CPU Freq", _fmt(hardware.get("cpu_freq"), " MHz"), "—")
     table.add_row("CPU Temp", _fmt(cpu_temp, "°C"),
                   _status_lt(cpu_temp, LIMITS.cpu.temp_max,
                              "✅ OK", "🔴 CRITICA"))
+    table.add_row("CPU VID", _fmt(hardware.get("cpu_vid"), " mV"), "—")
     table.add_row("GPU CU", _fmt(gpu_cu, "/40"),
                   _status_ge(gpu_cu, 24, "✅ OK", "⚠️ Ridotte"))
+    table.add_row("GPU Freq", _fmt(hardware.get("gpu_freq"), " MHz"), "—")
     table.add_row("GPU Temp", _fmt(gpu_temp, "°C"),
                   _status_lt(gpu_temp, LIMITS.gpu.temp_max,
                              "✅ OK", "🔴 CRITICA"))
+    table.add_row("GPU Volt", _fmt(hardware.get("gpu_voltage"), " mV"), "—")
+    table.add_row("GPU Power", _fmt(hardware.get("gpu_power"), " W"), "—")
     table.add_row("Potenza", _fmt(total_power, " W"), "—")
+    table.add_row("Ventola", _fmt(hardware.get("fan_speed"), " RPM"), "—")
+    table.add_row("Ambiente", _fmt(hardware.get("ambient_temp"), "°C"), "—")
     if is_40cu is None:
         table.add_row("40-CU", "non rilevabile", "—")
     else:

@@ -28,59 +28,92 @@ from buo.cli import cli
 class _FakeReader:
     """Reader reale simulato: stessa interfaccia di RealHardwareReader.
 
-    Valori fissi e controllabili; None = sensore non leggibile
-    (fail-soft: mai inventare valori).
+    Valori fissi e controllabili (default realistici: core sbloccati,
+    40 CU, SoC ~58 W…); None = sensore non leggibile (fail-soft: mai
+    inventare valori). I campi di stato non sensore restano None.
     """
 
     def __init__(self, **values):
         self._v = {
+            "core_mask": "0xFF",
+            "cpu_cores": 8,
+            "cpu_freq": 3500,
+            "cpu_vid": 993,
             "cpu_temp": 42.5,
-            "gpu_temp": 51.0,
+            "gpu_cu": 40,
+            "gpu_freq": 1500,
             "gpu_voltage": 1045,
+            "gpu_temp": 51.0,
             "gpu_power": 90.0,
-            "cpu_vid": None,
-            "total_power": None,
+            "total_power": 57.8,
+            "ambient_temp": 46.0,
+            "fan_speed": 2090,
+            "is_40cu_enabled": True,
         }
         self._v.update(values)
 
-    def get_cpu_temp(self):
-        return self._v["cpu_temp"]
+    def get_core_mask(self):
+        return self._v["core_mask"]
 
-    def get_gpu_temp(self):
-        return self._v["gpu_temp"]
+    def get_cpu_cores(self):
+        return self._v["cpu_cores"]
 
-    def get_gpu_voltage(self):
-        return self._v["gpu_voltage"]
-
-    def get_gpu_power(self):
-        return self._v["gpu_power"]
+    def get_cpu_freq(self):
+        return self._v["cpu_freq"]
 
     def get_cpu_vid(self):
         return self._v["cpu_vid"]
 
+    def get_cpu_temp(self):
+        return self._v["cpu_temp"]
+
+    def get_gpu_cu(self):
+        return self._v["gpu_cu"]
+
+    def get_gpu_freq(self):
+        return self._v["gpu_freq"]
+
+    def get_gpu_voltage(self):
+        return self._v["gpu_voltage"]
+
+    def get_gpu_temp(self):
+        return self._v["gpu_temp"]
+
+    def get_gpu_power(self):
+        return self._v["gpu_power"]
+
     def get_total_power(self):
         return self._v["total_power"]
 
+    def get_ambient_temp(self):
+        return self._v["ambient_temp"]
+
+    def get_fan_speed(self):
+        return self._v["fan_speed"]
+
+    def get_is_40cu_enabled(self):
+        return self._v["is_40cu_enabled"]
+
     def get_system_info(self):
-        """Stessa forma di MockHardware.get_system_info(); ciò che hwmon
-        non espone è None (la CLI mostra 'non rilevabile')."""
+        """Stessa forma di MockHardware.get_system_info(); ogni sensore
+        non leggibile è None (la CLI mostra 'non rilevabile')."""
         return {
-            "core_mask": None,
-            "cpu_cores": None,
-            "cpu_freq": None,
+            "core_mask": self.get_core_mask(),
+            "cpu_cores": self.get_cpu_cores(),
+            "cpu_freq": self.get_cpu_freq(),
             "cpu_vid": self.get_cpu_vid(),
             "cpu_temp": self.get_cpu_temp(),
-            "gpu_cu": None,
-            "gpu_freq": None,
+            "gpu_cu": self.get_gpu_cu(),
+            "gpu_freq": self.get_gpu_freq(),
             "gpu_voltage": self.get_gpu_voltage(),
             "gpu_temp": self.get_gpu_temp(),
             "gpu_power": self.get_gpu_power(),
             "total_power": self.get_total_power(),
-            "ambient_temp": None,
-            "fan_speed": None,
+            "ambient_temp": self.get_ambient_temp(),
+            "fan_speed": self.get_fan_speed(),
             "is_undervolted": None,
             "is_overclocked": None,
-            "is_40cu_enabled": None,
+            "is_40cu_enabled": self.get_is_40cu_enabled(),
             "is_acpi_fixed": None,
             "is_tlb_fixed": None,
             "is_ace_fixed": None,
@@ -105,15 +138,20 @@ class TestStatusCommand(unittest.TestCase):
         return self.runner.invoke(cli, args)
 
     def test_status_real_uses_real_reader(self):
-        """Senza --mock: valori dal reader REALE, mai dati MockHardware."""
+        """Senza --mock: valori dal reader REALE, mai dati MockHardware.
+
+        fan_speed=None mantiene coperto il fail-soft (la CLI mostra
+        'non rilevabile' per quel sensore, mai un valore inventato)."""
         with mock.patch("buo.safety.reader.RealHardwareReader",
-                        return_value=_FakeReader(cpu_temp=42.5)):
+                        return_value=_FakeReader(cpu_temp=42.5,
+                                                 fan_speed=None)):
             result = self._invoke(["status"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("42.5°C", result.output)  # temp reale (reader)
         self.assertIn("non rilevabile", result.output)  # fail-soft su None
         self.assertNotIn("45.0°C", result.output)       # mai la temp mock
         self.assertNotIn("6/8", result.output)          # mai i core mock
+        self.assertNotIn("24/40", result.output)        # mai le CU mock
 
     def test_status_mock_uses_mock(self):
         """Con --mock: valori simulati (MockHardware), comportamento invariato."""
@@ -121,6 +159,13 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("6/8", result.output)         # default mock: 6 core
         self.assertIn("24/40", result.output)       # default mock: 24 CU
+        # Righe nuove: valori di MockHardwareState (mock.py) — nessun
+        # impatto del percorso --mock (il change non lo tocca).
+        self.assertIn("0x77", result.output)        # core_mask stock mock
+        self.assertIn("1206 mV", result.output)     # CPU VID mock (state)
+        self.assertIn("1050 mV", result.output)     # GPU Volt mock (state)
+        self.assertIn("1500 MHz", result.output)    # GPU Freq mock (state)
+        self.assertIn("22.0°C", result.output)      # Ambiente mock (state)
         self.assertNotIn("sudo buo status", result.output)  # niente avviso
 
     def test_status_non_system_state_dir_shows_warning(self):

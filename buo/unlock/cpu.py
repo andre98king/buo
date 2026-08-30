@@ -21,6 +21,7 @@ from ..constants import (CORE_MASK_REG, CORE_MASK_STOCK, CORE_MASK_UNLOCKED,
                          PCI_CONFIG_PATH, SMU_DONE_STATES, SMU_MSG_WRITE_FF,
                          SMU_Q3_ARG, SMU_Q3_CMD, SMU_Q3_RSP, SMU_RETURN_OK)
 from ..exceptions import SafetyViolation, TimeoutError
+from ..utils import smn
 from ..utils.logging import LoggerMixin
 from .wrappers.bc250_unlock import BC250UnlockWrapper
 
@@ -44,12 +45,9 @@ class CPUUnlock(LoggerMixin):
         if not os.path.exists(PCI_CONFIG_PATH):
             return CORE_MASK_STOCK  # hardware non presente: assumi stock
 
-        fd = os.open(PCI_CONFIG_PATH, os.O_RDWR)
-        try:
-            os.pwrite(fd, struct.pack("<I", CORE_MASK_REG), 0xB8)
-            return struct.unpack("<I", os.pread(fd, 4, 0xBC))[0] & 0xFF
-        finally:
-            os.close(fd)
+        # Lettura SMN via helper condiviso (buo/utils/smn.py): stessa
+        # sequenza PCI config di sempre (pwrite 0xB8 / pread 0xBC).
+        return smn.read_core_mask()
 
     # ------------------------------------------------------------------ #
 
