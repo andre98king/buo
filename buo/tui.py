@@ -29,15 +29,15 @@ logger = get_logger("tui")
 
 
 class LiveReadings:
-    """Fornisce letture aggiornate: MockHardware o audit reale."""
+    """Fornisce letture aggiornate: MockHardware o reader hardware reale."""
 
     def __init__(self, mock: bool = False, mock_hardware=None):
         self.mock = mock
         self.hardware = mock_hardware
-        self.audit = None
+        self.reader = None
         if not mock:
-            from .audit.hardware import HardwareAudit
-            self.audit = HardwareAudit(mock=False)
+            from .safety.reader import RealHardwareReader
+            self.reader = RealHardwareReader()
 
     def read(self) -> Dict[str, Any]:
         """Lettura corrente (dict piatto per la dashboard)."""
@@ -61,28 +61,30 @@ class LiveReadings:
                 "cu40": info.get("is_40cu_enabled", False),
             }
 
-        # Hardware reale: letture leggere via audit
-        if self.audit is not None:
+        # Hardware reale: RealHardwareReader().get_system_info() — stesso
+        # pattern di `buo status` (buo/cli.py). Tutti i campi sensore sono
+        # reali; fail-soft C1: None → 0/False (come oggi), mai inventare
+        # valori. FIX TUI (campo): prima si usava HardwareAudit con
+        # freq/volt/power/fan hardcodati a 0 → dashboard tutta zero.
+        if self.reader is not None:
             try:
-                temps = self.audit._audit_temps()
-                cpu = self.audit._audit_cpu()
-                gpu = self.audit._audit_gpu()
+                info = self.reader.get_system_info()
                 return {
-                    "cpu_cores": cpu.get("cores", 0),
-                    "cpu_freq": 0,          # non esposta semplicemente
-                    "cpu_vid": 0,
-                    "cpu_temp": temps.get("cpu_temp") or 0,
-                    "gpu_cu": gpu.get("cu_count") or 0,
-                    "gpu_freq": 0,
-                    "gpu_voltage": 0,
-                    "gpu_temp": temps.get("gpu_temp") or 0,
-                    "gpu_power": 0,
-                    "total_power": 0,
-                    "fan_speed": 0,
-                    "ambient_temp": temps.get("ambient") or 0,
-                    "undervolted": False,
-                    "overclocked": False,
-                    "cu40": (gpu.get("cu_count") or 0) >= 40,
+                    "cpu_cores": info.get("cpu_cores") or 0,
+                    "cpu_freq": info.get("cpu_freq") or 0,
+                    "cpu_vid": info.get("cpu_vid") or 0,
+                    "cpu_temp": info.get("cpu_temp") or 0,
+                    "gpu_cu": info.get("gpu_cu") or 0,
+                    "gpu_freq": info.get("gpu_freq") or 0,
+                    "gpu_voltage": info.get("gpu_voltage") or 0,
+                    "gpu_temp": info.get("gpu_temp") or 0,
+                    "gpu_power": info.get("gpu_power") or 0,
+                    "total_power": info.get("total_power") or 0,
+                    "fan_speed": info.get("fan_speed") or 0,
+                    "ambient_temp": info.get("ambient_temp") or 0,
+                    "undervolted": bool(info.get("is_undervolted")),
+                    "overclocked": bool(info.get("is_overclocked")),
+                    "cu40": bool(info.get("is_40cu_enabled")),
                 }
             except Exception as e:
                 logger.debug("Lettura hardware fallita: %s", e)
