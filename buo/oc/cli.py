@@ -110,7 +110,7 @@ def oc_status(mock, dry_run, oc_dir, as_json) -> None:
         console.print(f"[dim]{line}[/]")
 
 
-@oc_group.command("run")
+@oc_group.command("run", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
 @_oc_opts
 @click.argument("engine_flags", nargs=-1, type=click.UNPROCESSED)
 @click.pass_context
