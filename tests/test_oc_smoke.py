@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Test di CpuSmoke (spec p3_smoke del motore): reader MOCK + stress finto.
+Copertura: pass, thermal, critical, stretch, whea (+whitelist), timeout,
+rc≠0, marcatore scritto/pulito, hang da marcatore stale, mock mode,
+stress-ng mai --timeout 0. Mai hardware reale.
+"""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from buo.oc.constants import SMOKE_STRESS_S
+from buo.oc.smoke import CpuSmoke
+
+
+class FakeReader:
+    """Reader mock: temps/freq controllabili."""
+
+    def __init__(self, temp=60.0, freq=3700):
+        self.temp = temp
+        self.freq = freq
+
+    def get_cpu_temp(self):
+        return self.temp
+
+    def get_cpu_freq(self):
+        return self.freq
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.oc = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def smoke(self, reader, timeout_s=10, **kw):
+        s = CpuSmoke(reader, oc_dir=self.oc, timeout_s=timeout_s, **kw)
+        # dmesg mockato: nessun subprocess reale (Popen patchato a parte)
+        s._dmesg_snapshot = mock.Mock(return_value=[])
+        return s
+
+    def _popen(self, first_none=True, returncode=0, timeout=False):
+        proc = mock.Mock()
+        if timeout:
+            proc.poll.side_effect = lambda: None   # mai termina → timeout
+        elif first_none:
+            proc.poll.side_effect = [None, 0, 0, 0, 0]
+        else:
+            proc.poll.return_value = 0
+        proc.returncode = returncode
+        return proc
+
+
+class TestSmokeOutcome(Base):
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_pass(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        r = self.smoke(FakeReader(temp=60, freq=3700)).run(3700, 975)
+        self.assertTrue(r.ok)
+        self.assertIsNone(r.cause)
+        self.assertTrue(r.marker_cleared)
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_thermal_86(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        r = self.smoke(FakeReader(temp=86, freq=3700)).run(3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "thermal")
+        self.assertEqual(r.temp_max, 86.0)
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_critical_90(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        r = self.smoke(FakeReader(temp=90, freq=3700)).run(3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "critical")
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_stretch(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        r = self.smoke(FakeReader(temp=60, freq=3600)).run(3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "stretch")
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_whea(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        s = self.smoke(FakeReader(temp=60, freq=3700))
+        s._dmesg_snapshot = mock.Mock(side_effect=[
+            ["base line"],
+            ["base line", "mce: [Hardware Error]: machine check (x)"],
+        ])
+        r = s.run(3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "whea")
+        self.assertEqual(r.whea_delta, 1)
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_whea_whitelist_ignored(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        s = self.smoke(FakeReader(temp=60, freq=3700))
+        s._dmesg_snapshot = mock.Mock(side_effect=[
+            [],
+            ["pcieport 0000:00:01.0: AER: corrected error received"],
+        ])
+        r = s.run(3700, 975)
+        self.assertTrue(r.ok)   # AER corrected → whitelisted
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_stress_rc_nonzero(self, popen):
+        popen.return_value = self._popen(first_none=False, returncode=1)
+        r = self.smoke(FakeReader(temp=60, freq=3700)).run(3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "stress")
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_timeout(self, popen):
+        popen.return_value = self._popen(timeout=True)
+        r = self.smoke(FakeReader(temp=60, freq=3700), timeout_s=2).run(
+            3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "timeout")
+
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_freq_min_tracked(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        reader = FakeReader(temp=60, freq=3700)
+        r = self.smoke(reader).run(3700, 975)
+        self.assertEqual(r.freq_min, 3700)
+
+
+class TestMarker(Base):
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_marker_written_and_cleared(self, popen):
+        popen.return_value = self._popen(first_none=True)
+        marker = self.oc / "smoke.marker.json"
+        s = self.smoke(FakeReader(temp=60, freq=3700))
+        original = s._write_marker
+        seen = []
+
+        def spy_write(freq, vid):
+            original(freq, vid)
+            seen.append(marker.exists())   # True subito dopo la scrittura
+
+        s._write_marker = spy_write
+        r = s.run(3700, 975)
+        self.assertTrue(seen and seen[0])   # marcatore scritto DURANTE lo smoke
+        self.assertFalse(marker.exists())   # e pulito alla fine
+        self.assertTrue(r.marker_cleared)
+
+    @mock.patch("buo.oc.smoke.boot_epoch", return_value=10**9)
+    def test_stale_marker_is_hang_fail_closed(self, _boot):
+        marker = self.oc / "smoke.marker.json"
+        marker.write_text(json.dumps({"freq": 3700, "vid_cap": 975,
+                                      "kind": "smoke", "started_epoch": 1}))
+        r = self.smoke(FakeReader(temp=60, freq=3700)).run(3700, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "hang")
+        self.assertFalse(r.marker_cleared)
+
+    def test_no_stale_without_marker(self):
+        self.assertFalse(self.smoke(FakeReader()).stale_smoke_marker())
+
+
+class TestMockMode(Base):
+    def test_mock_mode_with_mockhardware(self):
+        from buo.utils.mock import MockHardware
+        hw = MockHardware()
+        s = CpuSmoke(hw, mock=True, oc_dir=self.oc, mock_hardware=hw)
+        r = s.run(3500, None)   # MockHardware: cpu_freq 3500, temp 45
+        self.assertTrue(r.ok)
+        self.assertFalse((self.oc / "smoke.marker.json").exists())
+
+    def test_mock_mode_no_hardware_ok(self):
+        s = CpuSmoke(FakeReader(), mock=True, oc_dir=self.oc,
+                     mock_hardware=None)
+        r = s.run(3700, 975)
+        self.assertTrue(r.ok)   # senza letture: nessun gate scatta
+
+    def test_default_stress_cmd_never_timeout_zero(self):
+        s = CpuSmoke(FakeReader(), oc_dir=self.oc)
+        cmd = s._stress_cmd
+        self.assertIn("--timeout", cmd)
+        val = cmd[cmd.index("--timeout") + 1]
+        self.assertNotEqual(val, "0")          # MAI --timeout 0
+        self.assertEqual(val, str(SMOKE_STRESS_S))
+        self.assertIn("--verify", cmd)
+
+
+if __name__ == "__main__":
+    unittest.main()

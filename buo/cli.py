@@ -918,6 +918,31 @@ def profile_import(file_path, output_path) -> None:
                   f"usalo con: sudo buo restore[/]")
 
 
+# ------------------------------- oc ----------------------------------- #
+# Tool OC integrato (design research/DESIGN_BUO_OC_TUI.md): motore
+# oc3600.sh + profili + apply. Opera ESCLUSIVAMENTE su OC_DIR
+# (/var/lib/buo/oc) — NON tocca il checkpoint dell'orchestratore; coesiste
+# con la fase legacy `buo overclock` (invariata). Registrazione lazy.
+
+
+@cli.group("oc")
+def oc_group() -> None:
+    """⚡ Tool OC integrato (motore oc3600.sh + profili + apply)."""
+
+
+def _register_oc() -> None:
+    from .oc.cli import oc_group as _oc_group
+    from .oc.cli import oc_tui_command as _oc_tui
+
+    # comandi del gruppo (definiti in buo/oc/cli.py)
+    for name, cmd in _oc_group.commands.items():
+        oc_group.add_command(cmd, name)
+    cli.add_command(_oc_tui, "oc-tui")
+
+
+_register_oc()
+
+
 # ====================================================================== #
 
 def main() -> int:

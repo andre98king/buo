@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 BC-250 Community
+"""
+Smoke test CPU in Python — SPEC = p3_smoke del motore (P3_SMOKE_STRESS=30).
+
+Semantica replicata ESATTAMENTE: marcatore test (hang auto-detection),
+stress-ng --verify 30s (MAI --timeout 0), gate termico 85 (fail thermal) /
+90 (abort critical), freq_min >= freq−50 (clock stretching), WHEA delta 0
+(whitelist AER/GHES corrected). Campionamento 1s via reader con on_tick.
+
+Mai hardware reale nei test: reader mockabile, comandi iniettabili.
+"""
+
+import json
+import logging
+import os
+import re
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, List, Optional
+
+from ..utils.shell import run_command
+from .constants import (
+    OC_DIR_DEFAULT,
+    SMOKE_FREQ_MARGIN,
+    SMOKE_MARKER,
+    SMOKE_STRESS_S,
+    SMOKE_TIMEOUT_S,
+    TEMP_CRITICAL,
+    TEMP_GATE,
+)
+
+logger = logging.getLogger("buo.oc.smoke")
+
+# Whitelist WHEA/MCE (identica a whea_delta() del motore): le righe corrected
+# AER/GHES e le righe di enablement NON contano come fail.
+_WHEA_RE = re.compile(
+    r"whea|machine check|mce: \[hardware error\]|hardware error from apei|"
+    r"corrected machine check",
+    re.IGNORECASE,
+)
+_WHEA_IGNORE_RE = re.compile(
+    r"in-kernel mce decoding enabled|thermal monitoring enabled|"
+    r"mce: [a-z0-9]+: (cleared|pending)|aer.*corrected|ghes.*corrected",
+    re.IGNORECASE,
+)
+
+
+def boot_epoch() -> Optional[int]:
+    """Epoch del boot da /proc/stat btime (fallback: uptime -s)."""
+    try:
+        with open("/proc/stat", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("btime"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _whea_delta(lines: List[str]) -> int:
+    return len([l for l in lines if _WHEA_RE.search(l)
+                and not _WHEA_IGNORE_RE.search(l)])
+
+
+@dataclass(frozen=True)
+class SmokeResult:
+    ok: bool
+    cause: Optional[str] = None  # thermal|critical|whea|stretch|stress|timeout|hang
+    temp_max: Optional[float] = None
+    freq_min: Optional[int] = None
+    whea_delta: int = 0
+    duration_s: float = 0.0
+    marker_cleared: bool = True
+
+
+class CpuSmoke:
+    """Smoke 30s sulla config candidata (spec p3_smoke del motore).
+
+    reader: interfaccia RealHardwareReader/MockHardware (get_cpu_temp,
+    get_cpu_freq). stress_cmd iniettabile (lista); systemctl_cmd per il
+    marcatore (non usato direttamente — riservato). In mock non esegue
+    comandi reali.
+    """
+
+    def __init__(self, reader, mock: bool = False, mock_hardware=None,
+                 stress_cmd: Optional[List[str]] = None,
+                 systemctl_cmd: str = "systemctl",
+                 oc_dir: Optional[Path] = None,
+                 sudo: bool = True,
+                 timeout_s: int = SMOKE_TIMEOUT_S,
+                 dmesg_cmd: str = "dmesg"):
+        self.reader = reader
+        self.mock = mock
+        self.mock_hw = mock_hardware
+        self.oc_dir = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
+        self._marker = self.oc_dir / SMOKE_MARKER
+        self._sudo = sudo
+        self._timeout_s = timeout_s
+        self._dmesg_cmd = dmesg_cmd
+        self._stress_cmd = stress_cmd or self._default_stress_cmd()
+        self._systemctl = systemctl_cmd
+
+    def _default_stress_cmd(self) -> List[str]:
+        nproc = os.cpu_count() or 1
+        return ["stress-ng", "--cpu", str(nproc), "--cpu-method", "all",
+                "--verify", "--timeout", str(SMOKE_STRESS_S)]
+
+    # ----------------------------- marcatore --------------------------- #
+
+    def _write_marker(self, freq: int, vid_cap: Optional[int]) -> None:
+        self.oc_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "freq": freq,
+            "vid_cap": vid_cap,
+            "kind": "smoke",
+            "started_epoch": int(time.time()),
+        }
+        tmp = self._marker.with_suffix(self._marker.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self._marker)
+
+    def _clear_marker(self) -> bool:
+        try:
+            self._marker.unlink()
+            return True
+        except OSError:
+            return False
+
+    def stale_smoke_marker(self) -> bool:
+        """True se il marcatore smoke è STALE (boot successivo): hang
+        confermato dal sistema ripartito durante lo smoke."""
+        try:
+            data = json.loads(self._marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        started = data.get("started_epoch")
+        boot = boot_epoch()
+        if not started or not boot:
+            return False
+        return int(started) < boot
+
+    # ------------------------------- run ------------------------------ #
+
+    def run(self, freq: int, vid_cap: Optional[int]) -> SmokeResult:
+        """Smoke 30s; (ok, cause) con marcatore scritto e pulito.
+
+        Un marcatore GIÀ stale (precedente smoke hangato) → fail-closed:
+        non si rientra, cause=hang.
+        """
+        if self.stale_smoke_marker():
+            logger.warning("smoke marker stale (hang precedente) — "
+                           "fail-closed, nessun nuovo smoke")
+            return SmokeResult(ok=False, cause="hang", marker_cleared=False)
+
+        self._write_marker(freq, vid_cap)
+        started = time.monotonic()
+        before = self._dmesg_snapshot()
+        rc = 0
+        temp_max: Optional[float] = None
+        freq_min: Optional[int] = None
+
+        if self.mock:
+            # mock: letture dal mock_hardware (o reader mock), nessun comando
+            rc = 0
+            temp_max = self._mock_temp()
+            freq_min = self._mock_freq()
+            time.sleep(0)  # deterministico nei test
+        else:
+            try:
+                proc = subprocess.Popen(
+                    self._stress_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                rc = 127
+                proc = None
+            if proc is not None:
+                deadline = started + self._timeout_s
+                while proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(1)
+                    t = self._safe_temp()
+                    if t is not None:
+                        temp_max = t if temp_max is None else max(temp_max, t)
+                        if t >= TEMP_CRITICAL:
+                            self._kill(proc)
+                            rc = -1
+                            temp_max = t
+                            break
+                    f = self._safe_freq()
+                    if f is not None:
+                        freq_min = f if freq_min is None else min(freq_min, f)
+                if proc.poll() is None:
+                    self._kill(proc)
+                    rc = 124 if rc == 0 else rc
+                else:
+                    rc = proc.returncode if rc == 0 else rc
+
+        after = self._dmesg_snapshot()
+        whea = _whea_delta([l for l in after if l not in before])
+        duration = time.monotonic() - started
+
+        ok, cause = self._evaluate(freq, rc, temp_max, freq_min, whea)
+        cleared = self._clear_marker()
+        return SmokeResult(ok=ok, cause=cause, temp_max=temp_max,
+                           freq_min=freq_min, whea_delta=whea,
+                           duration_s=duration, marker_cleared=cleared)
+
+    # ---------------------------- sampling ---------------------------- #
+
+    def _safe_temp(self) -> Optional[float]:
+        try:
+            return self.reader.get_cpu_temp()
+        except Exception:
+            return None
+
+    def _safe_freq(self) -> Optional[int]:
+        try:
+            return self.reader.get_cpu_freq()
+        except Exception:
+            return None
+
+    def _mock_temp(self) -> Optional[float]:
+        if self.mock_hw is not None:
+            try:
+                return float(self.mock_hw.get_cpu_temp())
+            except Exception:
+                return None
+        return None
+
+    def _mock_freq(self) -> Optional[int]:
+        if self.mock_hw is not None:
+            try:
+                return int(self.mock_hw.get_cpu_freq())
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _kill(proc) -> None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    # ----------------------------- dmesg ------------------------------ #
+
+    def _dmesg_snapshot(self) -> List[str]:
+        if self.mock:
+            return []
+        rc, out, _err = run_command([self._dmesg_cmd], timeout=10,
+                                    sudo=self._sudo, capture=True)
+        if rc != 0:
+            return []
+        return out.splitlines()
+
+    # ---------------------------- evaluation -------------------------- #
+
+    def _evaluate(self, freq: int, rc: int, temp_max: Optional[float],
+                  freq_min: Optional[int], whea: int
+                  ) -> "tuple[bool, Optional[str]]":
+        if rc == -1 or (temp_max is not None and temp_max >= TEMP_CRITICAL):
+            return False, "critical"
+        if temp_max is not None and temp_max >= TEMP_GATE:
+            return False, "thermal"
+        if freq_min is not None and freq_min < freq - SMOKE_FREQ_MARGIN:
+            return False, "stretch"
+        if whea > 0:
+            return False, "whea"
+        if rc == 124:
+            return False, "timeout"
+        if rc != 0:
+            return False, "stress"
+        return True, None
