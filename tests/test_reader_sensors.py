@@ -302,7 +302,12 @@ class TestReaderSensors(unittest.TestCase):
     def test_gpu_cu_none_without_sources(self):
         """Nessuna fonte CU (sysfs/conf/wrapper) → None."""
         r = self._reader(conf_path="/nonexistent/conf")
-        self.assertIsNone(r.get_gpu_cu())
+        # isola anche il wrapper live-manager (reale su macchine configurate)
+        with mock.patch(
+                "buo.unlock.wrappers.bc250_live_manager."
+                "BC250LiveManagerWrapper") as wcls:
+            wcls.return_value.available = False
+            self.assertIsNone(r.get_gpu_cu())
 
     # ------------------------- POTENZA --------------------------- #
 
@@ -394,7 +399,10 @@ class TestReaderSensors(unittest.TestCase):
                                cpuinfo_path="/nonexistent/cpuinfo",
                                systemctl_cmd="/nonexistent/systemctl")
         with mock.patch("buo.safety.reader._bc250_smu_import",
-                        return_value=None):
+                        return_value=None), \
+             mock.patch("buo.unlock.wrappers.bc250_live_manager."
+                        "BC250LiveManagerWrapper") as wcls:
+            wcls.return_value.available = False
             for getter in (r.get_cpu_cores, r.get_cpu_freq, r.get_core_mask,
                            r.get_cpu_vid, r.get_gpu_cu, r.get_gpu_freq,
                            r.get_gpu_voltage, r.get_total_power,

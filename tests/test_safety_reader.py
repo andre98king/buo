@@ -81,17 +81,22 @@ class TestRealHardwareReader(unittest.TestCase):
 
     def test_get_system_info_real_values_or_none(self):
         """get_system_info: valori reali dove leggibili, None MAI fittizi."""
-        info = self.reader.get_system_info()
-        self.assertEqual(info["cpu_temp"], 45.0)
-        self.assertEqual(info["gpu_temp"], 50.0)
-        self.assertEqual(info["gpu_voltage"], 1050)
-        self.assertAlmostEqual(info["gpu_power"], 85.0)
-        # Non esposti da hwmon → None (mai valori inventati)
-        self.assertIsNone(info["cpu_cores"])
-        self.assertIsNone(info["gpu_cu"])
-        self.assertIsNone(info["cpu_freq"])
-        self.assertIsNone(info["total_power"])
-        self.assertIsNone(info["is_40cu_enabled"])
+        # isola il wrapper live-manager (reale su macchine configurate)
+        with mock.patch(
+                "buo.unlock.wrappers.bc250_live_manager."
+                "BC250LiveManagerWrapper") as wcls:
+            wcls.return_value.available = False
+            info = self.reader.get_system_info()
+            self.assertEqual(info["cpu_temp"], 45.0)
+            self.assertEqual(info["gpu_temp"], 50.0)
+            self.assertEqual(info["gpu_voltage"], 1050)
+            self.assertAlmostEqual(info["gpu_power"], 85.0)
+            # Non esposti da hwmon → None (mai valori inventati)
+            self.assertIsNone(info["cpu_cores"])
+            self.assertIsNone(info["gpu_cu"])
+            self.assertIsNone(info["cpu_freq"])
+            self.assertIsNone(info["total_power"])
+            self.assertIsNone(info["is_40cu_enabled"])
 
     def test_empty_hwmon_dir_returns_none(self):
         reader = RealHardwareReader(hwmon_base="/nonexistent")
