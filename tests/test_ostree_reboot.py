@@ -549,15 +549,20 @@ class TestEnsureOstreeDefault(_OrchCase):
         self.assertTrue(cp.get("ostree_default_swapped"))
         self.assertEqual(cp.get("ostree_swap_target_checksum"), COMMIT_B)
 
-    def test_activation_aborts_when_cmdline_index_contradicts_status(self):
-        """Sanity pre-swap: cmdline indica la entry 0 (default) ma lo status
-        segna come booted un deployment NON-default, senza swap in questo
-        boot → incoerenza → abort fail-closed."""
-        text = cmdline_booted(COMMIT_A, 0)
+    def test_activation_index0_booted_nondefault_proceeds(self):
+        """REGRESSIONE finding di campo 03/09: dopo un rollback nello stesso
+        boot (swap+restore di un run precedente) il cmdline conserva l'index
+        di boot-time (0) ma lo status segna booted un deployment NON-default
+        — stato LEGITTIMO. NESSUNA sanity sull'index (mai abortire): la run
+        procede allo swap sul checksum del booted da status."""
+        text = cmdline_booted(COMMIT_A, 0)      # index cmdline stantio
         mgr = self.make_manager(text, two_deps(booted_index=1))
         orch = self.make_orch(mgr)
-        self.assertFalse(orch._ensure_ostree_default("unlock"))
-        self.assertEqual(mgr.world.calls, [])   # nessuno swap
+        self.assertTrue(orch._ensure_ostree_default("unlock"))
+        self.assertEqual(mgr.world.calls, [["rpm-ostree", "rollback"]])
+        cp = orch.checkpoint
+        self.assertTrue(cp.get("ostree_default_swapped"))
+        self.assertEqual(cp.get("ostree_swap_target_checksum"), COMMIT_B)
 
     def test_activation_skips_sanity_after_swap_marker(self):
         """Post-swap nello stesso boot (marcatore attivo): la posizione del

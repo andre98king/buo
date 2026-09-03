@@ -1601,21 +1601,12 @@ class Orchestrator(LoggerMixin):
                 "oppure rpm-ostree rollback manuale (servono ESATTAMENTE "
                 "2 deployment attivi).", reason)
             return False                     # abort fail-closed
-        # Sanity pre-swap (index cmdline — MAI il hash cmdline: su image-mode
-        # è la base key condivisa, finding di campo). Il deployment bootato
-        # lo dice SOLO lo status (booted:true); con 2 deployment un booted
-        # non-default sta in posizione 1, che l'index cmdline deve confermare
-        # quando in questo boot NON c'è già stato uno swap (marcatore
-        # assente). Post-swap la posizione è cambiata → sanity skippata.
-        if (state.booted_index not in (None, 1)
-                and not self.checkpoint.get("ostree_default_swapped",
-                                            False)):
-            self.logger.error(
-                "⛔ OSTREE: cmdline (entry %s) vs rpm-ostree status (booted "
-                "non-default) incoerenti senza swap in corso — esegui buo "
-                "dal deployment di default, oppure rpm-ostree rollback "
-                "manuale.", state.booted_index)
-            return False
+        # NESSUNA sanity sull'index cmdline: dopo un rollback nello stesso
+        # boot (swap o restore di un run precedente) il cmdline conserva il
+        # seriale di boot-time e può contraddire la posizione status (es.
+        # booted non-default con entry 0) — stato LEGITTIMO, mai abortire
+        # (finding di campo 03/09: la sanity causava falsi abort). La
+        # sicurezza è tutta in verify_swap_preconditions + guard checksum.
         # target = checksum del deployment booted (full-64 DA STATUS): il
         # restore è lecito solo se il default corrente tornerà a coincidere
         # con lui (guard D3).
