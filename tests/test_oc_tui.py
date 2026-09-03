@@ -11,6 +11,8 @@ from unittest import mock
 
 from buo.oc.profiles import Profile
 from buo.oc.tui_app import (
+    confirm_stock_text,
+    confirm_stop_text,
     confirm_text,
     profiles_table_rows,
     run_empty_hint,
@@ -35,16 +37,27 @@ class TestSensorsText(unittest.TestCase):
         text = sensors_text({})
         self.assertIn("CPU", text)
 
-    def test_gated_vid_shows_lock(self):
-        # VID None (gated: governor attivo) → 🔒 mostrato onestamente
+    def test_gated_vid_shows_dash(self):
+        # VID None (gated: governor attivo) → "—" (mai 🔒, mai 0)
         text = sensors_text({"cpu_freq": 3700, "cpu_vid": None,
                              "cpu_temp": 60.0})
-        self.assertIn("🔒", text)
+        self.assertNotIn("🔒", text)
+        self.assertIn("VID —", text)
 
     def test_gated_soc(self):
         text = sensors_text({"cpu_freq": 3700, "cpu_temp": 60.0,
                              "total_power": None})
-        self.assertIn("🔒", text)
+        self.assertNotIn("🔒", text)
+        self.assertIn("SoC —", text)
+
+    def test_compact_missing_no_zero(self):
+        """C1: sensori assenti → '—', MAI '0 MHz' (striscia compatta)."""
+        text = sensors_text({})
+        self.assertNotIn("0 MHz", text)
+        self.assertIn("—", text)
+        self.assertIn("CPU —", text)
+        text2 = sensors_text({"cpu_freq": 0, "cpu_temp": None})
+        self.assertIn("CPU —", text2)
 
 
 class TestRunText(unittest.TestCase):
@@ -77,6 +90,46 @@ class TestRunText(unittest.TestCase):
               "governor": "active"}
         text = run_text(st)
         self.assertNotIn("FERMO", text)
+        self.assertIn("attivo", text)
+
+    def test_engine_missing_shows_block(self):
+        """Motore assente (fail-closed): blocco NON PRESENTE nel pannello."""
+        st = {"state": {"phase_label": "done", "persisted": False},
+              "process": {"active": False, "pid": None},
+              "governor": "active",
+              "engine": {"present": False, "executable": False}}
+        text = run_text(st)
+        self.assertIn("NON PRESENTE", text)
+        self.assertIn("Cosa fare", text)
+
+    def test_engine_present_row(self):
+        st = {"state": {"phase_label": "done"},
+              "process": {"active": False},
+              "governor": "active",
+              "engine": {"present": True}}
+        text = run_text(st)
+        self.assertIn("motore:", text)
+        self.assertIn("presente", text)
+        self.assertNotIn("NON PRESENTE", text)
+
+    def test_apply_rolled_back_nota(self):
+        """Stato apply rolled_back → riga nota con ROLLED BACK."""
+        st = {"state": {"phase_label": "done"},
+              "process": {"active": False},
+              "governor": "active",
+              "engine": {"present": True},
+              "apply": {"state": "rolled_back", "profile": "certified"}}
+        text = run_text(st)
+        self.assertIn("ROLLED BACK", text)
+        self.assertIn("controlla il log", text)
+
+    def test_apply_ok_no_nota(self):
+        st = {"state": {"phase_label": "done"},
+              "process": {"active": False},
+              "governor": "active",
+              "engine": {"present": True},
+              "apply": {"state": "ok"}}
+        self.assertNotIn("nota", run_text(st))
 
 
 class TestProfilesRows(unittest.TestCase):
@@ -93,7 +146,9 @@ class TestProfilesRows(unittest.TestCase):
         self.assertEqual(rows[0][1], "3500@0")
         self.assertEqual(rows[0][4], "●")       # active
         self.assertEqual(rows[1][2], "1206")
-        self.assertEqual(rows[1][3], "✅")
+        self.assertEqual(rows[0][2], "—")       # VID mancante → "—" (D5)
+        self.assertEqual(rows[0][3], "sì")      # validato → "sì" (non ✅)
+        self.assertEqual(rows[1][3], "sì")
 
     def test_empty(self):
         self.assertEqual(profiles_table_rows([]), [])
@@ -179,6 +234,33 @@ class TestRunEmptyHint(unittest.TestCase):
         self.assertIn("[u]", hint)
         self.assertIn("convergenza CPU", hint)
         self.assertIn("silicio", hint)
+
+    def test_no_hint_when_engine_missing(self):
+        """Motore assente NON è 'nessun run': niente CTA start."""
+        st = {"state": {"phase": "done"}, "process": {"active": False},
+              "engine": {"present": False}}
+        self.assertEqual(run_empty_hint(st), "")
+
+
+class TestConfirmStockStop(unittest.TestCase):
+    """NUOVE conferme pure per R e s (testi §4.8, parole + via d'uscita)."""
+
+    def test_confirm_stock_text(self):
+        stock = Profile(id="stock", name="Stock", freq=3500, scale=0,
+                        vid_cap=None, source="builtin", validated=True)
+        text = confirm_stock_text(stock)
+        self.assertIn("STOCK", text)
+        self.assertIn("Ripristinare", text)
+        self.assertIn("3500", text)
+        self.assertIn("y ripristina", text)
+        self.assertIn("n annulla", text)
+
+    def test_confirm_stop_text(self):
+        text = confirm_stop_text()
+        self.assertIn("Fermare la run", text)
+        self.assertIn("checkpoint", text)
+        self.assertIn("y ferma", text)
+        self.assertIn("n continua", text)
 
 
 if __name__ == "__main__":

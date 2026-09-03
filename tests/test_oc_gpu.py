@@ -234,6 +234,7 @@ class TestFormatters(unittest.TestCase):
     def test_panel_text_unreadable(self):
         text = gpu_panel_text(None, None, "?")
         self.assertIn("non leggibile", text)
+        self.assertIn("Cosa fare", text)
 
     def test_panel_text_shows_active_preset_and_curve(self):
         curve = parse_gpu_config(_config_text(

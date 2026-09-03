@@ -307,28 +307,45 @@ def apply_gpu_preset(wrapper, preset: GpuPreset) -> Dict[str, Any]:
 # ============================================================================
 
 
+def _gov_normalize(governor: str) -> str:
+    """Normalizza lo stato governor per i pannelli GPU (spec §4.6):
+    active → attivo; inactive → FERMO; simulato → simulato; valori non
+    noti → verbatim (mai inventare)."""
+    return {"active": "attivo", "inactive": "FERMO",
+            "simulato": "simulato"}.get(governor, governor)
+
+
 def gpu_panel_text(curve: Optional[GpuCurve],
                    preset: Optional[GpuPreset],
                    governor: str) -> str:
     """Testo del pannello GPU (#gpu): curva attiva + preset corrispondente.
 
-    Stati espliciti (mai schermate vuote): curva attiva con preset
-    riconosciuto / "curva personalizzata" / "config assente o non
-    leggibile" (con la via d'uscita: applica un preset). Righe compatte
-    (nessun wrap a 80 colonne).
+    Stati espliciti (spec §4.6, mai schermate vuote): curva attiva con
+    preset riconosciuto / "curva personalizzata" (hint di selezione) /
+    "config assente o non leggibile" (con la via d'uscita).
     """
     if curve is None:
         return "\n".join([
-            "🎮 GPU OC/UV — config assente o non leggibile",
-            "  (seleziona un preset qui sotto e premi g per riscriverla)",
+            "GPU · config assente o non leggibile — la curva attiva NON è "
+            "verificabile",
+            "Cosa fare: seleziona un preset qui sotto e premi g per "
+            "riscriverla,",
+            "oppure avvia il governor (systemctl start "
+            "cyan-skillfish-governor-smu).",
         ])
-    tag = preset.name if preset else "curva personalizzata"
+    gov = _gov_normalize(governor)
     punti = " ".join(f"{p.freq}@{p.voltage}" for p in curve.points)
+    if preset is not None:
+        head = f"GPU · preset {preset.name}"
+        if preset.note:
+            head = f"{head} — {preset.note}"
+    else:
+        head = "GPU · curva personalizzata (nessun preset corrisponde)"
     lines = [
-        f"🎮 GPU OC/UV — {tag}",
-        f"  range {curve.min_freq}-{curve.max_freq} MHz · punti {punti}",
-        f"  throttle {curve.throttling}/{curve.recovery}°C · "
-        f"governor: {governor}",
+        head,
+        f"curva: range {curve.min_freq}-{curve.max_freq} MHz · {punti}",
+        f"soglie: throttle {curve.throttling}°C / recovery "
+        f"{curve.recovery}°C · governor: {gov}",
     ]
     if preset is None:
         # Nessun preset corrisponde alla curva attiva: hint di selezione
@@ -352,12 +369,23 @@ def gpu_preset_rows(presets: Tuple[GpuPreset, ...],
 
 
 def gpu_apply_text(preset: GpuPreset) -> str:
-    """Testo della modal di conferma apply preset GPU."""
+    """Testo della modal di conferma apply preset GPU (spec §4.8)."""
     punti = ", ".join(f"{p.freq}@{p.voltage}" for p in preset.points)
-    text = (f"Applicare preset GPU {preset.name}?\n\n"
-            f"range {preset.min_freq}-{preset.max_freq} MHz\n"
-            f"punti: {punti}\n"
-            f"throttle {preset.throttling}/{preset.recovery}°C")
+    lines = [
+        f"Applicare il preset GPU «{preset.name}»?",
+        "",
+        f"  range {preset.min_freq}-{preset.max_freq} MHz",
+        f"  punti: {punti}",
+        f"  soglie throttle {preset.throttling}°C / recovery "
+        f"{preset.recovery}°C",
+    ]
     if preset.note:
-        text += f"\n({preset.note})"
-    return text
+        lines.append(f"  ({preset.note})")
+    lines += [
+        "",
+        "La curva viene riscritta e il governor riavviato. Freeze possibile "
+        "→ power-cycle; la config persistita torna al riavvio.",
+        "",
+        "y applica · n annulla (esc = annulla)",
+    ]
+    return "\n".join(lines)

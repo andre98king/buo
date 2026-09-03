@@ -35,12 +35,31 @@ class TestDashboardText(unittest.TestCase):
         self.assertIn("undervolt", text)
 
     def test_tolerates_empty_dict(self):
+        # dict {} → box di STATO (errore/letture assenti), MAI 0°C
         text = dashboard_text({})
-        self.assertIn("CPU", text)  # nessun crash
+        self.assertIn("Letture non disponibili", text)
+        self.assertNotIn("0°C", text)
 
     def test_cold_status(self):
         text = dashboard_text({"cpu_temp": 45.0, "gpu_temp": 40.0})
-        self.assertIn("✅", text)
+        self.assertIn("ok", text)  # stato termico come PAROLA (niente ✅)
+
+    def test_dashboard_missing_shows_dash(self):
+        """C1 a schermo: sensori a 0/None → '—', MAI '0 MHz'/'0.0°C'."""
+        r = {k: 0 for k in ("cpu_cores", "cpu_freq", "cpu_vid", "cpu_temp",
+                            "gpu_cu", "gpu_freq", "gpu_voltage", "gpu_temp",
+                            "gpu_power", "total_power", "fan_speed",
+                            "ambient_temp")}
+        text = dashboard_text(r)
+        self.assertNotIn("0 MHz", text)
+        self.assertNotIn("0.0°C", text)
+        self.assertIn("—", text)
+        self.assertIn("non rilevabile", text)
+
+    def test_dashboard_mock_flag(self):
+        text = dashboard_text({"cpu_cores": 8}, mock=True)
+        self.assertIn("MOCK", text)
+        self.assertNotIn("MOCK", dashboard_text({"cpu_cores": 8}))
 
 
 class TestLiveReadings(unittest.TestCase):
@@ -168,10 +187,20 @@ class TestHelpText(unittest.TestCase):
         self.assertIn("UN'unità", help_text())
 
     def test_lists_essential_keys(self):
+        # Il testo aiuto allinea tasto e descrizione in colonne: si asserisce
+        # sul testo con spazi collassati (i token restano contigui).
         text = help_text()
-        for key in ("q esci", "? aiuto", "r refresh", "a applica",
-                    "R ripristina stock", "s stop", "u start"):
-            self.assertIn(key, text)
+        compact = " ".join(text.split())
+        for key in ("q esci", "? aiuto", "r / spazio", "a applica",
+                    "R ripristina stock", "s ferma la run", "u avvia la run"):
+            self.assertIn(key, compact)
+
+    def test_help_groups_keys(self):
+        """help raggruppato: navigazione / scheda OC / conferme."""
+        low = help_text().lower()
+        self.assertIn("navigazione", low)
+        self.assertIn("scheda oc", low)
+        self.assertIn("conferme", low)
 
     def test_disclaimer_constant_is_short_and_actionable(self):
         self.assertLess(len(OC_DISCLAIMER), 120)
