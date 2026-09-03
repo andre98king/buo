@@ -15,7 +15,7 @@ immutabili (sicurezza assoluta).
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .constants import CONFIG_FILE, GPU_FREQ_STEPS, LIMITS
 
@@ -140,11 +140,11 @@ _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
     "fix": frozenset({"tlb", "ace", "iommu", "acpi", "vram", "gtt",
                       "fan"}),
     "undervolt": frozenset({
-        "cpu_target_vid", "gpu_start_freq", "persist", "gpu_sweep_enabled",
-        "gpu_sweep_freqs", "gpu_sweep_step_mv", "gpu_sweep_floor_mv",
-        "gpu_sweep_max_steps", "gpu_sweep_test_seconds",
-        "gpu_sweep_confirm_seconds", "gpu_sweep_max_minutes",
-        "gpu_sweep_temp_gate",
+        "cpu_target_vid", "cpu_search_freq", "gpu_start_freq", "persist",
+        "gpu_sweep_enabled", "gpu_sweep_freqs", "gpu_sweep_step_mv",
+        "gpu_sweep_floor_mv", "gpu_sweep_max_steps",
+        "gpu_sweep_test_seconds", "gpu_sweep_confirm_seconds",
+        "gpu_sweep_max_minutes", "gpu_sweep_temp_gate",
     }),
     "overclock": frozenset({"enable", "power_budget"}),
     "validation": frozenset({"stress_duration", "stress_scope"}),
@@ -264,16 +264,33 @@ class BUOConfig:
 
         undervolt = phases.get("undervolt", {})
         # ---- VID target della ricerca CPU (vero undervolt = scale
-        # NEGATIVA, scoperta sul campo 30/08): col default
-        # vid_recommended_max la misura stock resta sotto il target e la
-        # scale non va mai negativa (solo downclock). Target più basso
-        # (es. 1000) spinge bc250-detect nel negativo. Clamp a
-        # [vid_min, vid_recommended_max] (mai sotto il minimo sicuro, mai
-        # oltre il consigliato), default conservativo.
-        self.undervolt_cpu_target_vid: int = _sweep_clamp(
-            undervolt.get("cpu_target_vid", LIMITS.cpu.vid_recommended_max),
-            LIMITS.cpu.vid_min, LIMITS.cpu.vid_recommended_max,
-            LIMITS.cpu.vid_recommended_max, "cpu_target_vid")
+        # NEGATIVA, scoperta sul campo 30/08). Default "auto" (design
+        # DESIGN_PORTABILITY_DEFAULTS 3.1): il target viene derivato a
+        # RUNTIME dalla misura live del VID stock — clamp(misura−75,
+        # 900, 1250) + ladder di retry +50 fino alla misura + fallback
+        # no-UV. Un default STATICO fallisce su silicio con floor UV
+        # diverso (community 1180→1031 vs nostro 1074→999). Un valore
+        # NUMERICO esplicito nel file vince e mantiene il comportamento
+        # odierno: clamp a [vid_min, vid_recommended_max] (mai oltre il
+        # consigliato, mai sotto il minimo sicuro).
+        _target_vid = undervolt.get("cpu_target_vid", "auto")
+        if _target_vid == "auto":
+            self.undervolt_cpu_target_vid: Union[int, str] = "auto"
+        else:
+            self.undervolt_cpu_target_vid = _sweep_clamp(
+                _target_vid, LIMITS.cpu.vid_min,
+                LIMITS.cpu.vid_recommended_max,
+                LIMITS.cpu.vid_recommended_max, "cpu_target_vid")
+        # ---- Frequenza della ricerca UV (design 3.2, NUOVA chiave):
+        # default 3500 = stock. Il punto trovato da bc250-detect È la
+        # frequenza applicata: ricercare a cpu_freq_max (4000) con VID
+        # basso entra nella zona wedge/hang misurata (3700@950 wedge,
+        # 3725@1000 hang — dati OC 02/09). safety.cpu_freq_max resta il
+        # SOFFITTO (min() nel consumatore, orchestrator).
+        self.undervolt_cpu_search_freq: int = _sweep_clamp(
+            undervolt.get("cpu_search_freq", LIMITS.cpu.freq_min),
+            LIMITS.cpu.freq_min, LIMITS.cpu.freq_max,
+            LIMITS.cpu.freq_min, "cpu_search_freq")
         self.undervolt_gpu_start_freq: int = int(undervolt.get("gpu_start_freq", 1200))
         # G3: rende PERSISTENTE l'undervolt al boot (bc250-apply --install).
         # Default ON: "BUO si occupa di tutto" — il profilo deve sopravvivere
@@ -324,8 +341,13 @@ class BUOConfig:
         )
 
         validation = phases.get("validation", {})
+        # Default 10 min (design DESIGN_PORTABILITY_DEFAULTS 3.3): con
+        # una config cattiva l'abort termico scatta comunque in ~17s
+        # (SafetyMonitor 0.5s) — 30 min non aggiungevano protezione,
+        # solo tempo bruciato a piena potenza. 10 min = soglia L2 piena
+        # del motore OC (evidenza di stabilità del progetto).
         self.validation_stress_duration: int = int(
-            validation.get("stress_duration", 30)
+            validation.get("stress_duration", 10)
         )
         # Stress test separabile CPU/GPU (richiesta utente 30/08):
         # "both" (default) | "cpu" | "gpu" — un valore sconosciuto viene
@@ -431,6 +453,7 @@ class BUOConfig:
                 },
                 "undervolt": {
                     "cpu_target_vid": self.undervolt_cpu_target_vid,
+                    "cpu_search_freq": self.undervolt_cpu_search_freq,
                     "gpu_start_freq": self.undervolt_gpu_start_freq,
                     "gpu_sweep_enabled": self.undervolt_gpu_sweep_enabled,
                     "gpu_sweep_freqs": self.undervolt_gpu_sweep_freqs,

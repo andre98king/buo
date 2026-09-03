@@ -28,6 +28,9 @@ phases:
   probe:
     cpu_unlock: true
     gpu_unlock: true
+    # health_test: true = "smart": riusa i results.tsv completi; skip
+    # con ricetta se assenti/incompleti (mai la maratona per-WGP da una
+    # run non presidiata — design portabilità)
     health_test: true
     health_reboot_max: 25
   fix:
@@ -39,12 +42,18 @@ phases:
     gtt: true                # ttm.pages_limit
     fan: true                # sensori/ventole NCT6686
   undervolt:
+    # cpu_target_vid: auto = derivato dalla misura live del VID stock
+    # (clamp misura−75 su [900, 1250] + ladder + fallback no-UV);
+    # un numero esplicito (es. 1000) vince e mantiene il comportamento
+    # odierno (ricerca con target fisso)
+    cpu_target_vid: auto
+    cpu_search_freq: 3500    # MHz — frequenza della ricerca UV (stock)
     gpu_start_freq: 1200     # MHz
   overclock:
     enable: true
     power_budget: 300        # W
   validation:
-    stress_duration: 30      # minuti
+    stress_duration: 10      # minuti (10 = soglia L2 del motore OC)
 
 benchmark:
   enabled: true

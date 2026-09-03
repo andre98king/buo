@@ -19,6 +19,13 @@ from typing import Any, Dict, List
 from ...constants import HEALTH_RESULTS_FILE
 from .base import BaseWrapper
 
+# results.tsv COMPLETO = una riga per ognuna delle 20 WGP testate dallo
+# script (target 0..19, una per reboot — verificato nel sorgente
+# bc250-cu-health-test.sh: `next=$((target+1)); if [ "$next" -lt 20 ]`).
+# Il riuso "smart" (design DESIGN_PORTABILITY_DEFAULTS 3.4) decide su
+# questo conteggio: completo → nessun nuovo protocollo per-WGP.
+HEALTH_WGP_TOTAL = 20
+
 
 class BC250HealthWrapper(BaseWrapper):
     """Wrapper per il CU health test."""
@@ -52,7 +59,10 @@ class BC250HealthWrapper(BaseWrapper):
         Legge results.tsv.
 
         Returns:
-            {"stable": [cu_index...], "defective": [cu_index...], "total": n}
+            {"stable": [cu_index...], "defective": [cu_index...],
+             "total": n, "complete": bool}
+            complete = tutte le HEALTH_WGP_TOTAL WGP hanno una riga
+            PASS/FAIL (riuso "smart": design PORTABILITY_DEFAULTS 3.4).
         """
         stable: List[int] = []
         defective: List[int] = []
@@ -60,6 +70,7 @@ class BC250HealthWrapper(BaseWrapper):
         path = Path(results_file)
         if not path.exists():
             return {"stable": [], "defective": [], "total": 0,
+                    "complete": False,
                     "error": "results.tsv non trovato"}
 
         try:
@@ -77,10 +88,13 @@ class BC250HealthWrapper(BaseWrapper):
                         stable.append(cu_index)
                     else:
                         defective.append(cu_index)
+            total = len(stable) + len(defective)
             return {
                 "stable": sorted(stable),
                 "defective": sorted(defective),
-                "total": len(stable) + len(defective),
+                "total": total,
+                "complete": total >= HEALTH_WGP_TOTAL,
             }
         except Exception as e:
-            return {"stable": [], "defective": [], "total": 0, "error": str(e)}
+            return {"stable": [], "defective": [], "total": 0,
+                    "complete": False, "error": str(e)}

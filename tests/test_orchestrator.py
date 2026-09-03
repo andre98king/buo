@@ -160,12 +160,15 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(s4, -50)
 
     def test_phase_optimize_passes_cpu_target_vid(self):
-        """_phase_optimize passa max_vid=undervolt_cpu_target_vid alla
-        ricerca CPU (es. 1000): senza un target sotto la misura stock la
-        scale non va mai negativa e l'"undervolt" è solo downclock."""
+        """_phase_optimize passa un max_vid NUMERICO esplicito (vince su
+        "auto", compat file esistenti) e max_freq = min(cpu_freq_max,
+        cpu_search_freq): la ricerca parte da 3500 stock (default), NON
+        da cpu_freq_max 4000 — il punto trovato è la frequenza applicata
+        e f-alta + deep-UV è zona di wedge/hang (design 3.2)."""
         from unittest import mock
         orch = self._make(dry_run=True)
         orch.config.undervolt_cpu_target_vid = 1000
+        orch.config.undervolt_cpu_search_freq = 3500
         result = {
             "v_f_points": [{"freq": 3500, "vid": 999}],
             "best_efficiency": {"freq": 3500, "vid": 999},
@@ -174,8 +177,109 @@ class TestOrchestrator(unittest.TestCase):
         with mock.patch.object(orch.uv_cpu, "optimize",
                                return_value=result) as spy:
             orch._phase_optimize()
-        spy.assert_called_once_with(
-            max_freq=orch.config.cpu_freq_max, max_vid=1000)
+        spy.assert_called_once_with(max_freq=3500, max_vid=1000)
+
+    def test_phase_optimize_search_freq_capped_by_cpu_search_freq(self):
+        """cpu_search_freq esplicito (3800) → la ricerca parte da
+        min(cpu_freq_max 4000, 3800) = 3800, non dal soffitto."""
+        from unittest import mock
+        orch = self._make(dry_run=True)
+        orch.config.undervolt_cpu_target_vid = 1000
+        orch.config.undervolt_cpu_search_freq = 3800
+        result = {"v_f_points": [{"freq": 3500, "vid": 999}],
+                  "best_efficiency": {"freq": 3500, "vid": 999},
+                  "source": "mock"}
+        with mock.patch.object(orch.uv_cpu, "optimize",
+                               return_value=result) as spy:
+            orch._phase_optimize()
+        spy.assert_called_once_with(max_freq=3800, max_vid=1000)
+
+    def test_auto_target_uses_measured_vid_minus_75(self):
+        """cpu_target_vid=auto (default): misura stock 1074 → target
+        999 (1074−75), primo tentativo alla ricerca (design 3.1)."""
+        from unittest import mock
+        orch = self._make(dry_run=True)
+        orch.hardware.state.cpu_vid = 1074
+        result = {"v_f_points": [{"freq": 3500, "vid": 999}],
+                  "best_efficiency": {"freq": 3500, "vid": 999},
+                  "source": "mock"}
+        with mock.patch.object(orch.uv_cpu, "optimize",
+                               return_value=result) as spy:
+            uv = orch._phase_optimize()["undervolt_cpu"]
+        spy.assert_called_once_with(max_freq=3500, max_vid=999)
+        self.assertEqual(uv["source"], "mock")
+
+    def test_auto_target_clamped_at_edges(self):
+        """Clamp del target auto a [900, 1250]: misura 850 → 900 (bordo
+        basso, mai sotto il minimo sicuro); misura 1400 → 1250 (mai oltre
+        il tetto di ricerca)."""
+        from unittest import mock
+        orch = self._make(dry_run=True)
+        result = {"v_f_points": [{"freq": 3500, "vid": 999}],
+                  "best_efficiency": {"freq": 3500, "vid": 999},
+                  "source": "mock"}
+        with mock.patch.object(orch.uv_cpu, "optimize",
+                               return_value=result) as spy:
+            orch.hardware.state.cpu_vid = 850
+            orch._phase_optimize()
+            self.assertEqual(spy.call_args.kwargs["max_vid"], 900)
+            spy.reset_mock()
+            orch.hardware.state.cpu_vid = 1400
+            orch._phase_optimize()
+            self.assertEqual(spy.call_args.kwargs["max_vid"], 1250)
+
+    def test_auto_ladder_retries_plus_50_on_instability(self):
+        """Target auto instabile (ConfigurationError) → retry +50 fino
+        alla misura stock: 1074 → 999 fallisce, 1049 riesce."""
+        from unittest import mock
+        from buo.exceptions import ConfigurationError
+        orch = self._make(dry_run=True)
+        orch.hardware.state.cpu_vid = 1074
+        result = {"v_f_points": [{"freq": 3500, "vid": 1049}],
+                  "best_efficiency": {"freq": 3500, "vid": 1049},
+                  "source": "mock"}
+        with mock.patch.object(
+                orch.uv_cpu, "optimize",
+                side_effect=[ConfigurationError("instabile"), result]) as spy:
+            orch._phase_optimize()
+        self.assertEqual(spy.call_count, 2)
+        self.assertEqual(spy.call_args_list[0].kwargs["max_vid"], 999)
+        self.assertEqual(spy.call_args_list[1].kwargs["max_vid"], 1049)
+
+    def test_auto_fallback_no_uv_when_ladder_exhausted(self):
+        """Ladder esaurita (instabile fino alla misura stock) → fallback
+        no-UV (curva stock, nessun punto applicato) con nota nel report:
+        MAI abortire una run su macchina sana."""
+        from unittest import mock
+        from buo.exceptions import ConfigurationError
+        orch = self._make(dry_run=True)
+        orch.hardware.state.cpu_vid = 1074
+        with mock.patch.object(
+                orch.uv_cpu, "optimize",
+                side_effect=ConfigurationError("instabile")) as spy:
+            uv = orch._phase_optimize()["undervolt_cpu"]
+        self.assertEqual(uv["source"], "no-uv")
+        self.assertEqual(uv["v_f_points"], [])
+        # tentativi: 999, 1049, 1074 (misura) — mai oltre
+        vids = [c.kwargs["max_vid"] for c in spy.call_args_list]
+        self.assertEqual(vids, [999, 1049, 1074])
+        self.assertTrue(any("Undervolt CPU non trovato" in n
+                            for n in orch.results["notes"]))
+
+    def test_auto_static_fallback_when_measure_unavailable(self):
+        """Misura VID non disponibile (None) → fallback statico 1000 +
+        ladder (stessa robustezza, design §3.1)."""
+        from unittest import mock
+        orch = self._make(dry_run=True)
+        result = {"v_f_points": [{"freq": 3500, "vid": 999}],
+                  "best_efficiency": {"freq": 3500, "vid": 999},
+                  "source": "mock"}
+        with mock.patch.object(orch, "_read_stock_vid",
+                               return_value=None), \
+             mock.patch.object(orch.uv_cpu, "optimize",
+                               return_value=result) as spy:
+            orch._phase_optimize()
+        spy.assert_called_once_with(max_freq=3500, max_vid=1000)
 
     def test_phase_apply_passes_gpu_freq_max_to_write_config(self):
         """_phase_apply deve passare a write_config il cap della config

@@ -17,6 +17,14 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(cfg.power_budget, LIMITS.power.power_budget)
         self.assertTrue(cfg.fix_tlb)
 
+    def test_validation_stress_duration_default_is_10(self):
+        """Default 10 min (design PORTABILITY_DEFAULTS 3.3): con una
+        config cattiva l'abort termico scatta comunque in ~17s — 30 min
+        non aggiungevano protezione, solo tempo bruciato; 10 = soglia L2
+        del motore OC."""
+        cfg = BUOConfig()
+        self.assertEqual(cfg.validation_stress_duration, 10)
+
     def test_hard_limits_not_overridable(self):
         """Il file YAML non può alzare gli hard limits."""
         cfg = BUOConfig({"safety": {"cpu_vid_recommended_max": 1400}})
@@ -72,20 +80,27 @@ class TestConfig(unittest.TestCase):
 
 class TestCpuTargetVid(unittest.TestCase):
     """phases.undervolt.cpu_target_vid — VID target della ricerca CPU
-    (vero undervolt = scale NEGATIVA; scoperta sul campo 30/08: col
-    default 1300 la misura stock resta sotto il target e la scale non va
-    mai negativa → solo downclock; target 1000 → 3500@999 scale -14
-    validato L2). Default conservativo = vid_recommended_max (1300),
-    clamp a [vid_min, vid_recommended_max]."""
+    (vero undervolt = scale NEGATIVA; scoperta sul campo 30/08).
 
-    def test_cpu_target_vid_default_is_recommended_max(self):
+    Default "auto" (design DESIGN_PORTABILITY_DEFAULTS 3.1): il target
+    viene derivato a RUNTIME dalla misura live del VID stock
+    (clamp(misura−75, 900, 1250) + ladder + fallback no-UV) — un default
+    statico fallisce su silicio con floor UV diverso. Un valore NUMERICO
+    esplicito nel file vince e mantiene il comportamento odierno: clamp a
+    [vid_min, vid_recommended_max]."""
+
+    def test_cpu_target_vid_default_is_auto(self):
         cfg = BUOConfig()
-        self.assertEqual(cfg.undervolt_cpu_target_vid,
-                         LIMITS.cpu.vid_recommended_max)
+        self.assertEqual(cfg.undervolt_cpu_target_vid, "auto")
 
     def test_cpu_target_vid_custom_value_accepted(self):
         cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 1000}}})
         self.assertEqual(cfg.undervolt_cpu_target_vid, 1000)
+        self.assertIsInstance(cfg.undervolt_cpu_target_vid, int)
+
+    def test_cpu_target_vid_explicit_auto_accepted(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": "auto"}}})
+        self.assertEqual(cfg.undervolt_cpu_target_vid, "auto")
 
     def test_cpu_target_vid_above_recommended_clamped(self):
         cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 2000}}})
@@ -105,6 +120,51 @@ class TestCpuTargetVid(unittest.TestCase):
         cfg = BUOConfig({"phases": {"undervolt": {"cpu_target_vid": 1000}}})
         d = cfg.to_dict()
         self.assertEqual(d["phases"]["undervolt"]["cpu_target_vid"], 1000)
+
+    def test_cpu_target_vid_auto_in_to_dict_roundtrip(self):
+        """Default "auto": to_dict/save/load preservano la sentinella."""
+        cfg = BUOConfig()
+        d = cfg.to_dict()
+        self.assertEqual(d["phases"]["undervolt"]["cpu_target_vid"], "auto")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "buo.yaml"
+            cfg.save(path)
+            loaded = BUOConfig.load(path)
+            self.assertEqual(loaded.undervolt_cpu_target_vid, "auto")
+
+
+class TestCpuSearchFreq(unittest.TestCase):
+    """phases.undervolt.cpu_search_freq (NUOVA chiave, design
+    PORTABILITY_DEFAULTS 3.2): la ricerca UV gira a questa frequenza
+    (default 3500 stock) — mai parte da cpu_freq_max 4000 (il punto
+    trovato da bc250-detect È la frequenza applicata; f-alta + deep-UV
+    = zona di wedge/hang misurata). cpu_freq_max resta il soffitto."""
+
+    def test_default_is_stock_freq(self):
+        cfg = BUOConfig()
+        self.assertEqual(cfg.undervolt_cpu_search_freq, LIMITS.cpu.freq_min)
+
+    def test_explicit_value_accepted(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_search_freq": 3800}}})
+        self.assertEqual(cfg.undervolt_cpu_search_freq, 3800)
+
+    def test_above_freq_max_clamped(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_search_freq": 4500}}})
+        self.assertEqual(cfg.undervolt_cpu_search_freq, LIMITS.cpu.freq_max)
+
+    def test_is_known_key(self):
+        with self.assertNoLogs("buo.config", level="WARNING"):
+            BUOConfig({"phases": {"undervolt": {"cpu_search_freq": 3800}}})
+
+    def test_in_to_dict_roundtrip(self):
+        cfg = BUOConfig({"phases": {"undervolt": {"cpu_search_freq": 3800}}})
+        d = cfg.to_dict()
+        self.assertEqual(d["phases"]["undervolt"]["cpu_search_freq"], 3800)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "buo.yaml"
+            cfg.save(path)
+            loaded = BUOConfig.load(path)
+            self.assertEqual(loaded.undervolt_cpu_search_freq, 3800)
 
 
 class TestUnknownConfigKeys(unittest.TestCase):

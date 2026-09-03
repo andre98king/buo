@@ -36,7 +36,8 @@ from .fix.gtt import GTTTuning
 from .fix.iommu import IOMMUFix
 from .fix.tlb import TLBKernelFix
 from .fix.vram import VRAMConfig
-from .optimize.cpu import CPUUndervoltOptimizer
+from .optimize.cpu import (CPUUndervoltOptimizer,
+                           resolve_cpu_target_vid)
 from .optimize.governor import GovernorWrapper
 from .optimize.gpu import GPUUndervoltOptimizer
 from .optimize.overclock import OverclockOptimizer
@@ -908,12 +909,36 @@ class Orchestrator(LoggerMixin):
         elif "gpu_40cu" in done:
             self.logger.info("GPU: unlock 40-CU già eseguito (checkpoint) — salto")
 
-        # 3. Health test CU (se abilitato)
+        # 3. Health test CU (se abilitato) — "smart" (design
+        # DESIGN_PORTABILITY_DEFAULTS 3.4): si RIUSANO i results.tsv
+        # COMPLETI (macchina già testata → nessun reboot); assenti o
+        # incompleti → SKIP con ricetta — la maratona per-WGP
+        # (bc250-cu-health-test.sh start = ~20 reboot) NON parte MAI da
+        # una run non presidiata. Verificato sul campo (03/09): `quick`
+        # testa SOLO la config corrente senza isolare le WGP → non
+        # sostituisce il protocollo; il primo unlock 40-CU in run
+        # interattiva resta da validare (non implementato alla cieca).
         if self.config.probe_health_test:
             try:
-                health = self.health_test.run()
+                health = self.health_test.read_results()
                 results["health"] = health
                 defective = health.get("defective", [])
+                if health.get("complete"):
+                    self.logger.info(
+                        "CU health: results.tsv completo (%d righe) — "
+                        "riuso, nessun reboot", health.get("total", 0))
+                else:
+                    self.logger.warning(
+                        "⚠️ CU health test SALTATO: results.tsv "
+                        "assente/incompleto — il protocollo per-WGP "
+                        "richiede ~20 reboot (eseguirlo a parte: "
+                        "bc250-cu-health-test.sh start, o un run "
+                        "interattivo sul primo unlock 40-CU)")
+                    self.results["notes"].append(
+                        "CU health test saltato: results.tsv assente/"
+                        "incompleto — eseguire bc250-cu-health-test.sh "
+                        "start (per-WGP, ~20 reboot) o un run interattivo "
+                        "sul primo unlock 40-CU")
                 if defective and "gpu_mask" not in self._applied_steps():
                     results["mask"] = self.cu_mask.apply(defective_cu=defective)
                     self.results["applied_fixes"].append("gpu_mask")
@@ -1137,6 +1162,66 @@ class Orchestrator(LoggerMixin):
             "temp_gate": self.config.undervolt_gpu_sweep_temp_gate,
         }
 
+    def _read_stock_vid(self) -> Optional[int]:
+        """Misura del VID stock (mV) per cpu_target_vid=auto.
+
+        Mock/dry-run: stato hardware simulato. Reale: reader SMU
+        (bc250_smu, Q3/0x36) — in _phase_optimize il governor è GIÀ
+        fermo, quindi il gate SMU↔governor del reader è superato.
+        Non leggibile → None (fallback statico nel consumatore); C1:
+        mai un VID inventato.
+        """
+        if self.hardware is not None:
+            return self.hardware.get_cpu_vid()
+        from .safety.reader import RealHardwareReader
+        return RealHardwareReader().get_cpu_vid()
+
+    def _optimize_cpu_uv(self) -> Dict[str, Any]:
+        """Ricerca UV CPU (design DESIGN_PORTABILITY_DEFAULTS §3.1-3.2).
+
+        max_freq = min(cpu_freq_max, cpu_search_freq): la ricerca parte
+        dalla frequenza STOCK (default 3500), non dal soffitto 4000.
+
+        cpu_target_vid NUMERICO (file esplicito) → comportamento odierno
+        (ConfigurationError se bc250-detect non trova nulla). "auto"
+        (default): target = clamp(misura VID stock − 75, 900, 1250),
+        ladder di retry +50 fino alla misura stock; ladder esaurita →
+        fallback no-UV (curva stock: nessun punto applicato) con WARNING
+        — MAI un abort di run su macchina sana. Misura non disponibile →
+        fallback statico 1000 mV + ladder (stessa robustezza).
+        """
+        search_freq = min(self.config.cpu_freq_max,
+                          self.config.undervolt_cpu_search_freq)
+        target_vid = self.config.undervolt_cpu_target_vid
+        if target_vid != "auto":
+            return self.uv_cpu.optimize(max_freq=search_freq,
+                                        max_vid=target_vid)
+
+        measure = self._read_stock_vid()
+        attempt = resolve_cpu_target_vid(measure)
+        ceiling = (measure if measure is not None
+                   else LIMITS.cpu.vid_recommended_max)
+        last_error = ""
+        while True:
+            try:
+                return self.uv_cpu.optimize(max_freq=search_freq,
+                                            max_vid=attempt)
+            except ConfigurationError as e:
+                last_error = str(e)
+                if attempt >= ceiling:
+                    break
+                attempt = min(attempt + 50, ceiling)
+        # Fallback no-UV: il run continua a curva stock (apply con punti
+        # vuoti = no-op) — degradazione con nota, mai fail-opaco.
+        self.logger.warning(
+            "⚠️ Undervolt CPU non trovato (ultimo tentativo %d mV: %s) — "
+            "curva STOCK, nessuna modifica applicata", attempt, last_error)
+        self.results["notes"].append(
+            "Undervolt CPU non trovato: curva stock (nessuna modifica) — "
+            f"ultimo errore: {last_error[:200]}")
+        return {"v_f_points": [], "best_efficiency": None,
+                "source": "no-uv", "reason": last_error[:300]}
+
     def _phase_optimize(self) -> Dict[str, Any]:
         """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited."""
         self.logger.info("⚡ OTTIMIZZAZIONE (undervolt → overclock)")
@@ -1146,11 +1231,12 @@ class Orchestrator(LoggerMixin):
         if not self.mock:
             self.governor.stop()
 
-        # CPU undervolt
-        uv_cpu = self.uv_cpu.optimize(
-            max_freq=self.config.cpu_freq_max,
-            max_vid=self.config.undervolt_cpu_target_vid,
-        )
+        # CPU undervolt: ricerca a `cpu_search_freq` (default 3500 stock)
+        # — mai parte da cpu_freq_max 4000 (il punto trovato È la
+        # frequenza applicata; f-alta + deep-UV = zona wedge/hang);
+        # target numerico esplicito o "auto" con ladder/fallback no-UV
+        # (design DESIGN_PORTABILITY_DEFAULTS 3.1-3.2).
+        uv_cpu = self._optimize_cpu_uv()
         results["undervolt_cpu"] = uv_cpu
 
         # GPU undervolt

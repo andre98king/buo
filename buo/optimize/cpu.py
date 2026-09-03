@@ -23,6 +23,31 @@ from ..exceptions import ConfigurationError
 from ..unlock.wrappers.bc250_overclock import BC250DetectWrapper
 from ..utils.logging import LoggerMixin
 
+# ---- cpu_target_vid: auto (design DESIGN_PORTABILITY_DEFAULTS 3.1) ----
+# Target "auto" derivato dalla misura LIVE del VID stock (SMU Q3/0x36):
+# clamp(misura − 75, 900, 1250). Un default statico fallisce su chip
+# con floor UV diverso (community: stock 1180 / UV 1031; nostro:
+# stock 1074 / UV 999). Misura non disponibile → fallback statico 1000
+# mV (stessa robustezza: il ladder del consumatore riprova +50).
+AUTO_VID_OFFSET_MV = 75
+AUTO_VID_MIN_MV = 900
+AUTO_VID_MAX_MV = 1250
+AUTO_VID_FALLBACK_MV = 1000
+
+
+def resolve_cpu_target_vid(measure: Optional[int]) -> int:
+    """Target VID (mV) per `cpu_target_vid: auto`.
+
+    target = clamp(measure − 75, 900, 1250); misura assente (None,
+    non leggibile) → fallback statico 1000 mV. Helper PURO (testabile):
+    il ladder di retry e il fallback no-UV vivono nel consumatore
+    (orchestrator._optimize_cpu_uv).
+    """
+    if measure is None:
+        return AUTO_VID_FALLBACK_MV
+    return max(AUTO_VID_MIN_MV, min(AUTO_VID_MAX_MV,
+                                    measure - AUTO_VID_OFFSET_MV))
+
 
 class CPUUndervoltOptimizer(LoggerMixin):
     """Trova il punto stabile (frequenza/VID) della CPU."""
