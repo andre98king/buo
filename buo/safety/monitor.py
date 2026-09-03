@@ -114,7 +114,7 @@ class SafetyMonitor(threading.Thread):
     # ------------------------------------------------------------------ #
 
     def run(self) -> None:
-        self.logger.info("🛡️ Safety Monitor avviato (sampling %.1fs)",
+        self.logger.info("Safety monitor avviato (campionamento ogni %.1f s)",
                          self.SAMPLE_INTERVAL)
         while self._running:
             try:
@@ -183,7 +183,7 @@ class SafetyMonitor(threading.Thread):
                 if label not in self._missing_warned:
                     self._missing_warned.add(label)
                     self.logger.warning(
-                        "🛡️ Sensore '%s' non leggibile: limite %s NON "
+                        "Sensore '%s' non leggibile: limite %s NON "
                         "verificabile", label,
                         "HARD" if hard else "configurato")
                 return
@@ -219,7 +219,7 @@ class SafetyMonitor(threading.Thread):
     def _trigger(self, reason: str) -> None:
         self._violation = True
         self._violation_reason = reason
-        self.logger.error("🚨 SAFETY VIOLATION: %s", reason)
+        self.logger.error("SAFETY VIOLATION: %s", reason)
         if self.abort_callback:
             self.abort_callback(reason)
         else:

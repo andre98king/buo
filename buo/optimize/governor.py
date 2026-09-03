@@ -146,7 +146,7 @@ class GovernorWrapper(LoggerMixin):
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
             self.config_path.write_text(final, encoding="utf-8")
-            self.logger.info("✅ config.toml scritto da template upstream "
+            self.logger.info("config.toml scritto da template upstream "
                              "(%d safe-points)", len(safe_points))
             return True
         except Exception as e:

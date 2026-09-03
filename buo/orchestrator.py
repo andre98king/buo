@@ -19,7 +19,7 @@ benchmark, report, models.
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__
 from .audit.hardware import HardwareAudit
@@ -68,6 +68,21 @@ OFFLINE_HINT = (
     "  3) oppure imposta deps.offline_bundle in /etc/buo/buo.yaml "
     "e riprova: sudo buo unleash\n"
 )
+
+# Nomi leggibili dei fix per il riepilogo finale (§3 spec UX_REVAMP_CLI).
+FIX_READABLE = {
+    "cpu_core_unlock": "8 core",
+    "gpu_40cu": "40 CU",
+    "gpu_mask": "maschera CU",
+    "acpi_fix": "fix ACPI",
+    "tlb_fix": "fix TLB",
+    "ace_fix": "fix ACE",
+    "iommu": "fix IOMMU",
+    "vram_config": "config VRAM",
+    "gtt_tuning": "tuning GTT",
+    "fan_control": "ventole",
+    "cpu_overclock": "undervolt/OC CPU",
+}
 
 
 class Orchestrator(LoggerMixin):
@@ -225,7 +240,7 @@ class Orchestrator(LoggerMixin):
                      'optimize' NON viene rilanciata (auto-tuning):
                      si riapplicano i punti salvati nel profilo.
         """
-        self.logger.info("🚀 Avvio ottimizzazione (BUO v%s)", __version__)
+        self.logger.info("Avvio ottimizzazione (BUO v%s)", __version__)
 
         # A6: lock anti-esecuzione-concorrente (solo run reali). Due
         # istanze simultanee corromperebbero stato e ledger. Il flock
@@ -255,7 +270,7 @@ class Orchestrator(LoggerMixin):
                 if self.config.validation_stress_duration <= 0:
                     self.checkpoint.set("validation_stress_skip", True)
             self.logger.info(
-                "♻️ RESTORE: profilo applicato (%d fix, %s)",
+                "RESTORE: profilo applicato (%d fix, %s)",
                 len(restore.get("applied_fixes", []) or []),
                 restore.get("created", "data sconosciuta"))
 
@@ -290,12 +305,12 @@ class Orchestrator(LoggerMixin):
             if self._acpi_gate_ok():
                 self.checkpoint.set("unlock_blocked_acpi", False)
                 self.logger.info(
-                    "♻️ F-C: fix ACPI applicata — RETRY della fase unlock "
+                    "F-C: fix ACPI applicata — RETRY della fase unlock "
                     "CPU (bloccata dal gate al run precedente)")
                 current = "unlock"
             else:
                 self.logger.warning(
-                    "⚠️ F-C: unlock CPU bloccato dal gate ACPI al run "
+                    "F-C: unlock CPU bloccato dal gate ACPI al run "
                     "precedente ma la fix NON risulta ancora applicata — "
                     "si prosegue; il retry avverrà a un prossimo resume")
 
@@ -344,11 +359,11 @@ class Orchestrator(LoggerMixin):
                     return EXIT_SAFETY_VIOLATION
 
                 if self.interactive and not self._confirm_phase(current):
-                    self.logger.info("⏹️ Interrotto dall'utente")
+                    self.logger.info("Interrotto dall'utente")
                     self._exit_ostree_cleanup()
                     return EXIT_SUCCESS
 
-                self.logger.info("📍 Fase: %s", current)
+                self.logger.info("Fase: %s", current)
                 if self.dry_run:
                     self.logger.info("   [DRY-RUN] nessuna modifica reale")
 
@@ -365,12 +380,12 @@ class Orchestrator(LoggerMixin):
                         if not self.dry_run:
                             self.checkpoint.set_current_phase(current)
                 except SafetyViolation as e:
-                    self.logger.error("🚨 SAFETY VIOLATION: %s", e)
+                    self.logger.error("SAFETY VIOLATION: %s", e)
                     self.safety_reason = str(e)
                     self._handle_safety_violation()
                     return EXIT_SAFETY_VIOLATION
                 except Exception as e:
-                    self.logger.error("❌ Errore in fase %s: %s", current, e)
+                    self.logger.error("Errore in fase %s: %s", current, e)
                     self._handle_error(current, str(e))
                     return EXIT_ERROR
 
@@ -379,11 +394,11 @@ class Orchestrator(LoggerMixin):
             return EXIT_SUCCESS
 
         except KeyboardInterrupt:
-            self.logger.info("⏹️ Interrotto dall'utente")
+            self.logger.info("Interrotto dall'utente")
             self._exit_ostree_cleanup()
             return EXIT_SUCCESS
         except Exception as e:
-            self.logger.error("❌ Errore fatale: %s", e)
+            self.logger.error("Errore fatale: %s", e)
             import traceback
             self.logger.debug(traceback.format_exc())
             self._exit_ostree_cleanup()
@@ -447,7 +462,7 @@ class Orchestrator(LoggerMixin):
 
     def _phase_init(self) -> Dict[str, Any]:
         """Inizializzazione: preflight + auto-download deps + safety monitor."""
-        self.logger.info("🔧 Inizializzazione...")
+        self.logger.info("Inizializzazione…")
 
         if not self.mock and sys.platform != "linux":
             raise SafetyViolation("BUO funziona solo su Linux")
@@ -481,7 +496,8 @@ class Orchestrator(LoggerMixin):
                 vram_critical_threshold=self.config.vram_critical_threshold,
             )
             self.safety_monitor.start()
-            self.logger.info("🛡️ Safety monitor avviato (sampling 0.5s)")
+            self.logger.info(
+                "Safety monitor avviato (campionamento ogni 0,5 s)")
 
         return {"initialized": True, "mock": self.mock, "dry_run": self.dry_run}
 
@@ -495,7 +511,7 @@ class Orchestrator(LoggerMixin):
             • Mesa < 25.1
             • temperature attuali pericolosamente vicine ai limiti
         """
-        self.logger.info("🔎 Verifica di sanità pre-operativa...")
+        self.logger.info("Verifica di sanità pre-operativa…")
         audit = self.audit.run()
 
         kernel = audit.get("kernel", {})
@@ -516,7 +532,7 @@ class Orchestrator(LoggerMixin):
         cpu_t = temps.get("cpu_temp")
         if cpu_t is None:
             self.logger.warning(
-                "⚠️ Temperatura CPU non leggibile: il gate termico "
+                "Temperatura CPU non leggibile: il gate termico "
                 "pre-operativo non può verificare il surriscaldamento "
                 "(fail-soft — si procede)")
         elif cpu_t > LIMITS.cpu.temp_critical - 10:  # > 90°C pre-operativo
@@ -526,7 +542,7 @@ class Orchestrator(LoggerMixin):
         gpu_t = temps.get("gpu_temp")
         if gpu_t is None:
             self.logger.warning(
-                "⚠️ Temperatura GPU non leggibile: il gate termico "
+                "Temperatura GPU non leggibile: il gate termico "
                 "pre-operativo non può verificare il surriscaldamento "
                 "(fail-soft — si procede)")
         elif gpu_t > LIMITS.gpu.temp_critical - 15:  # > 85°C
@@ -535,8 +551,9 @@ class Orchestrator(LoggerMixin):
             )
 
         if cpu_t and cpu_t > 60:
-            self.logger.warning("⚠️ CPU a %.1f°C: verifica il raffreddamento",
-                                cpu_t)
+            self.logger.warning(
+                "ATTENZIONE: CPU a %.1f°C — verifica il raffreddamento",
+                cpu_t)
 
         # Budget di potenza: la combo 8 core + 40 CU ha un picco noto.
         # Avviso NON bloccante: la decisione
@@ -548,7 +565,7 @@ class Orchestrator(LoggerMixin):
         # bloccante: l'unlock fallirà in modo pulito se mancano.
         self._check_40cu_toolchain(audit)
 
-        self.logger.info("✅ Verifica di sanità superata")
+        self.logger.info("Verifica di sanità superata")
 
     def _check_power_budget(self) -> None:
         """Avvisa se la combo 8 core + 40 CU può superare il PSU dichiarato.
@@ -564,18 +581,18 @@ class Orchestrator(LoggerMixin):
             psu = self.config.psu_wattage
             if psu < 350:
                 self.logger.warning(
-                    "⚠️ POTENZA: PSU dichiarato %dW con 8 core + 40 CU "
+                    "POTENZA: PSU dichiarato %dW con 8 core + 40 CU "
                     "abilitati. Picco misurato: FurMark 250-320W SENZA cap. "
                     "Per restare sotto i %dW: undervolt + cap GPU 1500 MHz "
                     "(≈125-220W).", psu, psu)
             else:
                 self.logger.info(
-                    "✅ Potenza: PSU %dW sufficiente per 8 core + 40 CU "
+                    "Potenza: PSU %dW sufficiente per 8 core + 40 CU "
                     "(comunque consigliato il cap GPU 1500 MHz per "
                     "l'efficienza).", psu)
         elif self.config.probe_gpu_unlock and self.config.psu_wattage < 300:
             self.logger.warning(
-                "⚠️ POTENZA: PSU %dW con 40 CU: picco FurMark 250-320W "
+                "POTENZA: PSU %dW con 40 CU: picco FurMark 250-320W "
                 "senza cap — usare undervolt + cap GPU 1500 MHz.",
                 self.config.psu_wattage)
 
@@ -591,12 +608,12 @@ class Orchestrator(LoggerMixin):
             return
         if self.gpu_unlock is None or self.gpu_unlock.wrapper is None:
             self.logger.warning(
-                "⚠️ Toolchain 40-CU non inizializzata: esegui "
+                "Toolchain 40-CU non inizializzata: esegui "
                 "`sudo buo install-deps` prima dell'unlock GPU.")
             return
         if not self.gpu_unlock.wrapper.available:
             self.logger.warning(
-                "⚠️ Script 40-CU mancante (%s): esegui "
+                "Script 40-CU mancante (%s): esegui "
                 "`sudo buo install-deps` (o installa manualmente il tool "
                 "della community).", self.gpu_unlock.wrapper.script_path)
             return
@@ -604,11 +621,12 @@ class Orchestrator(LoggerMixin):
             import shutil
             if shutil.which("umr") is None:
                 self.logger.warning(
-                    "⚠️ `umr` non trovato: necessario per il runtime UMR "
+                    "`umr` non trovato: necessario per il runtime UMR "
                     "delle 40 CU su ostree. Installare con: "
                     "rpm-ostree install umr (poi reboot).")
             else:
-                self.logger.info("✅ Toolchain 40-CU pronta (umr + live-manager)")
+                self.logger.info(
+                    "Toolchain 40-CU pronta (umr + live-manager)")
             # BUGS #24: l'unità systemd può sparire dopo un cambio deployment
             # (binario+config intatti) → la GPU torna silenziosamente a 24 CU.
             self._check_40cu_service_enabled()
@@ -629,20 +647,20 @@ class Orchestrator(LoggerMixin):
                 ["systemctl", "is-enabled", unit], check=False)
         except Exception as e:  # mai bloccare l'unlock per questo check
             self.logger.warning(
-                "⚠️ BUGS #24: verifica servizio 40-CU non riuscita (%s) — "
+                "BUGS #24: verifica servizio 40-CU non riuscita (%s) — "
                 "controlla manualmente `systemctl is-enabled %s`.", e, unit)
             return
         if rc == 0 and out.strip() == "enabled":
-            self.logger.info("✅ Servizio 40-CU: %s.service abilitato", unit)
+            self.logger.info("Servizio 40-CU: %s.service abilitato", unit)
             return
         # G4: auto-riparazione (solo run reali) — "BUO si occupa di tutto"
         if not self.mock and not self.dry_run:
             if self._repair_40cu_service(unit):
                 self.logger.info(
-                    "✅ Servizio 40-CU RIPARATO automaticamente (G4)")
+                    "Servizio 40-CU riparato automaticamente")
                 return
         self.logger.warning(
-            "⚠️ BUGS #24: %s.service mancante/disabilitato — le 40 CU "
+            "BUGS #24: %s.service mancante/disabilitato — le 40 CU "
             "torneranno a 24 CU al prossimo riavvio. Recovery (quirk: "
             "`install-service` da /usr/local/bin fallisce con 'same file' "
             "perché /usr/local è un symlink; eseguirlo da una copia in "
@@ -732,11 +750,11 @@ class Orchestrator(LoggerMixin):
         if not self.config.deps_auto_install_governor:
             missing = [n for n in missing if n != "cyan-skillfish-governor"]
         if not missing:
-            self.logger.info("✅ Tool della community presenti")
+            self.logger.info("Tool della community presenti")
             return
 
         self.logger.info(
-            "📥 Tool della community mancanti (%s) — download automatico...",
+            "Tool della community mancanti (%s) — download automatico...",
             ", ".join(missing))
 
         if self.interactive:
@@ -779,7 +797,7 @@ class Orchestrator(LoggerMixin):
                 f"{', '.join(pieces)}."
                 + ("" if bundle else OFFLINE_HINT)
             )
-        self.logger.info("✅ Tool scaricati e installati automaticamente")
+        self.logger.info("Tool scaricati e installati automaticamente")
 
         # Governor appena installato (COPR/AUR): scrivi la config di default
         # sicura (flat 1000mV, template vendored) e avvisa se serve un
@@ -790,7 +808,7 @@ class Orchestrator(LoggerMixin):
         umr = result.get("umr", {})
         if umr.get("status") == "ok" and umr.get("needs_reboot"):
             self.logger.warning(
-                "💾 umr installato: ATTIVO al prossimo reboot "
+                "umr installato: ATTIVO al prossimo reboot "
                 "(necessario per le 40 CU via runtime UMR)")
 
     def _configure_installed_governor(self, gov: Dict[str, Any]) -> None:
@@ -814,23 +832,28 @@ class Orchestrator(LoggerMixin):
                     "Governor: impossibile scrivere la config di default")
         if gov.get("needs_reboot"):
             self.logger.warning(
-                "♻️ Governor installato: sarà ATTIVO al prossimo reboot "
+                "Governor installato: sarà ATTIVO al prossimo reboot "
                 "(rpm-ostree layering)")
 
     def _phase_pre_audit(self) -> Dict[str, Any]:
         """FASE 0 — PRE-AUDIT: discovery, problemi, benchmark before."""
-        self.logger.info("🔍 PRE-AUDIT: analisi dello stato attuale")
+        self.logger.info("Pre-audit — analisi dello stato attuale")
 
         audit = self.audit.run()
         problems = self.detector.detect(audit)
         self.results["before"] = audit
         self.results["problems"] = problems
 
+        # "Nessun problema noto rilevato" è uno stato positivo → INFO;
+        # le righe dei problemi restano WARNING (spec UX_REVAMP_CLI §2.2).
         for line in self.detector.summary(problems).splitlines():
-            self.logger.warning(line)
+            if problems:
+                self.logger.warning(line)
+            else:
+                self.logger.info(line)
 
         if self.config.benchmark_enabled:
-            self.logger.info("📊 Benchmark BEFORE...")
+            self.logger.info("Benchmark prima (stato attuale)…")
             self.results["benchmarks"]["before"] = self.benchmark.run_all(
                 gpu_duration=self.config.benchmark_gpu_duration,
                 cpu_duration=self.config.benchmark_cpu_duration,
@@ -841,7 +864,7 @@ class Orchestrator(LoggerMixin):
 
     def _phase_unlock(self) -> Dict[str, Any]:
         """FASE 1 — SBLOCCHI: CPU 8-core, GPU 40-CU, health test, maschera."""
-        self.logger.info("🔓 SBLOCCHI: CPU + GPU")
+        self.logger.info("Sblocchi — CPU 8-core e GPU 40-CU")
         results: Dict[str, Any] = {}
         done = self._applied_steps()
 
@@ -849,7 +872,7 @@ class Orchestrator(LoggerMixin):
         if self.config.probe_cpu_unlock and "cpu_core_unlock" not in done:
             if not self._acpi_gate_ok():
                 self.logger.warning(
-                    "⚠️ GATE ACPI: fix SSDT-PST/CST mancanti — senza di esse "
+                    "GATE ACPI: fix SSDT-PST/CST mancanti — senza di esse "
                     "l'unlock 8-core porta la BC-250 in BOOT LOOP.")
                 proceed = False
                 if self.interactive:
@@ -862,7 +885,7 @@ class Orchestrator(LoggerMixin):
                         proceed = False
                 if not proceed:
                     self.logger.warning(
-                        "⛔ CPU unlock SALTATO (fail-closed): applicare prima "
+                        "CPU unlock SALTATO (fail-closed): applicare prima "
                         "la fix ACPI (e-tho/bc250-acpi-fix), poi rieseguire")
                     results["cpu"] = {
                         "unlocked": False,
@@ -929,7 +952,7 @@ class Orchestrator(LoggerMixin):
                         "riuso, nessun reboot", health.get("total", 0))
                 else:
                     self.logger.warning(
-                        "⚠️ CU health test SALTATO: results.tsv "
+                        "CU health test SALTATO: results.tsv "
                         "assente/incompleto — il protocollo per-WGP "
                         "richiede ~20 reboot (eseguirlo a parte: "
                         "bc250-cu-health-test.sh start, o un run "
@@ -998,7 +1021,7 @@ class Orchestrator(LoggerMixin):
         if gpu.get("method") != "runtime_umr":
             return  # kernel patch: la persistenza è nel modulo, non serve
         self.logger.warning(
-            "💾 40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
+            "40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
             "Persistenza validata (install-service + write-service-table).")
         if not self.interactive or self.mock or self.dry_run:
             results["gpu"]["persistence"] = {
@@ -1027,7 +1050,7 @@ class Orchestrator(LoggerMixin):
         results["gpu"]["persistence"] = p
         if p.get("persisted"):
             self.logger.info(
-                "✅ 40 CU persistenti al boot (attive al prossimo reboot)")
+                "40 CU persistenti al boot (attive al prossimo reboot)")
         else:
             self.logger.warning("Persistenza non riuscita: %s",
                                 p.get("error") or "errore sconosciuto")
@@ -1045,7 +1068,7 @@ class Orchestrator(LoggerMixin):
         saltato di nuovo, e il rollback non deve annullare modifiche
         pre-esistenti che il run non ha mai fatto.
         """
-        self.logger.info("🔧 FIX di sistema")
+        self.logger.info("Fix di sistema")
         results: Dict[str, Any] = {}
         done = self._applied_steps()
 
@@ -1114,7 +1137,7 @@ class Orchestrator(LoggerMixin):
         labels = [x for x in (manual_label, failed_label) if x]
         if labels:
             self.logger.warning(
-                "⚠️ Fix NON applicati automaticamente: %s", ", ".join(labels))
+                "Fix NON applicati automaticamente: %s", ", ".join(labels))
 
         return results
 
@@ -1215,7 +1238,7 @@ class Orchestrator(LoggerMixin):
         # Fallback no-UV: il run continua a curva stock (apply con punti
         # vuoti = no-op) — degradazione con nota, mai fail-opaco.
         self.logger.warning(
-            "⚠️ Undervolt CPU non trovato (ultimo tentativo %d mV: %s) — "
+            "Undervolt CPU non trovato (ultimo tentativo %d mV: %s) — "
             "curva STOCK, nessuna modifica applicata", attempt, last_error)
         self.results["notes"].append(
             "Undervolt CPU non trovato: curva stock (nessuna modifica) — "
@@ -1225,7 +1248,7 @@ class Orchestrator(LoggerMixin):
 
     def _phase_optimize(self) -> Dict[str, Any]:
         """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited."""
-        self.logger.info("⚡ OTTIMIZZAZIONE (undervolt → overclock)")
+        self.logger.info("Ottimizzazione — undervolt e overclock")
         results: Dict[str, Any] = {}
 
         # Il governor va fermato durante i test
@@ -1302,13 +1325,13 @@ class Orchestrator(LoggerMixin):
             path = undervolt_log_file()
             path.write_text(json.dumps(payload, indent=2, ensure_ascii=False,
                                        default=str), encoding="utf-8")
-            self.logger.info("📝 Undervolt log scritto: %s", path)
+            self.logger.info("Log undervolt scritto: %s", path)
         except Exception as e:
             self.logger.warning("Scrittura undervolt log fallita: %s", e)
 
     def _phase_apply(self) -> Dict[str, Any]:
         """Applica la configurazione finale (governor + overclock)."""
-        self.logger.info("⚙️ Applicazione configurazione finale")
+        self.logger.info("Applicazione della configurazione finale")
         results: Dict[str, Any] = {"applied": True}
 
         optimize_data = self.checkpoint.get_phase("optimize").get("data", {})
@@ -1427,8 +1450,8 @@ class Orchestrator(LoggerMixin):
                         out["persistent"] = True
                         out["method"] = "bc250-apply --apply + --install"
                         self.logger.info(
-                            "♻️ Undervolt PERSISTENTE installato: %d MHz, "
-                            "scale %d (riapplicato a ogni boot)", f, s)
+                            "Undervolt persistente installato: %d MHz, "
+                            "scale %d — riapplicato a ogni boot", f, s)
                     else:
                         out["persistent"] = False
                         out["persist_error"] = (
@@ -1445,7 +1468,7 @@ class Orchestrator(LoggerMixin):
                     self.logger.warning(
                         "Persistenza undervolt NON riuscita: %s",
                         out["persist_error"])
-            self.logger.info("✅ CPU config applicata: %d MHz, scale %d", f, s)
+            self.logger.info("CPU config applicata: %d MHz, scale %d", f, s)
             return out
         except Exception as e:
             self.logger.warning("CPU config non applicata: %s", e)
@@ -1474,7 +1497,7 @@ class Orchestrator(LoggerMixin):
 
     def _phase_validate(self) -> Dict[str, Any]:
         """FASE 3 — VALIDAZIONE: stress test, verifica fix, benchmark after."""
-        self.logger.info("🔥 VALIDAZIONE")
+        self.logger.info("Validazione — stress test e verifica fix")
         results: Dict[str, Any] = {}
 
         # FIX (30/08): il restore con stress saltato resta saltato anche al
@@ -1512,7 +1535,7 @@ class Orchestrator(LoggerMixin):
         # Benchmark after (in dry-run il runner è in modalità mock,
         # quindi viene simulato come il benchmark BEFORE e lo stress test)
         if self.config.benchmark_enabled:
-            self.logger.info("📊 Benchmark AFTER...")
+            self.logger.info("Benchmark dopo (config applicata)…")
             self.results["benchmarks"]["after"] = self.benchmark.run_all(
                 gpu_duration=self.config.benchmark_gpu_duration,
                 cpu_duration=self.config.benchmark_cpu_duration,
@@ -1539,7 +1562,7 @@ class Orchestrator(LoggerMixin):
             try:
                 from .profile import export_profile
                 path = export_profile()
-                self.logger.info("📦 Profilo macchina salvato: %s", path)
+                self.logger.info("Profilo macchina salvato: %s", path)
             except Exception as e:
                 self.logger.warning("Export profilo fallito: %s", e)
 
@@ -1588,9 +1611,13 @@ class Orchestrator(LoggerMixin):
             fix_results=self.results.get("fix_results"),
         )
         if getattr(self, "_partial_run", False):
-            self.logger.info("✅ Fase/i richiesta/e completata/e")
+            self.logger.info("Fase richiesta completata")
         else:
-            self.logger.info("✅ OTTIMIZZAZIONE COMPLETATA!")
+            self.logger.info("OTTIMIZZAZIONE COMPLETATA")
+            # Riepilogo finale (§3 spec UX_REVAMP_CLI): le stesse righe
+            # del pannello CLI — una sola fonte (riepilogo_lines).
+            for line in self.riepilogo_lines():
+                self.logger.info(line)
         if not self.dry_run:
             self.checkpoint.set_phase("complete", {"done": True}, completed=True)
             # F-A: a ciclo completato il marcatore restore va RIMOSSO,
@@ -1617,7 +1644,7 @@ class Orchestrator(LoggerMixin):
             self._exit_ostree_cleanup()
 
     def _handle_safety_violation(self) -> None:
-        self.logger.error("🛑 Esecuzione interrotta per safety violation")
+        self.logger.error("Esecuzione interrotta per safety violation")
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
         if not self.dry_run:
@@ -1648,7 +1675,7 @@ class Orchestrator(LoggerMixin):
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
     def _handle_error(self, phase: str, error: str) -> None:
-        self.logger.error("❌ Errore in fase %s: %s", phase, error)
+        self.logger.error("Errore in fase %s: %s", phase, error)
         if self.safety_monitor is not None:
             self.safety_monitor.stop()
         if not self.dry_run:
@@ -1703,7 +1730,7 @@ class Orchestrator(LoggerMixin):
             return True                      # non-ostree / default: inerte
         if not self.config.ostree_auto_swap_default:
             self.logger.warning(
-                "⛔ OSTREE: run da deployment NON-default con auto-swap "
+                "OSTREE: run da deployment NON-default con auto-swap "
                 "disabilitato (ostree.auto_swap_default=false): i riavvii "
                 "torneranno sul default e la run può restare orfana. "
                 "Esegui buo dal deployment di default o abilita "
@@ -1715,7 +1742,7 @@ class Orchestrator(LoggerMixin):
             # procedere con lo swap. Con MAJOR-1 non si arriva più qui per un
             # falso mismatch serial-cmdline vs posizione-status.
             self.logger.error(
-                "⛔ OSTREE: %s — esegui buo dal deployment di default, "
+                "OSTREE: %s — esegui buo dal deployment di default, "
                 "oppure rpm-ostree rollback manuale (servono ESATTAMENTE "
                 "2 deployment attivi).", reason)
             return False                     # abort fail-closed
@@ -1732,7 +1759,7 @@ class Orchestrator(LoggerMixin):
         original = self.ostree.current_default_checksum()
         if not target or not original:
             self.logger.error(
-                "⛔ OSTREE: stato deployment non determinabile — esegui "
+                "OSTREE: stato deployment non determinabile — esegui "
                 "buo dal deployment di default, oppure rpm-ostree "
                 "rollback manuale.")
             return False
@@ -1749,11 +1776,11 @@ class Orchestrator(LoggerMixin):
         if rc != 0:
             self.checkpoint.set("ostree_default_swapped", False)
             self.logger.error(
-                "⛔ OSTREE: swap default fallito (%s) — nessuna modifica "
+                "OSTREE: swap default fallito (%s) — nessuna modifica "
                 "applicata, run interrotta.", err or rc)
             return False
         self.logger.info(
-            "♻️ OSTREE: default impostato sul deployment corrente "
+            "OSTREE: default impostato sul deployment corrente "
             "(%.12s…) — i prossimi riavvii atterrano qui; a fine run "
             "verrà ripristinato il default originale.", target)
         return True
@@ -1772,29 +1799,29 @@ class Orchestrator(LoggerMixin):
         deps = self.ostree.read_deployments()
         if deps is None:
             self.logger.error(
-                "⚠️ OSTREE: restore rimandato — stato deployment "
+                "OSTREE: restore rimandato — stato deployment "
                 "illeggibile; il default resta sul deployment di questa "
                 "run. Verifica: rpm-ostree status.")
             return                            # marcatore tenuto: retry dopo
         if len(deps) != 2:
             self.logger.error(
-                "⚠️ OSTREE: restore rimandato — ora i deployment attivi "
+                "OSTREE: restore rimandato — ora i deployment attivi "
                 "sono %d (servono 2). Default manuale: rpm-ostree "
                 "rollback.", len(deps))
             return
         if deps[0].checksum != target:
             self.checkpoint.set("ostree_default_swapped", False)
             self.logger.warning(
-                "♻️ OSTREE: default cambiato esternamente (ora %.12s…) — "
+                "OSTREE: default cambiato esternamente (ora %.12s…) — "
                 "nessun rollback automatico.", deps[0].checksum)
             return
         rc, _, err = self.ostree.restore_default()
         if rc == 0:
             self.checkpoint.set("ostree_default_swapped", False)
-            self.logger.info("♻️ OSTREE: default originale ripristinato.")
+            self.logger.info("OSTREE: default originale ripristinato.")
         else:
             self.logger.error(
-                "⚠️ OSTREE: ripristino default FALLITO (%s) — il default "
+                "OSTREE: ripristino default FALLITO (%s) — il default "
                 "resta sul deployment di questa run. Manuale: rpm-ostree "
                 "rollback.", err or rc)
             # marcatore tenuto: il prossimo run ritenta (self-healing)
@@ -1802,11 +1829,11 @@ class Orchestrator(LoggerMixin):
     def _schedule_reboot(self, reason: str) -> None:
         """Salva checkpoint e programma il reboot (auto-ripresa)."""
         if self.dry_run:
-            self.logger.info("♻️ [DRY-RUN] reboot richiesto: %s", reason)
+            self.logger.info("[DRY-RUN] reboot richiesto: %s", reason)
             return
         if self.mock:
             self.checkpoint.increment_reboot_count()
-            self.logger.info("♻️ [MOCK] reboot simulato: %s", reason)
+            self.logger.info("[MOCK] reboot simulato: %s", reason)
             return
         # Tetto globale anti-boot-loop (difesa in profondità): oltre il
         # limite il pipeline si FERMA invece di riavviare ancora, evitando
@@ -1816,11 +1843,11 @@ class Orchestrator(LoggerMixin):
             msg = (f"Tetto globale reboot raggiunto ({count}/"
                    f"{self.config.max_reboots}) — interruzione per evitare "
                    f"boot loop (ultimo reboot richiesto da: {reason})")
-            self.logger.error("🚨 %s", msg)
+            self.logger.error("%s", msg)
             self._safety_abort(msg)
             return
         self.checkpoint.increment_reboot_count()
-        self.logger.info("♻️ Reboot programmato: %s", reason)
+        self.logger.info("Reboot programmato: %s", reason)
         # In produzione: crea buo-resume.service e reboot
         from .state.reboot import RebootManager
         RebootManager().schedule(reason=reason, delay=5)
@@ -1880,3 +1907,121 @@ class Orchestrator(LoggerMixin):
         manager = RecoveryManager(checkpoint=self.checkpoint,
                                   verify_callback=None)
         return manager.get_recovery_plan()
+
+    # ================================================================== #
+    # RIEPILOGO FINALE (§3 UX_REVAMP_CLI_SPEC)
+    # ================================================================== #
+
+    def riepilogo_lines(self) -> List[str]:
+        """Righe del riepilogo finale di run (fonte unica per log e CLI).
+
+        Regole §3.2: una riga per voce; solo campi REALI (results/
+        checkpoint) — campo assente → riga omessa o `non rilevabile`,
+        MAI valori inventati (C1). In mock/dry-run nulla è reale: riga
+        fix `0 — (simulazione)`; in dry-run una riga MODALITÀ DRY-RUN.
+        """
+        lines = ["Riepilogo finale"]
+        ledger = self._applied_steps()
+
+        def _names(ids):
+            return [FIX_READABLE.get(s, s) for s in ids]
+
+        if self.mock or self.dry_run:
+            lines.append("  fix applicati in questa run: 0 — (simulazione)")
+        elif ledger:
+            names = _names(sorted(ledger))
+            lines.append("  fix applicati in questa run: %d — %s"
+                         % (len(names), ", ".join(names)))
+        else:
+            lines.append("  fix applicati in questa run: 0")
+        if self.dry_run:
+            lines.append("  MODALITÀ DRY-RUN: nessuna modifica reale — "
+                         "report .dry-run")
+
+        summary = self.results.get("fix_summary") or {}
+        gia_attivi = sorted(set(summary.get("applied") or []) - ledger)
+        if gia_attivi:
+            lines.append(
+                "  già attivi (verificati, nessuna modifica): %d — %s"
+                % (len(gia_attivi), ", ".join(_names(gia_attivi))))
+        manual = summary.get("manual") or []
+        failed = summary.get("failed") or []
+        if manual or failed:
+            pieces = ([f"{n} (manuale)" for n in _names(manual)]
+                      + [f"{n} (fallito)" for n in _names(failed)])
+            lines.append("  attenzione manuale: %d — %s — dettagli nel "
+                         "report" % (len(pieces), ", ".join(pieces)))
+
+        apply_data = (self.checkpoint.get_phase("apply")
+                      .get("data", {}) or {})
+        cpu_final = apply_data.get("cpu_final") or {}
+        if cpu_final.get("freq"):
+            cpu = "  CPU: %d MHz" % cpu_final["freq"]
+            if cpu_final.get("scale") is not None:
+                cpu += " · scale %d" % cpu_final["scale"]
+            if cpu_final.get("vid") is not None:
+                cpu += " · VID %d mV" % cpu_final["vid"]
+            cpu += " · persistito: %s" % (
+                "sì" if cpu_final.get("persistent") else "no")
+            lines.append(cpu)
+
+        optimize_data = (self.checkpoint.get_phase("optimize")
+                         .get("data", {}) or {})
+        safe_points = ((optimize_data.get("undervolt_gpu") or {})
+                       .get("safe_points") or [])
+        freqs = [p.get("freq") for p in safe_points if p.get("freq")]
+        if freqs:
+            n = len(freqs)
+            lines.append(
+                "  GPU: curva %d-%d MHz · %d %s · persistito: %s"
+                % (min(freqs), max(freqs), n,
+                   "punto" if n == 1 else "punti",
+                   "sì" if apply_data.get("governor_config") else "no"))
+
+        after_gpu = (self.results.get("after") or {}).get("gpu") or {}
+        cu = after_gpu.get("cu_count")
+        if cu == 40:
+            stato_40cu = "attive"
+        elif "gpu_40cu" in ledger:
+            stato_40cu = "attive (volatili, al boot tornano 24)"
+        elif cu is not None:
+            stato_40cu = "stock"
+        else:
+            stato_40cu = "non rilevabile"
+        lines.append("  40-CU: %s" % stato_40cu)
+
+        validate_data = (self.checkpoint.get_phase("validate")
+                         .get("data", {}) or {})
+        stress = validate_data.get("stress") or {}
+        if stress:
+            if stress.get("skipped"):
+                lines.append("  stress: saltato (--skip-validation o "
+                             "restore)")
+            elif stress.get("passed"):
+                d = stress.get("duration_minutes")
+                dur = ("%d minuto" % d if d == 1 else "%d minuti" % d) \
+                    if d is not None else ""
+                cpu_pk = stress.get("cpu_temp_max")
+                gpu_pk = stress.get("gpu_temp_max")
+                pow_pk = stress.get("power_max")
+
+                def _metric(v, unit):
+                    if v is None:
+                        return "non rilevabile"
+                    s = f"{v:.1f}".replace(".", ",")
+                    if s.endswith(",0"):
+                        s = s[:-2]
+                    return f"{s}{unit}"
+
+                lines.append("  stress: superato%s · picchi CPU %s / "
+                             "GPU %s / %s"
+                             % ((" · " + dur) if dur else "",
+                                _metric(cpu_pk, "°C"),
+                                _metric(gpu_pk, "°C"),
+                                _metric(pow_pk, " W")))
+            else:
+                lines.append("  stress: fallito")
+
+        lines.append("  report: %s" % self.report.output_md)
+        lines.append("  rollback: sudo buo rollback")
+        return lines

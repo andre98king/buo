@@ -174,7 +174,9 @@ class Doctor:
                    f"GPU {temps.get('gpu_temp')}°C | "
                    f"amb {temps.get('ambient')}°C")
         iommu = hw.get("iommu", {})
-        out.append(f"IOMMU: {'attivo ✓' if iommu.get('enabled') else 'off ⚠️ (rompe USB/rete)'}")
+        out.append("IOMMU: attivo" if iommu.get("enabled")
+                   else "IOMMU: spento — rompe USB e rete su BC-250 "
+                        "(fix: buo unleash)")
         gov = hw.get("governor", {})
         out.append(f"Governor: {'attivo' if gov.get('active') else 'non attivo'}")
 
@@ -189,11 +191,11 @@ class Doctor:
         out.append("--- TOOL COMMUNITY ---")
         for name, st in deps.items():
             if name == "_error":
-                out.append(f"  ❌ {st}")
+                out.append(f"  {name}: ERRORE — {st}")
             elif st.get("present"):
-                out.append(f"  ✅ {name}")
+                out.append(f"  {name}: presente")
             else:
-                out.append(f"  ⚠️ {name} — manca "
+                out.append(f"  {name}: manca "
                            f"({', '.join(st.get('missing', []))})")
 
         cfg = report.get("config", {})

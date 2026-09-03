@@ -60,10 +60,10 @@ class RollbackManager(LoggerMixin):
             True se tutti i passi richiesti sono riusciti.
         """
         if applied:
-            self.logger.info("🔄 Rollback dei livelli applicati (%d): %s",
+            self.logger.info("Rollback dei livelli applicati (%d): %s",
                              len(applied), ", ".join(sorted(applied)))
         else:
-            self.logger.warning("🔄 Rollback avviato (motivo: %s)",
+            self.logger.warning("Rollback avviato (motivo: %s)",
                                 reason or "generico")
 
         # Determina il sottoinsieme dell'ordine da eseguire
@@ -89,7 +89,7 @@ class RollbackManager(LoggerMixin):
             executed += 1
             try:
                 if handler():
-                    self.logger.info("   ✅ Rollback completato: %s", level)
+                    self.logger.info("   Rollback completato: %s", level)
                 else:
                     # False = livello legittimamente 'non necessario'
                     # (niente da ripristinare: es. governor già fermo,
@@ -100,7 +100,7 @@ class RollbackManager(LoggerMixin):
                     self.logger.info("   — Rollback non necessario: %s",
                                      level)
             except Exception as e:
-                self.logger.warning("   ⚠️ Rollback in errore per %s: %s",
+                self.logger.warning("   Rollback in errore per %s: %s",
                                     level, e)
                 success = False
 
@@ -108,11 +108,11 @@ class RollbackManager(LoggerMixin):
             self.logger.info("Nessun livello di rollback registrato — nulla da fare")
 
         if success:
-            self.logger.info("✅ Rollback a cascata completato")
+            self.logger.info("Rollback a cascata completato")
         else:
             self.logger.warning(
-                "⚠️ Alcuni livelli di rollback non sono stati completati. "
-                "Consulta /var/log/buo/buo.log per i dettagli."
+                "ATTENZIONE: alcuni livelli di rollback non sono stati "
+                "completati — consulta /var/log/buo/buo.log per i dettagli."
             )
         return success
 

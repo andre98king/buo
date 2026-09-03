@@ -7,7 +7,7 @@ Report Generator — report Before/After completo in Markdown e JSON.
 
 Contenuto (dal design, messaggio 104):
     • riepilogo hardware prima/dopo
-    • problemi rilevati e fix applicati (con verifica ✅/❌)
+    • problemi rilevati e fix applicati (con verifica sì/no)
     • benchmark comparativi (GPU, CPU, compute, AI)
     • temperature e consumi prima/dopo
     • performance gain in %
@@ -68,7 +68,7 @@ class ReportGenerator(LoggerMixin):
         with open(self.output_md, "w", encoding="utf-8") as f:
             f.write(self._render_markdown(report))
 
-        self.logger.info("📄 Report generato: %s", self.output_md)
+        self.logger.info("Report generato: %s", self.output_md)
         return self.output_md
 
     # ------------------------------------------------------------------ #
@@ -104,13 +104,13 @@ class ReportGenerator(LoggerMixin):
 
     def _render_markdown(self, report: Dict[str, Any]) -> str:
         lines = [
-            "# 🚀 BC-250 Ultimate Orchestrator — Report",
+            "# BC-250 Ultimate Orchestrator — Report",
             "",
             f"**Generato:** {report['generated_at']}",
             "",
             "---",
             "",
-            "## 📋 Riepilogo Generale",
+            "## Riepilogo generale",
             "",
             "| Componente | Prima | Dopo |",
             "|:---|:---|:---|",
@@ -128,44 +128,45 @@ class ReportGenerator(LoggerMixin):
         lines.append(f"| Temp GPU | {b_temp.get('gpu_temp', '—')}°C | "
                      f"{a_temp.get('gpu_temp', '—')}°C |")
 
-        lines += ["", "## 🔍 Problemi Rilevati", ""]
+        lines += ["", "## Problemi rilevati", ""]
         if report["problems_found"]:
             for p in report["problems_found"]:
                 lines.append(f"- [{p.get('severity', '?').upper()}] "
                              f"{p.get('title', p.get('id'))}")
         else:
-            lines.append("- ✅ Nessun problema noto rilevato")
+            lines.append("- nessun problema noto rilevato")
 
-        lines += ["", "## 🔧 Esito Fix (applicazione)", ""]
+        lines += ["", "## Esito dei fix (applicazione)", ""]
         fix_results = report.get("fix_results") or {}
-        status_icon = {
-            "applied": "✅ applicato",
-            "manual": "⚠️ manuale",
-            "failed": "❌ fallito",
+        status_label = {
+            "applied": "applicato",
+            "manual": "manuale",
+            "failed": "fallito",
         }
         if fix_results:
             lines.append("| Fix | Stato | Dettaglio |")
             lines.append("|:---|:---|:---|")
             for name, v in fix_results.items():
-                icon = status_icon.get(v.get("status"), "❓ sconosciuto")
+                label = status_label.get(v.get("status"), "sconosciuto")
                 detail = (v.get("note") or v.get("detail")
                           or v.get("warning") or v.get("error") or "")
-                lines.append(f"| {name} | {icon} | {detail} |")
+                lines.append(f"| {name} | {label} | {detail} |")
         else:
             lines.append("- Nessun fix eseguito in questa fase")
 
-        lines += ["", "## ✅ Verifica Fix", ""]
+        lines += ["", "## Verifica dei fix", ""]
         if report["fixes_verification"]:
             lines.append("| Fix | Stato | Dettaglio |")
             lines.append("|:---|:---|:---|")
             for name, v in report["fixes_verification"].items():
                 ok = v.get("ok")
-                icon = "✅" if ok else ("❌" if ok is False else "⚠️")
-                lines.append(f"| {name} | {icon} | {v.get('detail', '')} |")
+                label = ("sì" if ok else ("no" if ok is False
+                                          else "in attesa"))
+                lines.append(f"| {name} | {label} | {v.get('detail', '')} |")
         else:
             lines.append("- Nessun fix verificato")
 
-        lines += ["", "## 📊 Benchmark", ""]
+        lines += ["", "## Benchmark", ""]
         bench = report.get("benchmarks", {})
         for phase in ("before", "after"):
             lines.append(f"### {phase.capitalize()}")
@@ -175,7 +176,7 @@ class ReportGenerator(LoggerMixin):
             lines.append("```")
             lines.append("")
 
-        lines += ["## 📈 Performance Gain", ""]
+        lines += ["## Guadagni di prestazione", ""]
         gains = report.get("performance_gain", {})
         if gains:
             for k, v in gains.items():
@@ -184,7 +185,7 @@ class ReportGenerator(LoggerMixin):
             lines.append("- Nessun dato comparativo")
 
         if report["notes"]:
-            lines += ["", "## 📝 Note", ""]
+            lines += ["", "## Note", ""]
             for n in report["notes"]:
                 lines.append(f"- {n}")
 

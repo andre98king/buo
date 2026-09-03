@@ -75,7 +75,7 @@ class StressTest(LoggerMixin):
             return self._mock_run(duration_minutes, scope)
 
         duration_s = duration_minutes * 60
-        self.logger.info("🔥 Stress test: %d minuti (scope=%s)",
+        self.logger.info("Stress test: %d minuti (scope=%s)",
                          duration_minutes, scope)
 
         # BUG DI CAMPO (29/08/2026): con durata 0 si spawnava comunque

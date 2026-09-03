@@ -26,7 +26,7 @@ import click
 
 from . import __version__
 from .config import BUOConfig
-from .constants import LIMITS
+from .constants import EXIT_SAFETY_VIOLATION, LIMITS
 
 try:
     from rich.console import Console
@@ -74,7 +74,7 @@ def _make_orchestrator(mock: bool, dry_run: bool,
 
 def show_header() -> None:
     if not _HAS_RICH:
-        console.print("🚀 BC-250 ULTIMATE ORCHESTRATOR")
+        console.print("BC-250 ULTIMATE ORCHESTRATOR")
         return
     try:
         from pyfiglet import Figlet
@@ -104,8 +104,65 @@ def _print_limits_table() -> None:
 def _print_mock_label() -> None:
     """M1 (classe C1): con --mock l'output è SIMULATO — etichetta sempre
     presente, mai valori finti presentati come reali."""
-    console.print("[bold yellow]🔧 MODALITÀ MOCK — output SIMULATO "
+    console.print("[bold yellow]MODALITÀ MOCK — output SIMULATO "
                   "(nessun hardware reale)[/]\n")
+
+
+def _print_run_summary_panel(orchestrator) -> None:
+    """§3 (spec UX_REVAMP_CLI): pannello CLI col riepilogo finale di run.
+
+    Disegna le STESSE righe di `Orchestrator.riepilogo_lines()` (fonte
+    unica con il log di `_finalize`): titolo in bold green, righe dim,
+    `rollback:` in giallo.
+    """
+    lines = orchestrator.riepilogo_lines()
+    if not _HAS_RICH:
+        for line in lines:
+            console.print(line)
+        return
+    text = Text()
+    for line in lines:
+        style = "bold yellow" if line.lstrip().startswith("rollback:") \
+            else "dim"
+        text.append(line + "\n", style=style)
+    console.print(Panel(text, title="[bold green]OTTIMIZZAZIONE "
+                                    "COMPLETATA[/]", border_style="green"))
+
+
+def _print_error_block(exit_code: int, orchestrator=None,
+                       first_line: Optional[str] = None,
+                       retry: str = "sudo buo unleash") -> None:
+    """§4 — blocchi di errore rassicuranti (solo console: il file ha già
+    le righe di errore del logger). Dicono cosa è successo, cosa è già
+    stato fatto (rollback automatico) e cosa fare (log → doctor →
+    riprova). first_line/retry personalizzabili (es. `buo restore`)."""
+    if exit_code == EXIT_SAFETY_VIOLATION:
+        reason = (getattr(orchestrator, "safety_reason", "")
+                  if orchestrator is not None else "")
+        head = ("SAFETY VIOLATION — run interrotta per sicurezza.\n"
+                f"Motivo: {reason}\n")
+        tail = (
+            "Tutte le modifiche applicate in questa run sono state annullate "
+            "(rollback automatico). La macchina riparte normalmente: al "
+            "prossimo riavvio torna la configurazione di sistema precedente."
+            "\n\n"
+            "Cosa fare:\n"
+            " 1. controlla il log: /var/log/buo/buo.log\n"
+            " 2. se il motivo è termico: aspetta che la macchina si raffreddi\n"
+            " 3. diagnostica: sudo buo doctor\n"
+            " 4. riprova: sudo buo unleash")
+    else:
+        if first_line is not None:
+            head = first_line + "\n\n"
+        else:
+            head = ("Ottimizzazione interrotta — nessuna modifica parziale "
+                    "è rimasta attiva (rollback automatico eseguito sui "
+                    "livelli applicati da questa run).\n\n")
+        tail = ("Cosa fare:\n"
+                " 1. controlla il log: /var/log/buo/buo.log\n"
+                " 2. diagnostica: sudo buo doctor\n"
+                " 3. riprova: " + retry)
+    console.print("\n" + head + tail)
 
 
 # ====================================================================== #
@@ -138,19 +195,19 @@ def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
             skip_benchmark: bool, skip_validation: bool, quick: bool,
             offline_bundle: Optional[str]) -> None:
     """
-    🚀 Comando principale: analizza → sblocca → ottimizza → valida → report.
+    Comando principale: analizza → sblocca → ottimizza → valida → report.
 
     Un solo comando per il massimo delle prestazioni sicure della BC-250.
     """
     show_header()
 
     if dry_run:
-        console.print("\n[bold yellow]⚠️  MODALITÀ DRY-RUN — "
+        console.print("\n[bold yellow]MODALITÀ DRY-RUN — "
                       "nessuna modifica verrà applicata[/]\n")
     if mock:
-        console.print("[dim]🔧 Modalità MOCK (nessun hardware reale)[/]\n")
+        _print_mock_label()
     if quick:
-        console.print("[dim]⚡ Modalità QUICK: fix kernel saltati[/]\n")
+        console.print("[dim]Modalità QUICK — fix kernel saltati[/]\n")
 
     config = BUOConfig.load()
     if skip_benchmark:
@@ -173,18 +230,13 @@ def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
     exit_code = orchestrator.run(start_phase="init")
 
     if exit_code == 0:
-        from .utils.paths import report_file_md
-        report = report_file_md()
-        if dry_run:
-            # m2: il dry-run scrive report.md.dry-run (mai sopra il reale)
-            report = report.with_name(report.name + ".dry-run")
-        console.print("\n[bold green]✅ OTTIMIZZAZIONE COMPLETATA![/]")
-        console.print(f"[dim]📄 Report: {report}[/]")
-        console.print("[dim]🔄 Rollback: sudo buo rollback[/]")
+        # §3: pannello del riepilogo finale (righe di riepilogo_lines()).
+        # Il marcatore OTTIMIZZAZIONE COMPLETATA nel FILE resta quello
+        # loggato da orchestrator._finalize (i monitor greppano il file).
+        _print_run_summary_panel(orchestrator)
     else:
-        console.print(f"\n[bold red]❌ Ottimizzazione fallita "
-                      f"(codice {exit_code})[/]")
-        console.print("[dim]📄 Log: /var/log/buo/buo.log[/]")
+        # §4: blocchi di errore rassicuranti con "cosa fare".
+        _print_error_block(exit_code, orchestrator)
     sys.exit(exit_code)
 
 
@@ -213,7 +265,7 @@ def _run_phase_command(name: str, phase: str, mock: bool, dry_run: bool,
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 @click.option("--verbose", "-v", is_flag=True, help="Log dettagliato")
 def probe(mock: bool, verbose: bool) -> None:
-    """🔍 Solo discovery hardware e rilevamento problemi (nessuna modifica)."""
+    """Solo discovery hardware e rilevamento problemi (nessuna modifica)."""
     show_header()
     if mock:
         _print_mock_label()
@@ -230,7 +282,7 @@ def probe(mock: bool, verbose: bool) -> None:
     audit = orchestrator.audit.run()
     problems = orchestrator.detector.detect(audit)
     critical = [p for p in problems if p["severity"] == "alta"]
-    console.print(f"\n[bold]🔍 Problemi rilevati: {len(problems)} "
+    console.print(f"\n[bold]Problemi rilevati: {len(problems)} "
                   f"({len(critical)} critici)[/]")
     for p in problems:
         color = "red" if p["severity"] == "alta" else "yellow"
@@ -243,7 +295,7 @@ def probe(mock: bool, verbose: bool) -> None:
 @click.option("--dry-run", is_flag=True, help="Simula senza modifiche")
 @click.option("--verbose", "-v", is_flag=True, help="Log dettagliato")
 def undervolt(mock: bool, dry_run: bool, verbose: bool) -> None:
-    """🔽 Solo undervolt CPU/GPU (usa i dati di probe esistenti)."""
+    """Solo undervolt CPU/GPU (usa i dati di probe esistenti)."""
     _run_phase_command("undervolt", "optimize", mock, dry_run,
                        interactive=False, verbose=verbose, sudo_hint=True)
 
@@ -253,7 +305,7 @@ def undervolt(mock: bool, dry_run: bool, verbose: bool) -> None:
 @click.option("--dry-run", is_flag=True, help="Simula senza modifiche")
 @click.option("--verbose", "-v", is_flag=True, help="Log dettagliato")
 def overclock(mock: bool, dry_run: bool, verbose: bool) -> None:
-    """⬆️ Solo overclock power-limited (usa i dati di undervolt)."""
+    """Solo overclock power-limited (usa i dati di undervolt)."""
     _run_phase_command("overclock", "optimize", mock, dry_run,
                        interactive=False, verbose=verbose, sudo_hint=True)
 
@@ -263,7 +315,7 @@ def overclock(mock: bool, dry_run: bool, verbose: bool) -> None:
 @click.option("--dry-run", is_flag=True, help="Simula senza modifiche")
 @click.option("--verbose", "-v", is_flag=True, help="Log dettagliato")
 def apply(mock: bool, dry_run: bool, verbose: bool) -> None:
-    """⚙️ Applica la configurazione trovata (governor + overclock)."""
+    """Applica la configurazione trovata (governor + overclock)."""
     _run_phase_command("apply", "apply", mock, dry_run,
                        interactive=False, verbose=verbose, sudo_hint=True)
 
@@ -271,7 +323,7 @@ def apply(mock: bool, dry_run: bool, verbose: bool) -> None:
 @cli.command()
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 def resume(mock: bool) -> None:
-    """♻️ Riprende dal checkpoint (alias di recover)."""
+    """Riprende dal checkpoint (alias di recover)."""
     from .orchestrator import Orchestrator
     show_header()
     orchestrator = _make_orchestrator(mock=mock, dry_run=False,
@@ -283,7 +335,7 @@ def resume(mock: bool) -> None:
 @cli.command()
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 def safety_monitor(mock: bool) -> None:
-    """🛡️ Avvia SOLO il safety monitor (letture ogni 0.5s, Ctrl+C per uscire)."""
+    """Avvia SOLO il safety monitor (letture ogni 0.5s, Ctrl+C per uscire)."""
     import time
     from .safety.monitor import SafetyMonitor
     from .safety.reader import RealHardwareReader
@@ -379,7 +431,10 @@ def status(mock: bool) -> None:
             return "—"
         return ok_text if value < limit else crit_text
 
-    table = Table(title="📊 STATO HARDWARE", border_style="blue",
+    # §5.1: stato ottimizzazione in ALTO (gerarchia: stato prima dei
+    # valori). Vocabolario D-C4: celle a PAROLE (ok/parziale/ridotte/
+    # critico/attive/stock), mai emoji da sole.
+    table = Table(title="STATO HARDWARE", border_style="blue",
                   header_style="bold cyan", show_lines=True)
     table.add_column("Componente", style="white")
     table.add_column("Valore", style="green")
@@ -392,32 +447,35 @@ def status(mock: bool) -> None:
     total_power = hardware.get("total_power")
     is_40cu = hardware.get("is_40cu_enabled")
 
-    table.add_row("CPU Core", _fmt(cpu_cores, "/8"),
-                  _status_ge(cpu_cores, 8, "✅ OK", "⚠️ Parziale"))
-    table.add_row("Core Mask", _fmt(hardware.get("core_mask")), "—")
-    table.add_row("CPU Freq", _fmt(hardware.get("cpu_freq"), " MHz"), "—")
-    table.add_row("CPU Temp", _fmt(cpu_temp, "°C"),
-                  _status_lt(cpu_temp, LIMITS.cpu.temp_max,
-                             "✅ OK", "🔴 CRITICA"))
-    table.add_row("CPU VID", _fmt(hardware.get("cpu_vid"), " mV"), "—")
-    table.add_row("GPU CU", _fmt(gpu_cu, "/40"),
-                  _status_ge(gpu_cu, 24, "✅ OK", "⚠️ Ridotte"))
-    table.add_row("GPU Freq", _fmt(hardware.get("gpu_freq"), " MHz"), "—")
-    table.add_row("GPU Temp", _fmt(gpu_temp, "°C"),
-                  _status_lt(gpu_temp, LIMITS.gpu.temp_max,
-                             "✅ OK", "🔴 CRITICA"))
-    table.add_row("GPU Volt", _fmt(hardware.get("gpu_voltage"), " mV"), "—")
-    table.add_row("GPU Power", _fmt(hardware.get("gpu_power"), " W"), "—")
-    table.add_row("Potenza", _fmt(total_power, " W"), "—")
-    table.add_row("Ventola", _fmt(hardware.get("fan_speed"), " RPM"), "—")
-    table.add_row("Ambiente", _fmt(hardware.get("ambient_temp"), "°C"), "—")
+    # Fix applicati (dal checkpoint) — prima riga
+    table.add_row("Fix", ", ".join(info["applied_fixes"]) or "nessuno", "—")
+    # 40-CU: valore attive/stock (None → non rilevabile); stato ok se
+    # attive, altrimenti —
     if is_40cu is None:
         table.add_row("40-CU", "non rilevabile", "—")
     else:
         table.add_row("40-CU",
-                      "✅ Attive" if is_40cu else "💤 Stock",
-                      "✅" if is_40cu else "—")
-    table.add_row("Fix", ", ".join(info["applied_fixes"]) or "nessuno", "—")
+                      "attive" if is_40cu else "stock",
+                      "ok" if is_40cu else "—")
+    table.add_row("CPU Core", _fmt(cpu_cores, "/8"),
+                  _status_ge(cpu_cores, 8, "ok", "parziale"))
+    table.add_row("Core Mask", _fmt(hardware.get("core_mask")), "—")
+    table.add_row("CPU Freq", _fmt(hardware.get("cpu_freq"), " MHz"), "—")
+    table.add_row("CPU VID", _fmt(hardware.get("cpu_vid"), " mV"), "—")
+    table.add_row("CPU Temp", _fmt(cpu_temp, "°C"),
+                  _status_lt(cpu_temp, LIMITS.cpu.temp_max,
+                             "ok", "critico"))
+    table.add_row("GPU CU", _fmt(gpu_cu, "/40"),
+                  _status_ge(gpu_cu, 24, "ok", "ridotte"))
+    table.add_row("GPU Freq", _fmt(hardware.get("gpu_freq"), " MHz"), "—")
+    table.add_row("GPU Volt", _fmt(hardware.get("gpu_voltage"), " mV"), "—")
+    table.add_row("GPU Power", _fmt(hardware.get("gpu_power"), " W"), "—")
+    table.add_row("GPU Temp", _fmt(gpu_temp, "°C"),
+                  _status_lt(gpu_temp, LIMITS.gpu.temp_max,
+                             "ok", "critico"))
+    table.add_row("Potenza", _fmt(total_power, " W"), "—")
+    table.add_row("Ventola", _fmt(hardware.get("fan_speed"), " RPM"), "—")
+    table.add_row("Ambiente", _fmt(hardware.get("ambient_temp"), "°C"), "—")
 
     console.print(table)
 
@@ -474,10 +532,13 @@ def rollback(phase: Optional[str], mock: bool) -> None:
     ok = orchestrator.rollback.rollback(from_phase=phase,
                                         reason="comando utente")
     if ok:
-        console.print("[bold green]✅ Rollback completato[/]")
+        console.print("[bold green]Rollback completato[/]")
+        console.print("[dim]La macchina è tornata allo stato originale — "
+                      "log: /var/log/buo/buo.log[/]")
     else:
-        console.print("[bold red]⚠️ Alcuni livelli di rollback sono "
-                      "falliti — controlla /var/log/buo/buo.log[/]")
+        console.print("[bold red]ATTENZIONE: alcuni livelli di rollback "
+                      "non sono riusciti — consulta "
+                      "/var/log/buo/buo.log[/]")
         sys.exit(1)
 
 
@@ -495,13 +556,15 @@ def recover(mock: bool) -> None:
     console.print(f"[dim]Reboot eseguiti: {plan['reboot_count']}[/]\n")
 
     if plan["action"] == "resume":
-        console.print("[bold cyan]🔄 Ripresa dalla fase "
+        console.print("[bold cyan]Ripresa dalla fase "
                       f"{plan['interrupted_phase']}[/]")
         exit_code = orchestrator.run(start_phase=plan["interrupted_phase"])
         sys.exit(exit_code)
     else:
-        console.print("[bold red]⚠️ Fase non verificata — "
-                      "consigliato: sudo buo rollback[/]")
+        console.print("[bold red]Fase non verificata — stato di ripresa "
+                      "non affidabile.[/]")
+        console.print("Cosa fare: sudo buo rollback (torna allo stato "
+                      "originale) oppure sudo buo unleash (run fresca).")
         sys.exit(1)
 
 
@@ -559,7 +622,7 @@ def config(edit: bool) -> None:
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 def data_collect(samples: int, interval: float, vram_sensor: str,
                  mock: bool) -> None:
-    """📥 Raccoglie campioni (sensori + VRAM reale opzionale) per l'ML."""
+    """Raccoglie campioni (sensori + VRAM reale opzionale) per l'ML."""
     from .data.collector import VRAMDataCollector
     from .utils.mock import MockHardware
     from .utils.paths import state_dir
@@ -582,7 +645,7 @@ def data_collect(samples: int, interval: float, vram_sensor: str,
 
 @cli.command("data-upload")
 def data_upload() -> None:
-    """📤 Carica i dati anonimizzati (federated learning, esplicito)."""
+    """Carica i dati anonimizzati (federated learning, esplicito)."""
     from .data.collector import VRAMDataCollector
     from .utils.paths import state_dir
 
@@ -634,7 +697,7 @@ def data_upload() -> None:
 
 @cli.command("ml-train")
 def ml_train() -> None:
-    """🧠 Addestra il modello ML VRAM sui dati raccolti (data-collect)."""
+    """Addestra il modello ML VRAM sui dati raccolti (data-collect)."""
     from .data.collector import VRAMDataCollector
     from .models.vram_estimator import VRAMMLModel
     from .utils.paths import state_dir
@@ -695,7 +758,7 @@ def benchmark(mock: bool) -> None:
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 def tui(mock: bool) -> None:
     """
-    🖥️ Apre il cockpit interattivo (dashboard live dell'hardware).
+    Apre il cockpit interattivo (dashboard live dell'hardware).
 
     Richiede la dipendenza opzionale `textual`
     (pip install textual  oppure  pip install -e '.[tui]').
@@ -731,7 +794,7 @@ def safety_test(mock: bool) -> None:
     audit = orchestrator.audit.run()
     problems = orchestrator.detector.detect(audit)
     critical = [p for p in problems if p["severity"] == "alta"]
-    console.print(f"\n[bold]🔍 Problemi rilevati: {len(problems)} "
+    console.print(f"\n[bold]Problemi rilevati: {len(problems)} "
                   f"({len(critical)} critici)[/]")
     for p in problems:
         color = "red" if p["severity"] == "alta" else "yellow"
@@ -753,7 +816,7 @@ def safety_test(mock: bool) -> None:
 def install_deps(only_check: bool, export_bundle_path: Optional[str],
                  offline_bundle: Optional[str]) -> None:
     """
-    📥 Scarica e installa i tool della community (repo mancanti).
+    Scarica e installa i tool della community (repo mancanti).
 
     Clona e installa: bc250_smu_oc (undervolt CPU), bc250-40cu-unlock
     (GPU 40-CU/health/mask), bc250-acpi-fix (tabelle ACPI). Il governor
@@ -836,7 +899,7 @@ def install_deps(only_check: bool, export_bundle_path: Optional[str],
 @click.option("--mock", is_flag=True, help="Usa hardware simulato")
 def doctor(json_output: bool, mock: bool) -> None:
     """
-    🩺 Diagnostica completa in un solo comando (sola lettura).
+    Diagnostica completa in un solo comando (sola lettura).
 
     Raccoglie: ambiente, distro, kernel/Mesa, core/CU, temperature,
     problemi noti, tool della community, config, log. Per il supporto:
@@ -866,7 +929,7 @@ def doctor(json_output: bool, mock: bool) -> None:
 @click.option("--dry-run", is_flag=True, help="Simula senza modifiche")
 def restore(profile_path, validate: bool, mock: bool, dry_run: bool) -> None:
     """
-    ♻️ RIPRISTINA lo stato salvato (dopo format o aggiornamento).
+    Ripristina lo stato salvato (dopo format o aggiornamento).
 
     Riapplica: toolchain, fix ACPI, unlock CPU/40 CU, undervolt
     persistente e governor — usando il PROFILO salvato, senza
@@ -885,7 +948,7 @@ def restore(profile_path, validate: bool, mock: bool, dry_run: bool) -> None:
                       "per creare il profilo, oppure specifica --profile[/]")
         sys.exit(1)
 
-    console.print(f"[bold]♻️ Restore da profilo:[/] [cyan]{path}[/]")
+    console.print(f"[bold]Restore da profilo:[/] [cyan]{path}[/]")
     console.print(f"[dim]  creato: {profile.get('created', '?')} — "
                   f"fix nel profilo: "
                   f"{len(profile.get('applied_fixes', []) or [])}[/]")
@@ -893,19 +956,37 @@ def restore(profile_path, validate: bool, mock: bool, dry_run: bool) -> None:
     config = BUOConfig.load()
     if not validate:
         config.validation_stress_duration = 0
-        console.print("[dim]  stress test: SALTATO (--validate per eseguirlo)[/]")
+        console.print("[dim]  stress test: saltato (--validate per "
+                      "eseguirlo)[/]")
 
     orchestrator = _make_orchestrator(mock, dry_run, False, False,
                                       config=config)
     exit_code = orchestrator.run(restore=profile)
 
     if exit_code == 0:
-        console.print("\n[bold green]✅ RIPRISTINO COMPLETATO — "
-                      "la macchina è tornata allo stato salvato![/]")
+        # §6.1: pannello breve di successo
+        body = [
+            "RIPRISTINO COMPLETATO — la macchina è tornata allo stato "
+            "salvato.",
+            f"fix riapplicati: "
+            f"{len(profile.get('applied_fixes', []) or [])} · "
+            "CPU/GPU come da profilo.",
+            "log: /var/log/buo/buo.log",
+        ]
+        if _HAS_RICH:
+            console.print(Panel("\n".join(body), border_style="green"))
+        else:
+            console.print("\n" + "\n".join(body))
     else:
-        console.print(f"\n[bold red]❌ Ripristino fallito (codice {exit_code})[/]")
-        console.print("[dim]Log: /var/log/buo/buo.log — "
-                      "rollback: sudo buo rollback[/]")
+        # §4: blocco generico con Cosa fare (marcatore 'ripristino
+        # fallito' preservato nel testo).
+        _print_error_block(
+            exit_code, orchestrator,
+            first_line=(
+                f"Ripristino fallito (codice {exit_code}) — nessuna "
+                "modifica parziale è rimasta attiva (rollback automatico "
+                "eseguito sui livelli applicati da questa run)."),
+            retry="sudo buo restore")
     sys.exit(exit_code)
 
 
@@ -913,7 +994,7 @@ def restore(profile_path, validate: bool, mock: bool, dry_run: bool) -> None:
 
 @cli.group()
 def profile() -> None:
-    """📦 Profilo macchina: export/import per il ripristino (G2)."""
+    """Profilo macchina: export/import per il ripristino (G2)."""
 
 
 @profile.command("export")
@@ -967,7 +1048,7 @@ def profile_import(file_path, output_path) -> None:
 
 @cli.group("oc")
 def oc_group() -> None:
-    """⚡ Tool OC integrato (motore oc3600.sh + profili + apply)."""
+    """Tool OC integrato (motore oc3600.sh + profili + apply)."""
 
 
 def _register_oc() -> None:

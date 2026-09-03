@@ -218,8 +218,8 @@ class ProblemDetector(LoggerMixin):
     def summary(self, problems: List[Dict[str, Any]]) -> str:
         """Riepilogo leggibile dei problemi trovati."""
         if not problems:
-            return "✅ Nessun problema noto rilevato"
-        lines = [f"⚠️ {len(problems)} problemi rilevati:"]
+            return "Nessun problema noto rilevato"
+        lines = [f"{len(problems)} problemi rilevati:"]
         for p in problems:
             lines.append(f"  • [{p['severity'].upper()}] {p['title']} — {p['detail']}")
         return "\n".join(lines)

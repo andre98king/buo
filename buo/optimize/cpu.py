@@ -124,7 +124,7 @@ class CPUUndervoltOptimizer(LoggerMixin):
         if scale is not None:
             point["scale"] = scale
         vf_points = [point]
-        self.logger.info("✅ Punto stabile trovato: %d MHz @ %d mV%s",
+        self.logger.info("Punto stabile trovato: %d MHz @ %d mV%s",
                          freq, vid,
                          f" (scale {scale})" if scale is not None else "")
 

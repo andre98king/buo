@@ -202,7 +202,7 @@ def oc_profiles_list(mock, dry_run, oc_dir) -> None:
     for p in profiles:
         table.add_row(p.id, p.name, str(p.freq), str(p.scale),
                       str(p.vid_cap if p.vid_cap is not None else "-"),
-                      "✅" if p.validated else "—")
+                      "sì" if p.validated else "no")
     console.print(table)
 
 

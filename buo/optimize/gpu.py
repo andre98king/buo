@@ -313,20 +313,21 @@ class GPUUndervoltOptimizer(LoggerMixin):
                     if r.stable:
                         stable_v = v
                         self.logger.info(
-                            "  Sweep (f=%d, v=%d) STABILE — GPU %.0f°C, "
-                            "%.0fW", f, v,
-                            r.gpu_temp_max or 0.0, r.power_max or 0.0)
+                            "  Sweep %d@%d: stabile — GPU %s°C, %s W", f, v,
+                            f"{r.gpu_temp_max or 0.0:.1f}".replace(".", ","),
+                            f"{r.power_max or 0.0:.0f}")
                     else:
                         failed_points += 1
                         self.logger.info(
-                            "  Sweep (f=%d, v=%d) INSTABILE: %s — step back",
-                            f, v, r.reason)
+                            "  Sweep %d@%d: instabile (%s) — risalgo al "
+                            "punto precedente", f, v, r.reason)
                         break
                     if (time.monotonic() - t_start
                             > sweep["max_minutes"] * 60):
                         self.logger.warning(
-                            "Budget sweep (%d min) esaurito: tengo l'ultimo "
-                            "stabile per frequenza", sweep["max_minutes"])
+                            "Budget sweep (%d min) esaurito — tengo "
+                            "l'ultimo punto stabile per frequenza",
+                            sweep["max_minutes"])
                         break
                 if stable_v is None:
                     # il punto di PARTENZA (community) è fallito: ambiente

@@ -47,11 +47,12 @@ class RebootManager(LoggerMixin):
     def schedule(self, reason: str = "reboot required",
                  delay: int = 5) -> None:
         """Crea il servizio di ripresa e riavvia (exit code 50)."""
-        self.logger.info("♻️ Reboot programmato: %s", reason)
+        self.logger.info("Reboot programmato: %s", reason)
         self._create_resume_service()
 
-        self.logger.info("🔄 Riavvio in %d secondi... (Ctrl+C per annullare)",
+        self.logger.info("Riavvio in %d secondi… (Ctrl+C per annullare)",
                          delay)
+        self.logger.info("La run riprende da sola al riavvio.")
         try:
             time.sleep(delay)
         except KeyboardInterrupt:
@@ -122,8 +123,8 @@ WantedBy=multi-user.target
             (autostart / self.WATCH_DESKTOP).write_text(
                 self._watch_desktop(), encoding="utf-8")
             self._make_log_readable()
-            self.logger.info("👁️ Watch-log installato: konsole sul log al "
-                             "prossimo login di %s", home)
+            self.logger.info("Watch-log installato: la run si vedrà nel "
+                             "log al prossimo login")
         except Exception as e:
             self.logger.warning("Watch-log: installazione fallita (%s) — "
                                 "continuo", e)
@@ -174,7 +175,7 @@ Exec={self.WATCH_SCRIPT}
                 self.SERVICE_PATH.unlink()
             except Exception:
                 pass
-            self.logger.info("🧹 Servizio di ripresa rimosso")
+            self.logger.info("Servizio di ripresa rimosso")
 
     @staticmethod
     def _run(cmd, check: bool = False):
