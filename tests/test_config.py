@@ -145,5 +145,43 @@ class TestUnknownConfigKeys(unittest.TestCase):
                                   "undervolt": {"persist": True}}})
 
 
+class TestOstreeConfig(unittest.TestCase):
+    """Sezione ostree (design OSTREE_REBOOT, D5): auto_swap_default con
+    default ON + schema piatto con avviso sulle chiavi sconosciute."""
+
+    def test_auto_swap_default_is_true(self):
+        cfg = BUOConfig()
+        self.assertTrue(cfg.ostree_auto_swap_default)
+
+    def test_auto_swap_false_honored(self):
+        cfg = BUOConfig({"ostree": {"auto_swap_default": False}})
+        self.assertFalse(cfg.ostree_auto_swap_default)
+
+    def test_known_key_no_warning(self):
+        with self.assertNoLogs("buo.config", level="WARNING"):
+            BUOConfig({"ostree": {"auto_swap_default": False}})
+
+    def test_unknown_key_warns(self):
+        """Chiave sconosciuta in ostree: → warning fail-soft (mai
+        silenziosa), valore ignorato."""
+        with self.assertLogs("buo.config", level="WARNING") as cm:
+            cfg = BUOConfig({"ostree": {"foo_bar": 1}})
+        self.assertIn("ostree.foo_bar", "\n".join(cm.output))
+        self.assertTrue(cfg.ostree_auto_swap_default)
+
+    def test_in_to_dict_roundtrip(self):
+        cfg = BUOConfig({"ostree": {"auto_swap_default": False}})
+        d = cfg.to_dict()
+        self.assertFalse(d["ostree"]["auto_swap_default"])
+        # round-trip save/load
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "buo.yaml"
+            cfg.save(path)
+            loaded = BUOConfig.load(path)
+            self.assertFalse(loaded.ostree_auto_swap_default)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.3.0 (2026-09-03)
+
+### Aggiunto
+- **Reboot deployment-aware ostree** (design `research/DESIGN_OSTREE_REBOOT.md`,
+  D1–D8): su ostree image-mode `systemctl reboot` boota SEMPRE il deployment
+  di default (indice 0), quindi una run lanciata dal deployment NON-default si
+  orfanava al primo reboot (il resume service vive nel `/etc` del deployment di
+  lancio). BUO ora rileva il deployment bootato (`/proc/cmdline`) e, se la run
+  può programmare reboot (fasi unlock/fix, CU health test inclusa), imposta a
+  inizio run il default sul deployment corrente (`rpm-ostree rollback`, EAGER)
+  e lo ripristina a fine run da ogni path di uscita (successo, safety, errore,
+  eccezione fatale, Ctrl+C, decline interattivo) — marker-guarded, fail-closed,
+  mai rollback alla cieca (verifica checksum via `rpm-ostree status`). Nuovo
+  modulo `buo/state/ostree.py` (`OstreeDeploymentManager`), txn rpm-ostree
+  lanciata come unità systemd staccata + poll 600s (mai cancellata); config
+  `ostree.auto_swap_default` (default true, kill-switch con warning); chiavi
+  checkpoint additive `ostree_default_swapped` /
+  `ostree_swap_target_checksum` / `ostree_swap_original_checksum` (non azzerate
+  dal reset init). Inerte nei casi comuni: non-ostree, deployment default,
+  `--mock`/`--dry-run` → zero chiamate, zero warning, zero marcatori.
+
 ## v1.2.0 (2026-09-03)
 
 ### Aggiunto

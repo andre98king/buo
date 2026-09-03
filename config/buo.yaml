@@ -56,6 +56,9 @@ deps:
   auto_install: true         # BUO scarica da solo i tool mancanti al primo avvio
   auto_install_governor: true   # il governor viene auto-installato (COPR/AUR ufficiale) di default
 
+# ostree: deployment-aware reboot (run da deployment NON-default)
+#   auto_swap_default: true   # swap del default di boot sui run da deployment non-default
+
 
 
 

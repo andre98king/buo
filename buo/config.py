@@ -129,6 +129,11 @@ _KNOWN_SAFETY_KEYS = frozenset({
     "power_budget", "max_reboots",
 })
 
+# Sezione ostree (design OSTREE_REBOOT, D5): schema piatto + avviso chiavi
+# sconosciute, come safety/phases.*. auto_swap_default è il kill-switch
+# dello swap del default di boot sui run da deployment ostree NON-default.
+_KNOWN_OSTREE_KEYS = frozenset({"auto_swap_default"})
+
 _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
     "probe": frozenset({"cpu_unlock", "gpu_unlock", "health_test",
                         "health_reboot_max"}),
@@ -337,6 +342,19 @@ class BUOConfig:
             benchmark.get("compute_duration", 30)
         )
 
+        # ----- Ostree (deployment-aware reboot, design OSTREE_REBOOT D5) -----
+        # auto_swap_default (default ON): la run da un deployment ostree
+        # NON-default imposta il default di boot sul deployment corrente
+        # prima di programmare reboot (altrimenti `systemctl reboot` torna
+        # sul default e la run si orfana). false = kill-switch esplicito
+        # (comportamento legacy, con warning in run quando il caso a
+        # rischio è presente — mai silenzioso).
+        ostree = data.get("ostree", {})
+        _warn_unknown("ostree", ostree, _KNOWN_OSTREE_KEYS)
+        self.ostree_auto_swap_default: bool = bool(
+            ostree.get("auto_swap_default", True)
+        )
+
         # ----- Dipendenze (download automatico dei tool della community) -----
         deps = data.get("deps", {})
         self.deps_auto_install: bool = bool(deps.get("auto_install", True))
@@ -443,6 +461,9 @@ class BUOConfig:
                 "auto_install": self.deps_auto_install,
                 "auto_install_governor": self.deps_auto_install_governor,
                 "offline_bundle": self.deps_offline_bundle,
+            },
+            "ostree": {
+                "auto_swap_default": self.ostree_auto_swap_default,
             },
         }
 

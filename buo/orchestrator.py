@@ -43,6 +43,7 @@ from .optimize.overclock import OverclockOptimizer
 from .report.generator import ReportGenerator
 from .safety.monitor import SafetyMonitor
 from .state.checkpoint import CheckpointManager
+from .state.ostree import OstreeDeploymentManager
 from .state.recovery import RecoveryManager
 from .state.rollback import RollbackManager
 from .unlock.cpu import CPUUnlock
@@ -77,7 +78,8 @@ class Orchestrator(LoggerMixin):
                  interactive: bool = False,
                  mock_hardware: Optional[MockHardware] = None,
                  log_level: str = "INFO",
-                 offline_bundle: Optional[str] = None):
+                 offline_bundle: Optional[str] = None,
+                 ostree: Optional[OstreeDeploymentManager] = None):
         setup_logging(level=log_level)
 
         self.config = config or BUOConfig.load()
@@ -87,6 +89,9 @@ class Orchestrator(LoggerMixin):
         # Bundle offline dei checkout (flag CLI; ha precedenza sulla config
         # deps.offline_bundle). Mai importato in mock/dry-run.
         self.offline_bundle = offline_bundle
+        # Segmento di fasi target (impostato da run(); usato da
+        # _run_can_schedule_reboot anche fuori da run() nei test).
+        self._stop_after: Optional[str] = None
 
         # Hardware (mock o reale)
         self.hardware = mock_hardware or (MockHardware() if mock else None)
@@ -95,6 +100,11 @@ class Orchestrator(LoggerMixin):
         self.checkpoint = CheckpointManager()
         self.state = self.checkpoint
         self.rollback = RollbackManager(mock=mock, hardware=self.hardware)
+        # Ostree (deployment-aware reboot, design OSTREE_REBOOT): iniettato
+        # nei test (come mock_hardware); inerte per costruzione in
+        # mock/dry-run → i run simulati NON cambiano comportamento.
+        self.ostree = ostree or OstreeDeploymentManager(mock=mock,
+                                                        dry_run=dry_run)
 
         # Safety
         self.safety_monitor: Optional[SafetyMonitor] = None
@@ -250,6 +260,7 @@ class Orchestrator(LoggerMixin):
 
         # Esecuzione parziale (comando fase standalone)?
         self._partial_run = start_phase is not None
+        self._stop_after = stop_after
 
         # Il dry-run è pura simulazione: NON tocca lo stato persistente.
         # Un run reale con checkpoint "complete" (run precedente finita)
@@ -315,6 +326,15 @@ class Orchestrator(LoggerMixin):
             self._restore_results_from_checkpoint()
 
         try:
+            # OSTREE (design OSTREE_REBOOT §7.2): se la run PUÒ programmare
+            # reboot (unlock/fix nel segmento di fasi) ed è partita da un
+            # deployment NON-default, il default di boot viene impostato
+            # SUBITO sul deployment corrente (swap EAGER, D1): ogni reboot
+            # — pianificato, della CU health test o imprevisto — atterra
+            # qui, dove vivono /etc, buo-resume.service e lo stato della
+            # run. Fail-closed: False = abort PRIMA di toccare l'hardware.
+            if not self._ensure_ostree_default(current):
+                return EXIT_ERROR
             while current != "complete":
                 if self.safety_violation:
                     self._handle_safety_violation()
@@ -322,6 +342,7 @@ class Orchestrator(LoggerMixin):
 
                 if self.interactive and not self._confirm_phase(current):
                     self.logger.info("⏹️ Interrotto dall'utente")
+                    self._exit_ostree_cleanup()
                     return EXIT_SUCCESS
 
                 self.logger.info("📍 Fase: %s", current)
@@ -356,11 +377,13 @@ class Orchestrator(LoggerMixin):
 
         except KeyboardInterrupt:
             self.logger.info("⏹️ Interrotto dall'utente")
+            self._exit_ostree_cleanup()
             return EXIT_SUCCESS
         except Exception as e:
             self.logger.error("❌ Errore fatale: %s", e)
             import traceback
             self.logger.debug(traceback.format_exc())
+            self._exit_ostree_cleanup()
             return EXIT_ERROR
 
     def _acquire_lock(self) -> None:
@@ -1486,6 +1509,9 @@ class Orchestrator(LoggerMixin):
             # (bug trovato sul campo: riavvii ripetuti a ogni accensione).
             from .state.reboot import RebootManager
             RebootManager().cleanup()
+            # OSTREE: a ciclo completato il default di boot va ripristinato
+            # se la run lo aveva cambiato (marker-guarded, no-op altrimenti).
+            self._exit_ostree_cleanup()
 
     def _handle_safety_violation(self) -> None:
         self.logger.error("🛑 Esecuzione interrotta per safety violation")
@@ -1505,6 +1531,7 @@ class Orchestrator(LoggerMixin):
                                    applied=self._applied_steps())
             from .state.reboot import RebootManager
             RebootManager().cleanup()
+            self._exit_ostree_cleanup()
         self.results["notes"].append(
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
@@ -1524,7 +1551,144 @@ class Orchestrator(LoggerMixin):
                                    applied=self._applied_steps())
             from .state.reboot import RebootManager
             RebootManager().cleanup()
+            self._exit_ostree_cleanup()
         self.results["notes"].append(f"Errore in {phase}: {error}")
+
+    def _run_can_schedule_reboot(self, current: str) -> bool:
+        """True se il segmento di fasi [current..stop_after/complete]
+        include unlock o fix (le uniche fasi che chiamano _schedule_reboot
+        o la CU health test). In mock/dry-run sempre False: la run non può
+        programmare reboot reali → niente attivazione ostree."""
+        if self.dry_run or self.mock:
+            return False
+        end = self._stop_after or "complete"
+        try:
+            seg = PHASES[PHASES.index(current): PHASES.index(end) + 1]
+        except ValueError:
+            seg = [current]
+        return "unlock" in seg or "fix" in seg
+
+    def _ensure_ostree_default(self, current: str) -> bool:
+        """Attivazione EAGER (D1) + fail-closed (design OSTREE_REBOOT).
+
+        Se la run può programmare reboot ed è partita da un deployment
+        ostree NON-default: imposta il default di boot sul deployment
+        corrente (`rpm-ostree rollback`) PRIMA di qualunque modifica, così
+        ogni reboot atterra qui. Ritorna False per ABORTIRE prima di
+        toccare l'hardware (nessun marcatore residuo in caso di swap
+        fallito). Inerte nei casi comuni: non-ostree, default booted,
+        mock/dry-run, flag auto_swap_default=false (kill-switch D5)."""
+        if not self._run_can_schedule_reboot(current):
+            return True                      # run non reboot-capable: inerte
+        state = self.ostree.detect_boot()    # no-op in mock/dry-run
+        if not state.is_ostree or state.is_default_booted:
+            return True                      # non-ostree / default: inerte
+        if not self.config.ostree_auto_swap_default:
+            self.logger.warning(
+                "⛔ OSTREE: run da deployment NON-default con auto-swap "
+                "disabilitato (ostree.auto_swap_default=false): i riavvii "
+                "torneranno sul default e la run può restare orfana. "
+                "Esegui buo dal deployment di default o abilita "
+                "l'auto-swap.")
+            return True                      # kill-switch esplicito: legacy
+        ok, reason = self.ostree.verify_swap_preconditions(state)
+        if not ok:
+            # Vero caso a rischio (stato incoerente): abort fail-closed, mai
+            # procedere con lo swap. Con MAJOR-1 non si arriva più qui per un
+            # falso mismatch serial-cmdline vs posizione-status.
+            self.logger.error(
+                "⛔ OSTREE: %s — esegui buo dal deployment di default, "
+                "oppure rpm-ostree rollback manuale (servono ESATTAMENTE "
+                "2 deployment attivi).", reason)
+            return False                     # abort fail-closed
+        # Sanity pre-swap (index cmdline — MAI il hash cmdline: su image-mode
+        # è la base key condivisa, finding di campo). Il deployment bootato
+        # lo dice SOLO lo status (booted:true); con 2 deployment un booted
+        # non-default sta in posizione 1, che l'index cmdline deve confermare
+        # quando in questo boot NON c'è già stato uno swap (marcatore
+        # assente). Post-swap la posizione è cambiata → sanity skippata.
+        if (state.booted_index not in (None, 1)
+                and not self.checkpoint.get("ostree_default_swapped",
+                                            False)):
+            self.logger.error(
+                "⛔ OSTREE: cmdline (entry %s) vs rpm-ostree status (booted "
+                "non-default) incoerenti senza swap in corso — esegui buo "
+                "dal deployment di default, oppure rpm-ostree rollback "
+                "manuale.", state.booted_index)
+            return False
+        # target = checksum del deployment booted (full-64 DA STATUS): il
+        # restore è lecito solo se il default corrente tornerà a coincidere
+        # con lui (guard D3).
+        target = state.booted_checksum
+        original = self.ostree.current_default_checksum()
+        if not target or not original:
+            self.logger.error(
+                "⛔ OSTREE: stato deployment non determinabile — esegui "
+                "buo dal deployment di default, oppure rpm-ostree "
+                "rollback manuale.")
+            return False
+        if target == original:
+            # il default È già il deployment bootato (serial cmdline
+            # ≠ 0 fuorviante, risk-3): niente da fare, la run prosegue
+            # inerte
+            return True
+        # D8: marcatore scritto PRIMA del rollback → crash tra i due = il
+        # run successivo ritenta lo swap (self-healing), restore unico.
+        self.checkpoint.set("ostree_swap_target_checksum", target)
+        self.checkpoint.set("ostree_default_swapped", True)
+        rc, _, err = self.ostree.swap_default()
+        if rc != 0:
+            self.checkpoint.set("ostree_default_swapped", False)
+            self.logger.error(
+                "⛔ OSTREE: swap default fallito (%s) — nessuna modifica "
+                "applicata, run interrotta.", err or rc)
+            return False
+        self.logger.info(
+            "♻️ OSTREE: default impostato sul deployment corrente "
+            "(%.12s…) — i prossimi riavvii atterrano qui; a fine run "
+            "verrà ripristinato il default originale.", target)
+        return True
+
+    def _exit_ostree_cleanup(self) -> None:
+        """Choke point del restore (D4): ripristina il default originale se
+        e solo se la run lo aveva cambiato (marcatore) e il default
+        corrente è ancora il nostro target (verifica checksum via status,
+        D3). Idempotente; MAI rollback alla cieca. Inerte in mock/dry-run
+        (nessuna chiamata, nessun warning)."""
+        if self.mock or self.dry_run:
+            return
+        if not self.checkpoint.get("ostree_default_swapped", False):
+            return
+        target = self.checkpoint.get("ostree_swap_target_checksum")
+        deps = self.ostree.read_deployments()
+        if deps is None:
+            self.logger.error(
+                "⚠️ OSTREE: restore rimandato — stato deployment "
+                "illeggibile; il default resta sul deployment di questa "
+                "run. Verifica: rpm-ostree status.")
+            return                            # marcatore tenuto: retry dopo
+        if len(deps) != 2:
+            self.logger.error(
+                "⚠️ OSTREE: restore rimandato — ora i deployment attivi "
+                "sono %d (servono 2). Default manuale: rpm-ostree "
+                "rollback.", len(deps))
+            return
+        if deps[0].checksum != target:
+            self.checkpoint.set("ostree_default_swapped", False)
+            self.logger.warning(
+                "♻️ OSTREE: default cambiato esternamente (ora %.12s…) — "
+                "nessun rollback automatico.", deps[0].checksum)
+            return
+        rc, _, err = self.ostree.restore_default()
+        if rc == 0:
+            self.checkpoint.set("ostree_default_swapped", False)
+            self.logger.info("♻️ OSTREE: default originale ripristinato.")
+        else:
+            self.logger.error(
+                "⚠️ OSTREE: ripristino default FALLITO (%s) — il default "
+                "resta sul deployment di questa run. Manuale: rpm-ostree "
+                "rollback.", err or rc)
+            # marcatore tenuto: il prossimo run ritenta (self-healing)
 
     def _schedule_reboot(self, reason: str) -> None:
         """Salva checkpoint e programma il reboot (auto-ripresa)."""
