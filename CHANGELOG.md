@@ -1,9 +1,25 @@
 # Changelog
 
-## v1.1.0 (in preparazione)
+## v1.2.0 (2026-09-03)
 
-> Sezione in preparazione, verificata sul codice al 03/09/2026: numero e
-> data verranno allineati al rilascio.
+### Aggiunto
+- **Cockpit TUI unificato** (`buo tui` / `buo oc-tui`): un'unica app textual a tab
+  Hardware | OC (dashboard live + cockpit OC), con help `?`, disclaimer e
+  barra azioni visibile.
+- **Gestione OC/UV GPU nel cockpit** (`buo oc-tui`, tab OC): preset GPU
+  validati (`UV 1800` / `Stock-cap 1500`), stato curva attiva, applica con
+  conferma via `GovernorWrapper` (fail-closed, floor 800 mV).
+- **Onestà read-only**: `buo probe` / `safety-test` / `benchmark` usano
+  letture reali fail-soft (mai valori simulati spacciati per reali); con
+  `--mock` l'output è marcato SIMULATO.
+- **`buo oc` read-only in simulazione**: `--mock`/`--dry-run` non scrivono
+  mai conf/marker/profili/state (reset compreso).
+- **`buo rollback --mock` sicuro**: guard mock su fan/GTT; "non necessario"
+  non è più un errore (exit 0 senza modifiche).
+- Versioni centralizzate su `__version__`, report dry-run con suffisso
+  `.dry-run`, stringimenti termici di config propagati al SafetyMonitor.
+
+## v1.1.0 (2026-09-02)
 
 ### Aggiunto
 - **Tool OC integrato: gruppo CLI `buo oc` + cockpit `buo oc-tui`** —
@@ -144,7 +160,7 @@
   conservativo, per spingere la ricerca in scala negativa) e
   `undervolt.gpu_sweep_floor_mv` (default 800 — floor FurMark misurato su
   Cyan Skillfish; clamp a [700, 1100], punti mai sotto il floor).
-- **Igiene pre-rilascio**: placeholder di recupero in `RECOVERY.md`,
+- **Igiene pre-rilascio**: documentazione di recupero,
   `SECURITY.md` aggiornata (supporto v1.0.0),
   `create_release.sh` cwd-indipendente che esclude i file interni
   (research/, reference/, PROJECT_STATUS.md, docs/BUGS.md, ...).

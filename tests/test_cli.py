@@ -5,6 +5,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from click.testing import CliRunner
 
@@ -142,6 +143,86 @@ class TestPhaseCommandsWithOrchestrator(unittest.TestCase):
         self.assertIn("optimize", phases)
         self.assertIn("apply", phases)
         self.assertNotIn("validate", phases)
+
+
+class _FakeOrchestrator:
+    """Stub per M1: audit/detect/benchmark SENZA hardware reale (mai
+    valori finti presentati come reali nei comandi probe/safety-test)."""
+
+    class _Detector:
+        def detect(self, audit):
+            return [{"severity": "alta", "title": "Problema fittizio",
+                     "detail": "solo per il test"},
+                    {"severity": "media", "title": "Altro fittizio",
+                     "detail": "x"}]
+
+    class _Audit:
+        def run(self):
+            return {"fake": True}
+
+    class _Bench:
+        def run_all(self, **kw):
+            return {"cpu_bench": {"available": True, "score": 42},
+                    "timestamp": 0.0}
+
+    def __init__(self):
+        self.audit = self._Audit()
+        self.detector = self._Detector()
+        self.benchmark = self._Bench()
+
+
+class TestHonestReadOnlyCommands(unittest.TestCase):
+    """M1 (classe C1): probe/safety-test/benchmark SENZA --mock devono
+    fare letture reali (mai valori simulati spacciati per reali) e CON
+    --mock devono marcare esplicitamente l'output come SIMULATO."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["BUO_STATE_DIR"] = self._tmp.name
+        self.runner = CliRunner()
+        self._patcher = mock.patch("buo.cli._make_orchestrator",
+                                   return_value=_FakeOrchestrator())
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        os.environ.pop("BUO_STATE_DIR", None)
+        self._tmp.cleanup()
+
+    def _invoke(self, args):
+        return self.runner.invoke(cli, args)
+
+    def test_probe_without_mock_no_simulated_output(self):
+        res = self._invoke(["probe"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("Problema fittizio", res.output)
+        self.assertNotIn("SIMULATO", res.output)
+
+    def test_probe_mock_is_labeled_simulated(self):
+        res = self._invoke(["probe", "--mock"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("SIMULATO", res.output)
+
+    def test_safety_test_without_mock_no_simulated_output(self):
+        res = self._invoke(["safety-test"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("Problema fittizio", res.output)
+        self.assertNotIn("SIMULATO", res.output)
+
+    def test_safety_test_mock_is_labeled_simulated(self):
+        res = self._invoke(["safety-test", "--mock"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("SIMULATO", res.output)
+
+    def test_benchmark_without_mock_no_simulated_output(self):
+        res = self._invoke(["benchmark"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("SIMULATO", res.output)
+
+    def test_benchmark_mock_is_labeled_simulated(self):
+        res = self._invoke(["benchmark", "--mock"])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("SIMULATO", res.output)
 
 
 if __name__ == "__main__":

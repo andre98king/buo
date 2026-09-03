@@ -175,6 +175,22 @@ class TestReset(Base):
         with self.assertRaises(RuntimeError):
             self.ctl(state_reader=reader).reset(confirm=True)
 
+    def test_reset_dry_run_or_mock_is_noop(self):
+        """M2: reset con --mock/--dry-run NON cancella MAI i file reali
+        (state.json/run.pid): modalità simulate = nessuna scrittura."""
+        for kw in ({"mock": True}, {"dry_run": True}):
+            with self.subTest(kw=kw):
+                (self.oc / STATE_FILE).write_text("{}", encoding="utf-8")
+                (self.oc / RUN_PID).write_text("1\n", encoding="utf-8")
+                ctl = OcController(oc_dir=self.oc,
+                                   state_reader=FakeStateReader(self.oc),
+                                   **kw)
+                ctl.reset(confirm=True)   # nessun RuntimeError, nessun rm
+                self.assertTrue((self.oc / STATE_FILE).exists())
+                self.assertTrue((self.oc / RUN_PID).exists())
+                (self.oc / STATE_FILE).unlink()
+                (self.oc / RUN_PID).unlink()
+
 
 class TestStatus(Base):
     def test_status_fixture(self):

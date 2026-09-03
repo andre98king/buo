@@ -91,9 +91,14 @@ class RollbackManager(LoggerMixin):
                 if handler():
                     self.logger.info("   ✅ Rollback completato: %s", level)
                 else:
-                    self.logger.warning("   ⚠️ Rollback non necessario: %s",
-                                        level)
-                    success = False
+                    # False = livello legittimamente 'non necessario'
+                    # (niente da ripristinare: es. governor già fermo,
+                    # file mai scritto, modulo mai caricato). NON è un
+                    # fallimento dell'insieme: `buo rollback` su una
+                    # macchina senza modifiche deve uscire 0. Gli errori
+                    # veri emergono come eccezioni (sotto).
+                    self.logger.info("   — Rollback non necessario: %s",
+                                     level)
             except Exception as e:
                 self.logger.warning("   ⚠️ Rollback in errore per %s: %s",
                                     level, e)

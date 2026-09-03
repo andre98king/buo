@@ -101,6 +101,13 @@ def _print_limits_table() -> None:
     console.print(table)
 
 
+def _print_mock_label() -> None:
+    """M1 (classe C1): con --mock l'output è SIMULATO — etichetta sempre
+    presente, mai valori finti presentati come reali."""
+    console.print("[bold yellow]🔧 MODALITÀ MOCK — output SIMULATO "
+                  "(nessun hardware reale)[/]\n")
+
+
 # ====================================================================== #
 # CLI
 # ====================================================================== #
@@ -162,8 +169,12 @@ def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
 
     if exit_code == 0:
         from .utils.paths import report_file_md
+        report = report_file_md()
+        if dry_run:
+            # m2: il dry-run scrive report.md.dry-run (mai sopra il reale)
+            report = report.with_name(report.name + ".dry-run")
         console.print("\n[bold green]✅ OTTIMIZZAZIONE COMPLETATA![/]")
-        console.print(f"[dim]📄 Report: {report_file_md()}[/]")
+        console.print(f"[dim]📄 Report: {report}[/]")
         console.print("[dim]🔄 Rollback: sudo buo rollback[/]")
     else:
         console.print(f"\n[bold red]❌ Ottimizzazione fallita "
@@ -198,13 +209,28 @@ def _run_phase_command(name: str, phase: str, mock: bool, dry_run: bool,
 @click.option("--verbose", "-v", is_flag=True, help="Log dettagliato")
 def probe(mock: bool, verbose: bool) -> None:
     """🔍 Solo discovery hardware e rilevamento problemi (nessuna modifica)."""
+    show_header()
+    if mock:
+        _print_mock_label()
     from .config import BUOConfig
     # probe = sola analisi: niente benchmark (quelli sono di unleash)
     config = BUOConfig.load()
     config.benchmark_enabled = False
-    _run_phase_command("probe", "pre_audit", mock, dry_run=True,
-                       interactive=False, verbose=verbose, sudo_hint=False,
-                       config=config)
+    # M1 (classe C1): letture REALI fail-soft (dry_run=False, pattern di
+    # `buo status`) — MAI valori simulati spacciati per reali. Niente
+    # run() di fase: probe è read-only e non deve scrivere il checkpoint.
+    orchestrator = _make_orchestrator(mock=mock, dry_run=False,
+                                      interactive=False, verbose=verbose,
+                                      config=config)
+    audit = orchestrator.audit.run()
+    problems = orchestrator.detector.detect(audit)
+    critical = [p for p in problems if p["severity"] == "alta"]
+    console.print(f"\n[bold]🔍 Problemi rilevati: {len(problems)} "
+                  f"({len(critical)} critici)[/]")
+    for p in problems:
+        color = "red" if p["severity"] == "alta" else "yellow"
+        console.print(f"  [bold {color}]{p['title']}[/] — {p['detail']}")
+    console.print("[dim]Nessuna modifica effettuata (probe read-only).[/]")
 
 
 @cli.command()
@@ -646,7 +672,12 @@ def ml_train() -> None:
 def benchmark(mock: bool) -> None:
     """Esegue solo i benchmark (GPU, CPU, compute)."""
     show_header()
-    orchestrator = _make_orchestrator(mock=mock, dry_run=True,
+    if mock:
+        _print_mock_label()
+    # M1 (C1): benchmark REALI (dry_run=False) — con --mock l'output è
+    # esplicitamente SIMULATO; senza --mock tool assenti → "non
+    # disponibile", MAI valori finti presentati come reali.
+    orchestrator = _make_orchestrator(mock=mock, dry_run=False,
                                       interactive=False, verbose=False)
     results = orchestrator.benchmark.run_all()
     from .benchmark.runner import BenchmarkRunner
@@ -685,8 +716,12 @@ def tui(mock: bool) -> None:
 def safety_test(mock: bool) -> None:
     """Verifica i safety gates e mostra gli hard limits (senza modifiche)."""
     show_header()
+    if mock:
+        _print_mock_label()
     _print_limits_table()
-    orchestrator = _make_orchestrator(mock=mock, dry_run=True,
+    # M1 (C1): letture REALI fail-soft (dry_run=False, pattern di
+    # `buo status`) — con --mock l'output è esplicitamente SIMULATO.
+    orchestrator = _make_orchestrator(mock=mock, dry_run=False,
                                       interactive=False, verbose=False)
     audit = orchestrator.audit.run()
     problems = orchestrator.detector.detect(audit)

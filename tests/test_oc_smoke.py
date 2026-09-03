@@ -193,5 +193,39 @@ class TestMockMode(Base):
         self.assertIn("--verify", cmd)
 
 
+class TestDryRun(Base):
+    """M2: smoke in --dry-run è SIMULATO — nessun stress-ng reale, nessun
+    marcatore scritto, ok senza valori inventati (C1: mock_hw assente)."""
+
+    def test_dry_run_no_subprocess_no_marker(self):
+        s = CpuSmoke(FakeReader(temp=60, freq=3700), dry_run=True,
+                     oc_dir=self.oc)
+        with mock.patch("buo.oc.smoke.subprocess.Popen") as popen:
+            r = s.run(3700, 975)
+        popen.assert_not_called()
+        self.assertTrue(r.ok)
+        self.assertTrue(r.marker_cleared)
+        self.assertFalse((self.oc / "smoke.marker.json").exists())
+
+    def test_dry_run_reads_only_from_mock_hardware(self):
+        from buo.utils.mock import MockHardware
+        hw = MockHardware()   # cpu_freq 3500, temp 45
+        s = CpuSmoke(hw, dry_run=True, oc_dir=self.oc, mock_hardware=hw)
+        r = s.run(3500, None)
+        self.assertTrue(r.ok)
+        self.assertEqual(r.freq_min, 3500)    # lettura dal mock_hw
+
+    def test_dry_run_ignores_stale_marker(self):
+        """In dry-run un marcatore stale NON blocca (non è un run reale)."""
+        marker = self.oc / "smoke.marker.json"
+        marker.write_text(json.dumps({"freq": 3700, "vid_cap": 975,
+                                      "kind": "smoke", "started_epoch": 1}))
+        s = CpuSmoke(FakeReader(temp=60, freq=3700), dry_run=True,
+                     oc_dir=self.oc)
+        r = s.run(3700, 975)
+        self.assertTrue(r.ok)
+        self.assertFalse(r.cause == "hang")
+
+
 if __name__ == "__main__":
     unittest.main()

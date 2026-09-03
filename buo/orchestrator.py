@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from . import __version__
 from .audit.hardware import HardwareAudit
 from .audit.problems import ProblemDetector
 from .benchmark.runner import BenchmarkRunner
@@ -213,7 +214,7 @@ class Orchestrator(LoggerMixin):
                      'optimize' NON viene rilanciata (auto-tuning):
                      si riapplicano i punti salvati nel profilo.
         """
-        self.logger.info("🚀 Avvio ottimizzazione (BUO v1.0.0)")
+        self.logger.info("🚀 Avvio ottimizzazione (BUO v%s)", __version__)
 
         # A6: lock anti-esecuzione-concorrente (solo run reali). Due
         # istanze simultanee corromperebbero stato e ledger. Il flock
@@ -437,6 +438,13 @@ class Orchestrator(LoggerMixin):
         if not self.dry_run and not self.mock:
             from .safety.reader import RealHardwareReader
             self.safety_monitor = SafetyMonitor(
+                # m1: le soglie config safety.* sono SOLO STRINGIMENTI —
+                # SafetyMonitor le clampa ai hard limits (min)
+                limits={
+                    "cpu_temp_max": self.config.cpu_temp_max,
+                    "gpu_temp_max": self.config.gpu_temp_max,
+                    "power_budget": self.config.power_budget,
+                },
                 hardware=RealHardwareReader(),  # C1: letture REALI, mai fittizie
                 abort_callback=self._safety_abort,
                 vram_estimation=self.config.vram_estimation_enabled,
@@ -1432,6 +1440,15 @@ class Orchestrator(LoggerMixin):
                 "automaticamente (" + "; ".join(parts) + "). Consulta la "
                 "sezione 'Esito Fix' del report."
             )
+
+        if self.dry_run:
+            # m2: MAI sovrascrivere l'ultimo report REALE con un dry-run:
+            # si scrive con suffisso .dry-run (report.md.dry-run / .json)
+            from .utils.paths import report_file_json, report_file_md
+            self.report.output_md = report_file_md().with_name(
+                report_file_md().name + ".dry-run")
+            self.report.output_json = report_file_json().with_name(
+                report_file_json().name + ".dry-run")
 
         self.report.generate(
             before=self.results["before"],

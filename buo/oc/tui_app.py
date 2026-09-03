@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 BC-250 Community
 """
-Cockpit OC interattiva (`buo oc-tui`, textual OPZIONALE).
+Formattatori puri della cockpit OC + alias `buo oc-tui` (v1.2).
 
 Funzioni pure (testabili senza terminale, stile dashboard_text di
 buo/tui.py): sensors_text / run_text / profiles_table_rows / confirm_text.
-
-OcTuiApp: layout §4 del design — pannello sensori live (1s), pannello run
-(2s), tabella profili, log, footer; modal di conferma apply con Worker
-smoke+progress; exit pulita (on_unmount ferma i timer).
+La cockpit OC NON vive più qui: è confluita nella TUI UNIFICATA di
+`buo tui` (tab ⚡ OC, textual TabbedContent — vedi buo/tui.py), che importa
+queste funzioni e i moduli del motore OC (controller/profiles/apply: mai
+toccati). `buo oc-tui` resta come ALIAS retro-compatibile: run_oc_tui()
+avvia la STESSA app unificata con il tab OC già attivo.
 
 Sicurezza: VID/SoC gated dal reader (🔒 se governor attivo); apply passa da
 CpuSmoke + ApplyManager (sequenza A/R); mai SMU a governor attivo.
@@ -79,6 +80,29 @@ def run_text(st: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# CTA del pannello run quando NON c'è un run attivo (testo ESATTO; le
+# parentesi quadre sono LETTERALI — il widget #run è markup=False).
+RUN_EMPTY_HINT = (
+    "— nessun run attivo. Premi [u] per avviare la convergenza CPU "
+    "(il motore esplora il tuo silicio in automatico)."
+)
+
+
+def run_empty_hint(st: Dict[str, Any]) -> str:
+    """Riga CTA "nessun run attivo" se NON c'è un processo engine e la
+    fase è finale o assente (done/none/fresco); "" altrimenti — run
+    attivo o fase di lavoro utile: lo stato del pannello parla da solo.
+    Non sostituisce run_text(): il chiamante accoda la riga al pannello.
+    """
+    proc = st.get("process") if isinstance(st.get("process"), dict) else {}
+    if proc.get("active"):
+        return ""
+    state = st.get("state") if isinstance(st.get("state"), dict) else {}
+    if state.get("phase") in (None, "", "none", "done"):
+        return RUN_EMPTY_HINT
+    return ""
+
+
 def profiles_table_rows(profiles: List[Any],
                         active: Optional[str] = None) -> List[Tuple[str, ...]]:
     """Righe DataTable: (nome, freq@scale, VID, validated, attivo)."""
@@ -105,201 +129,21 @@ def confirm_text(profile: Any, zone_ok: Tuple[bool, str]) -> str:
 
 
 # ============================================================================
-# App textual (import pigro: dipendenza OPZIONALE)
+# `buo oc-tui` (ALIAS della cockpit unificata — textual opzionale)
 # ============================================================================
 
 
 def run_oc_tui(mock: bool = False, oc_dir=None) -> int:
-    """Avvia la cockpit OC.
+    """Avvia la cockpit OC (v1.2: ALIAS della cockpit unificata).
+
+    La cockpit OC è confluita nella TUI unificata di `buo tui` (tab ⚡ OC,
+    stesse funzioni pure e stessi pannelli/azioni): `buo oc-tui` resta per
+    retro-compatibilità e avvia la STESSA app col tab OC già attivo.
+    `oc_dir` (opzione --oc-dir) viene inoltrato com'era.
 
     Raises:
         RuntimeError: se `textual` non è installato (guard, stile buo/tui).
     """
-    import importlib.util
-    if importlib.util.find_spec("textual") is None:
-        raise RuntimeError(
-            "TUI non disponibile: installa la dipendenza opzionale con: "
-            "pip install textual   (o: pip install -e '.[tui]')"
-        )
-
-    from pathlib import Path
-
-    from textual.app import App, ComposeResult
-    from textual.binding import Binding
-    from textual.containers import Horizontal, Vertical
-    from textual.screen import ModalScreen
-    from textual.widgets import DataTable, Footer, Header, Static
-
-    from .constants import OC_DIR_DEFAULT
-    from .controller import OcController
-    from .profiles import ProfileStore, ProfileValidator
-    from .smoke import CpuSmoke
-    from .state import OcStateReader
-    from ..utils.mock import MockHardware
-
-    oc = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
-    ctl = OcController(oc_dir=oc, mock=mock)
-    store = ProfileStore(oc)
-    validator = ProfileValidator()
-
-    class ConfirmApply(ModalScreen):
-        """Modal di conferma applica profilo (Sequenza A)."""
-
-        BINDINGS = [Binding("y", "yes", "Applica"), Binding("n", "no", "Annulla")]
-
-        def __init__(self, profile, on_yes):
-            super().__init__()
-            self._profile = profile
-            self._on_yes = on_yes
-
-        def compose(self) -> ComposeResult:
-            yield Static(confirm_text(self._profile,
-                                      validator.zone_ok(self._profile)))
-
-        def action_yes(self) -> None:
-            self._on_yes(self._profile)
-            self.dismiss()
-
-        def action_no(self) -> None:
-            self.dismiss()
-
-    class OcTuiApp(App):
-        TITLE = "BUO · OC Cockpit"
-        SUB_TITLE = "MOCK" if mock else "hw reale"
-        CSS = """
-        #sensors { border: round $primary; padding: 1; }
-        #run { border: round $secondary; padding: 1; }
-        #profiles { border: round $accent; height: 9; }
-        #log { border: round $warning; padding: 1; height: 1fr; }
-        """
-
-        BINDINGS = [
-            Binding("q", "quit", "Esci"),
-            Binding("r", "refresh_now", "Refresh"),
-            Binding("a", "apply_selected", "Applica profilo"),
-            Binding("R", "restore_stock", "Ripristina stock"),
-            Binding("s", "stop_run", "Stop run"),
-            Binding("u", "start_run", "Start run"),
-            Binding("?", "show_help", "Aiuto"),
-        ]
-
-        def compose(self) -> ComposeResult:
-            yield Header()
-            with Horizontal():
-                with Vertical():
-                    yield Static(sensors_text({}), id="sensors")
-                    yield DataTable(id="profiles")
-                with Vertical():
-                    yield Static(run_text({}), id="run")
-                    yield Static("log: —", id="log")
-            yield Footer()
-
-        def on_mount(self) -> None:
-            table = self.query_one("#profiles", DataTable)
-            table.add_columns("nome", "freq@scale", "VID", "valid.", "attivo")
-            self._refresh_profiles()
-            self.set_interval(1.0, self._refresh_sensors)
-            self.set_interval(2.0, self._refresh_run)
-
-        def _refresh_profiles(self) -> None:
-            table = self.query_one("#profiles", DataTable)
-            table.clear()
-            for row in profiles_table_rows(store.load()):
-                table.add_row(*row)
-
-        def _read_sensors(self) -> Dict[str, Any]:
-            if mock:
-                hw = MockHardware()
-                return hw.get_system_info()
-            try:
-                from ..safety.reader import RealHardwareReader
-                return RealHardwareReader().get_system_info()
-            except Exception:
-                return {}
-
-        def _refresh_sensors(self) -> None:
-            self.query_one("#sensors", Static).update(
-                sensors_text(self._read_sensors()))
-
-        def _refresh_run(self) -> None:
-            st = ctl.status()
-            self.query_one("#run", Static).update(run_text(st))
-            tail = st.get("log_tail") or []
-            self.query_one("#log", Static).update(
-                "\n".join(tail[-6:]) or "log: —")
-
-        def action_refresh_now(self) -> None:
-            self._refresh_sensors()
-            self._refresh_run()
-
-        def action_apply_selected(self) -> None:
-            table = self.query_one("#profiles", DataTable)
-            row = table.cursor_row
-            if row is None or row >= len(store.load()):
-                return
-            profile = store.load()[row]
-
-            def on_yes(p) -> None:
-                from .apply import ApplyManager
-                from .controller import OcController
-                from .smoke import CpuSmoke
-                apply_ctl = OcController(oc_dir=oc, mock=mock)
-                smoke = CpuSmoke(reader=self._make_reader(), mock=mock,
-                                 oc_dir=oc)
-                mgr = ApplyManager(apply_ctl, store=store,
-                                   validator=validator, smoke=smoke,
-                                   reader=self._make_reader(), mock=mock,
-                                   oc_dir=oc)
-                outcome = mgr.apply(p, persist=False, yes=True,
-                                    on_progress=lambda m: self.query_one(
-                                        "#log", Static).update(m))
-                self._refresh_profiles()
-                self._refresh_run()
-                self.query_one("#log", Static).update(
-                    f"apply {p.name}: {outcome.result}"
-                    + (f" — {outcome.cause}" if outcome.cause else ""))
-
-            self.push_screen(ConfirmApply(profile, on_yes))
-
-        def _make_reader(self):
-            if mock:
-                return MockHardware()
-            try:
-                from ..safety.reader import RealHardwareReader
-                return RealHardwareReader()
-            except Exception:
-                return None
-
-        def action_restore_stock(self) -> None:
-            from .apply import ApplyManager
-            mgr = ApplyManager(ctl, store=store, validator=validator,
-                               smoke=CpuSmoke(self._make_reader(), mock=mock,
-                                              oc_dir=oc),
-                               reader=self._make_reader(), mock=mock, oc_dir=oc)
-            outcome = mgr.restore_stock(persist=False, yes=True)
-            self.query_one("#log", Static).update(
-                f"restore-stock: {outcome.result}")
-            self._refresh_profiles()
-
-        def action_stop_run(self) -> None:
-            ctl.stop()
-            self._refresh_run()
-
-        def action_start_run(self) -> None:
-            try:
-                ctl.start([])
-            except RuntimeError as e:
-                self.query_one("#log", Static).update(f"✗ {e}")
-            self._refresh_run()
-
-        def action_show_help(self) -> None:
-            self.query_one("#log", Static).update(
-                "q esci · r refresh · a applica · R stock · s stop · u start")
-
-        def on_unmount(self) -> None:
-            # exit pulita: i timer set_interval muoiono col widget tree
-            pass
-
-    app = OcTuiApp()
-    app.run()
-    return 0
+    from ..tui import run_tui
+    return run_tui(mock=mock, mock_hardware=None, oc_dir=oc_dir,
+                   initial_tab="tab-oc")

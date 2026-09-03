@@ -124,6 +124,34 @@ class TestSafetyMonitor(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("HARD", violations[0])
 
+    def test_config_limits_are_only_stricter(self):
+        """m1: le soglie config safety.cpu_temp_max/gpu_temp_max (passate
+        via `limits`) sono SOLO stringimenti — mai oltre gli hard limits."""
+        from buo.constants import LIMITS
+
+        class Hot86(self._BlindReader):
+            def get_cpu_temp(self):
+                return 86.0     # sotto l'hard 90 ma sopra la config 85
+
+        violations = []
+        monitor = SafetyMonitor(
+            abort_callback=violations.append,
+            hardware=Hot86(), vram_estimation=False,
+            limits={"cpu_temp_max": 85, "gpu_temp_max": 80,
+                    "power_budget": 250})
+        monitor.start()
+        time.sleep(0.3)
+        monitor.stop()
+        monitor.join(timeout=2)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("CPU Temp", violations[0])
+        # clamp: chiedere PIÙ dell'hard limit non allenta mai la soglia
+        monitor2 = SafetyMonitor(
+            abort_callback=lambda r: None, hardware=Hot86(),
+            vram_estimation=False,
+            limits={"cpu_temp_max": LIMITS.cpu.temp_max + 50})
+        self.assertEqual(monitor2.limits.cpu_temp_max, LIMITS.cpu.temp_max)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -82,7 +82,13 @@ class FanControl(LoggerMixin):
         return rc == 0 and "nct668" in out
 
     def rollback(self) -> bool:
-        """Rimuove il modulo e la persistenza (G7). Non bloccante."""
+        """Rimuove il modulo e la persistenza (G7). Non bloccante.
+
+        Guard mock (stesso pattern di apply/verify): MAI unlink di /etc
+        o rmmod reali in modalità simulata (`buo rollback --mock`).
+        """
+        if self.mock and self.mock_hw is not None:
+            return True
         removed = True
         for p in (MODULES_LOAD, MODPROBE_OPTS):
             try:

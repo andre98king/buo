@@ -13,6 +13,7 @@ from buo.oc.profiles import Profile
 from buo.oc.tui_app import (
     confirm_text,
     profiles_table_rows,
+    run_empty_hint,
     run_oc_tui,
     run_text,
     sensors_text,
@@ -121,6 +122,63 @@ class TestTuiGuard(unittest.TestCase):
 
     def test_module_importable_without_textual(self):
         import buo.oc.tui_app  # noqa: F401
+
+
+class TestOcTuiAlias(unittest.TestCase):
+    """`buo oc-tui` è un ALIAS della cockpit unificata (v1.2): run_oc_tui
+    delega a buo.tui.run_tui con il tab OC già attivo, inoltrando --oc-dir.
+    Nessun terminale: run_tui è patchato (mai import textual)."""
+
+    @mock.patch("buo.tui.run_tui")
+    def test_delegates_to_unified_app_on_oc_tab(self, run_tui):
+        run_oc_tui(mock=True, oc_dir="/tmp/oc-x")
+        run_tui.assert_called_once_with(
+            mock=True, mock_hardware=None, oc_dir="/tmp/oc-x",
+            initial_tab="tab-oc")
+
+    @mock.patch("buo.tui.run_tui")
+    def test_forwards_default_oc_dir(self, run_tui):
+        run_oc_tui()
+        run_tui.assert_called_once_with(
+            mock=False, mock_hardware=None, oc_dir=None,
+            initial_tab="tab-oc")
+
+
+class TestRunEmptyHint(unittest.TestCase):
+    """run_empty_hint(): CTA "nessun run attivo" solo quando non c'è un
+    processo e la fase è finale/assente (mai durante un run o una fase
+    di lavoro utile)."""
+
+    def test_no_hint_when_run_active(self):
+        st = {"state": {"phase": "P1b"}, "process": {"active": True,
+                                                     "pid": 123}}
+        self.assertEqual(run_empty_hint(st), "")
+
+    def test_no_hint_when_phase_in_progress(self):
+        # run fermo ma fase di lavoro (es. dopo uno stop temporaneo):
+        # lo stato del pannello parla da solo
+        st = {"state": {"phase": "P1b"}, "process": {"active": False}}
+        self.assertEqual(run_empty_hint(st), "")
+
+    def test_hint_when_fresh_no_state(self):
+        self.assertIn("nessun run attivo", run_empty_hint({}))
+
+    def test_hint_when_phase_done(self):
+        st = {"state": {"phase": "done", "persisted": True},
+              "process": {"active": False, "pid": None},
+              "governor": "active"}
+        self.assertIn("nessun run attivo", run_empty_hint(st))
+
+    def test_hint_when_phase_none(self):
+        st = {"state": {"phase": None}, "process": {"active": False}}
+        self.assertEqual(run_empty_hint(st),
+                         run_empty_hint({"state": {}, "process": {}}))
+
+    def test_hint_text_guides_to_start_run(self):
+        hint = run_empty_hint({"state": {}, "process": {}})
+        self.assertIn("[u]", hint)
+        self.assertIn("convergenza CPU", hint)
+        self.assertIn("silicio", hint)
 
 
 if __name__ == "__main__":

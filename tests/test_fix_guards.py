@@ -309,5 +309,46 @@ class TestACPIFixSafety(unittest.TestCase):
         distro.rebuild_initramfs.assert_called_once()
 
 
+class TestFanGttRollbackMockGuard(unittest.TestCase):
+    """M3: FanControl/GTTTuning.rollback() in MOCK non deve MAI toccare
+    /etc (unlink di file veri) né eseguire rmmod reali — stesso guard di
+    apply()/verify()."""
+
+    def test_fan_rollback_mock_touches_nothing(self):
+        from buo.fix import fan as fan_mod
+        from buo.fix.fan import FanControl
+        hw = MockHardware()
+        with tempfile.TemporaryDirectory() as tmp:
+            mload = Path(tmp) / "modules-load.d" / "nct6683.conf"
+            mopt = Path(tmp) / "modprobe.d" / "nct6683.conf"
+            mload.parent.mkdir()
+            mopt.parent.mkdir()
+            mload.write_text("nct6683\n")      # come se il fix fosse attivo
+            mopt.write_text("options nct6683 force=true\n")
+            with mock.patch.object(fan_mod, "MODULES_LOAD", mload), \
+                 mock.patch.object(fan_mod, "MODPROBE_OPTS", mopt), \
+                 mock.patch("buo.fix.fan.run_command") as run:
+                fix = FanControl(mock=True, mock_hardware=hw)
+                self.assertTrue(fix.rollback())
+            run.assert_not_called()            # nessun rmmod reale
+            self.assertTrue(mload.exists())    # file NON rimossi
+            self.assertTrue(mopt.exists())
+
+    def test_gtt_rollback_mock_touches_nothing(self):
+        from buo.fix import gtt as gtt_mod
+        from buo.fix.gtt import GTTTuning, GTT_CONF
+        hw = MockHardware()
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = Path(tmp) / "buo-gtt.conf"
+            conf.write_text("options ttm pages_limit=3959290\n",
+                            encoding="utf-8")
+            with mock.patch.object(gtt_mod, "GTT_CONF", str(conf)), \
+                 mock.patch("buo.fix.gtt.run_command") as run:
+                fix = GTTTuning(mock=True, mock_hardware=hw)
+                self.assertTrue(fix.rollback())
+            run.assert_not_called()          # nessun rm reale
+            self.assertTrue(conf.exists())   # file NON rimosso
+
+
 if __name__ == "__main__":
     unittest.main()

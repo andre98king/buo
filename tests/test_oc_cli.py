@@ -68,9 +68,11 @@ class TestProfiles(Base):
         self.assertIn("Stock", res.output)
 
     def test_profiles_add_and_list(self):
+        # NOTA M2: senza --mock/--dry-run (le modalità simulate NON
+        # scrivono: vedi TestSimulatedNoWrites)
         res = self.invoke("oc", "profiles", "add", "Custom3600", "--freq",
                           "3600", "--scale", "-10", "--vid", "975",
-                          "--mock", "--oc-dir", str(self.oc))
+                          "--oc-dir", str(self.oc))
         self.assertEqual(res.exit_code, 0, res.output)
         res = self.invoke("oc", "profiles", "list", "--mock", "--oc-dir",
                           str(self.oc))
@@ -143,6 +145,66 @@ class TestTuiCli(Base):
         res = self.invoke("oc-tui", "--mock")
         self.assertEqual(res.exit_code, 1)
         self.assertIn("textual", res.output)
+
+
+class TestSimulatedNoWrites(Base):
+    """M2: --mock/--dry-run NON scrive MAI profili/stato/apply (le scritture
+    sono skip esplicito con messaggio, mai file toccati)."""
+
+    def _profiles_file(self):
+        return self.oc / "profiles.json"
+
+    def test_profiles_add_mock_does_not_write(self):
+        res = self.invoke("oc", "profiles", "add", "X", "--freq", "3600",
+                          "--scale", "-10", "--vid", "975", "--mock",
+                          "--oc-dir", str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("saltato", res.output)
+        self.assertFalse(self._profiles_file().exists())
+
+    def test_profiles_add_dry_run_does_not_write(self):
+        res = self.invoke("oc", "profiles", "add", "X", "--freq", "3600",
+                          "--scale", "-10", "--vid", "975", "--dry-run",
+                          "--oc-dir", str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("saltato", res.output)
+        self.assertFalse(self._profiles_file().exists())
+
+    def test_profiles_rm_mock_keeps_store(self):
+        from buo.oc.profiles import Profile, ProfileStore
+        store = ProfileStore(self.oc)
+        store.save([Profile(id="custom-x", name="X", freq=3600, scale=-10,
+                            vid_cap=975, source="user", validated=False)])
+        res = self.invoke("oc", "profiles", "rm", "custom-x", "--mock",
+                          "--oc-dir", str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("saltato", res.output)
+        self.assertIsNotNone(store.get("custom-x"))   # profilo ancora lì
+
+    def test_reset_mock_keeps_checkpoint(self):
+        state = self.oc / "state.json"
+        self.assertTrue(state.exists())
+        res = self.invoke("oc", "reset", "--mock", "--yes", "--oc-dir",
+                          str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("saltato", res.output)
+        self.assertTrue(state.exists())   # checkpoint NON cancellato
+
+    def test_reset_dry_run_keeps_checkpoint(self):
+        state = self.oc / "state.json"
+        res = self.invoke("oc", "reset", "--dry-run", "--yes", "--oc-dir",
+                          str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("saltato", res.output)
+        self.assertTrue(state.exists())
+
+    def test_apply_mock_writes_no_state_files(self):
+        res = self.invoke("oc", "apply", "stock", "--mock", "--oc-dir",
+                          str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertFalse((self.oc / "apply.json").exists())
+        self.assertFalse(self._profiles_file().exists())
+        self.assertFalse(list(self.oc.glob("apply-*.conf")))
 
 
 if __name__ == "__main__":

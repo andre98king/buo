@@ -243,6 +243,11 @@ class OcController:
         MAI i log. Default richiede conferma esplicita."""
         if not confirm:
             raise RuntimeError("reset richiede conferma (--yes)")
+        if self.mock or self.dry_run:
+            # M2: le modalità simulate NON toccano MAI lo stato reale
+            # (un --dry-run --yes non deve cancellare i file veri)
+            logger.info("[MOCK/DRY-RUN] reset saltato (nessuna scrittura)")
+            return
         if self.process_active() is not None:
             raise RuntimeError("run attiva — stop prima del reset")
         for name in (STATE_FILE, RUN_PID, LAUNCH_PID):

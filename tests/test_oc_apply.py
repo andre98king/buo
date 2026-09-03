@@ -269,5 +269,45 @@ class TestHeal(Base):
         self.assertIn("result=ok", log)
 
 
+class TestSimulatedNoWrite(Base):
+    """M2: apply/restore-stock/heal in --mock/--dry-run NON scrive MAI
+    apply.json, apply-*.conf, apply.log né profiles.json (simulazione =
+    nessuna scrittura di stato reale)."""
+
+    def _written(self):
+        return [p.name for p in self.oc.iterdir()
+                if p.name in ("apply.json", "apply.log", "profiles.json")
+                or p.name.startswith("apply-")]
+
+    def _mk_sim(self, mock=True, dry_run=False):
+        ctl = FakeController()
+        smoke = FakeSmoke(SmokeResult(ok=True))
+        return ApplyManager(
+            ctl, store=ProfileStore(self.oc), validator=ProfileValidator(),
+            smoke=smoke, reader=None, oc_dir=self.oc,
+            bc250_apply_cmd=str(self.fake_apply),
+            smu_conf=str(self.smu_conf), mock=mock, dry_run=dry_run)
+
+    def test_apply_mock_writes_nothing(self):
+        out = self._mk_sim(mock=True).apply(self.stock())
+        self.assertEqual(out.result, "ok")
+        self.assertEqual(self._written(), [])
+
+    def test_apply_dry_run_writes_nothing(self):
+        out = self._mk_sim(mock=False, dry_run=True).apply(self.stock())
+        self.assertEqual(out.result, "ok")
+        self.assertEqual(self._written(), [])
+
+    def test_restore_stock_mock_writes_nothing(self):
+        out = self._mk_sim(mock=True).restore_stock()
+        self.assertEqual(out.result, "ok")
+        self.assertEqual(self._written(), [])
+
+    def test_heal_mock_writes_nothing(self):
+        out = self._mk_sim(mock=True).heal()
+        self.assertEqual(out.result, "ok")
+        self.assertEqual(self._written(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -68,11 +68,27 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("tlb_fault", ids)
 
     def test_report_generated(self):
-        orch = self._make()
+        orch = self._make(dry_run=False)
         orch.run()
         from buo.utils.paths import report_file_json, report_file_md
         self.assertTrue(report_file_md().exists())
         self.assertTrue(report_file_json().exists())
+
+    def test_report_dry_run_never_overwrites_real(self):
+        """m2: il dry-run scrive report.*.dry-run, MAI sopra l'ultimo
+        report reale (un --dry-run non deve distruggere i dati veri)."""
+        from buo.utils.paths import report_file_json, report_file_md
+        real_md = report_file_md()
+        real_md.parent.mkdir(parents=True, exist_ok=True)
+        real_md.write_text("# REPORT REALE\n", encoding="utf-8")
+        orch = self._make(dry_run=True)
+        orch.run()
+        self.assertEqual(real_md.read_text(encoding="utf-8"),
+                         "# REPORT REALE\n")
+        self.assertTrue(report_file_md().with_name(
+            report_file_md().name + ".dry-run").exists())
+        self.assertTrue(report_file_json().with_name(
+            report_file_json().name + ".dry-run").exists())
 
     def test_status(self):
         orch = self._make()

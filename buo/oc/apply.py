@@ -97,7 +97,8 @@ class ApplyManager:
         self.dry_run = dry_run
         self.sudo = sudo
         self.smoke = smoke or CpuSmoke(
-            reader, mock=mock, oc_dir=self.oc_dir, sudo=sudo)
+            reader, mock=mock, oc_dir=self.oc_dir, sudo=sudo,
+            dry_run=dry_run)
         self._marker_path = self.oc_dir / APPLY_MARKER
 
     # ------------------------------------------------------------------ #
@@ -131,6 +132,10 @@ class ApplyManager:
                       persisted: bool = False,
                       cause: Optional[str] = None,
                       pid: Optional[int] = None) -> None:
+        if self.mock or self.dry_run:
+            # M2: le modalità simulate non scrivono MAI apply.json
+            logger.info("[MOCK/DRY-RUN] marcatore %s non scritto", state)
+            return
         data = {
             "state": state,
             "profile": profile,
@@ -184,12 +189,17 @@ class ApplyManager:
 
     def _write_conf(self, profile: Profile) -> Path:
         """conf [overclock] dal profilo; max_temperature dal silicio se noto
-        (clamp [85,90]), altrimenti 85."""
+        (clamp [85,90]), altrimenti 85. In mock/dry-run il file NON viene
+        scritto (M2): il path viene comunque restituito per la sequenza
+        simulata."""
         mt = self.silicon.thermal_max_temperature()
         if mt is None:
             mt = TEMP_GATE
         mt = max(TEMP_GATE, min(TEMP_CRITICAL, int(mt)))
         conf = self.oc_dir / f"apply-{profile.id}.conf"
+        if self.mock or self.dry_run:
+            logger.info("[MOCK/DRY-RUN] conf %s non scritta", conf.name)
+            return conf
         conf.write_text(
             f"[overclock]\nfrequency = {profile.freq}\n"
             f"scale = {profile.scale}\nmax_temperature = {mt}\n",
@@ -438,6 +448,11 @@ class ApplyManager:
     # ------------------------------------------------------------------ #
 
     def _update_store(self, profile: Profile, persisted: bool) -> None:
+        if self.mock or self.dry_run:
+            # M2: mai marcare validated/active/last_apply in simulazione
+            # (profiles.json è stato reale del tool)
+            logger.info("[MOCK/DRY-RUN] store non aggiornato")
+            return
         profiles = self.store.load()
         for p in profiles:
             if p.id == profile.id:
@@ -455,6 +470,11 @@ class ApplyManager:
         line = (f"[{_now()}] result={result} profile={profile or '-'} "
                 f"persisted={persisted} cause={cause or '-'}")
         details.append(line)
+        if self.mock or self.dry_run:
+            # M2: nessuna scrittura di apply.log in simulazione (la riga
+            # resta nei details per l'output)
+            logger.info("[MOCK/DRY-RUN] apply.log non scritto")
+            return
         try:
             self.oc_dir.mkdir(parents=True, exist_ok=True)
             with open(self.oc_dir / APPLY_LOG, "a", encoding="utf-8") as fh:

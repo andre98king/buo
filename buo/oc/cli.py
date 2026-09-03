@@ -154,7 +154,14 @@ def oc_reset(mock, dry_run, oc_dir, yes) -> None:
         else:
             click.echo(f"ERRORE: {e}", err=True)
         sys.exit(1)
-    if console:
+    if mock or dry_run:
+        # M2: reset in simulazione NON cancella nulla (guard in controller)
+        msg = ("⏭ reset saltato: simulazione (nessuna scrittura)")
+        if console:
+            console.print(f"[yellow]{msg}[/]")
+        else:
+            click.echo(msg)
+    elif console:
         console.print("[bold green]✓ checkpoint azzerato[/]")
 
 
@@ -199,6 +206,16 @@ def oc_profiles_list(mock, dry_run, oc_dir) -> None:
     console.print(table)
 
 
+def _skip_simulated(action: str) -> None:
+    """M2: scritture in --mock/--dry-run → skip esplicito (mai store
+    toccato). Chiamata PRIMA della scrittura."""
+    msg = f"⏭ {action}: saltato (simulazione — nessuna scrittura)"
+    if console:
+        console.print(f"[yellow]{msg}[/]")
+    else:
+        click.echo(msg)
+
+
 @oc_profiles.command("add")
 @_oc_opts
 @click.argument("name")
@@ -224,6 +241,9 @@ def oc_profiles_add(mock, dry_run, oc_dir, name, freq, scale, vid_cap,
         else:
             click.echo(f"ERRORE: {reason}", err=True)
         sys.exit(1)
+    if mock or dry_run:
+        _skip_simulated(f"profilo {pid} non aggiunto")
+        return
     profiles = [x for x in store.load() if x.id != pid]
     profiles.append(p)
     store.save(profiles)
@@ -252,6 +272,9 @@ def oc_profiles_rm(mock, dry_run, oc_dir, name) -> None:
         else:
             click.echo("ERRORE: i profili builtin non si rimuovono", err=True)
         sys.exit(1)
+    if mock or dry_run:
+        _skip_simulated(f"profilo {p.id} non rimosso")
+        return
     profiles = [x for x in store.load() if x.id != p.id]
     store.save(profiles)
     if console:
@@ -270,7 +293,8 @@ def _mk_apply(oc_dir, mock, dry_run):
     from .smoke import CpuSmoke
     ctl = OcController(oc_dir=_path(oc_dir), mock=mock, dry_run=dry_run)
     store = ProfileStore(_path(oc_dir))
-    smoke = CpuSmoke(reader=None, mock=mock, oc_dir=_path(oc_dir))
+    smoke = CpuSmoke(reader=None, mock=mock, dry_run=dry_run,
+                     oc_dir=_path(oc_dir))
     return ApplyManager(ctl, store=store,
                         validator=ProfileValidator(), smoke=smoke,
                         reader=None, mock=mock, dry_run=dry_run,
@@ -356,7 +380,10 @@ def oc_tui_command(mock: bool, oc_dir: Optional[str]) -> None:
         run_oc_tui(mock=mock, oc_dir=_path(oc_dir))
     except RuntimeError as e:
         if console:
-            console.print(f"[yellow]⚠️ {e}[/]")
+            # m5: escape del messaggio (il rich markup interpreterebbe i
+            # '[' del suggerimento ".[tui]" come tag → output corrotto)
+            from rich.markup import escape
+            console.print(f"[yellow]⚠️ {escape(str(e))}[/]")
             console.print("[dim]La CLI classica (buo oc) resta pienamente "
                           "funzionante.[/]")
         else:

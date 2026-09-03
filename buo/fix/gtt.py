@@ -80,7 +80,13 @@ class GTTTuning(LoggerMixin):
             return {"applied": False, "error": str(e)}
 
     def rollback(self) -> bool:
-        """Rimuove il file modprobe."""
+        """Rimuove il file modprobe.
+
+        Guard mock (stesso pattern di apply/verify): MAI rm di /etc in
+        modalità simulata (`buo rollback --mock`).
+        """
+        if self.mock and self.mock_hw is not None:
+            return True
         if os.path.exists(GTT_CONF):
             rc, _, _ = run_command(["rm", "-f", GTT_CONF], sudo=True)
             return rc == 0

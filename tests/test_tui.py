@@ -5,7 +5,14 @@
 import unittest
 from unittest import mock as umock
 
-from buo.tui import LiveReadings, dashboard_text, run_tui
+from buo.tui import (
+    OC_DISCLAIMER,
+    LiveReadings,
+    actions_strip_text,
+    dashboard_text,
+    help_text,
+    run_tui,
+)
 from buo.utils.mock import MockHardware
 
 
@@ -130,6 +137,69 @@ class TestTUIGuard(unittest.TestCase):
     def test_module_importable_without_textual(self):
         """Il modulo si importa anche senza textual (import pigro)."""
         import buo.tui  # noqa: F401  (già importato sopra)
+
+
+class TestHelpText(unittest.TestCase):
+    """help_text() (schermata ?) + riga disclaimer: funzione pura,
+    testata senza terminale — onestà C1 e via d'uscita sempre presenti."""
+
+    def test_explains_what_it_is(self):
+        text = help_text()
+        self.assertIn("per-silicio", text)
+        self.assertIn("BC-250", text)
+        self.assertIn("fail-closed", text)
+        self.assertIn("CPU", text)
+        self.assertIn("GPU", text)
+
+    def test_warns_honestly_about_freezes(self):
+        text = help_text()
+        self.assertIn("freeze", text)
+        self.assertIn("power-cycle", text)
+        self.assertIn("silicio", text)
+
+    def test_lists_recovery_actions(self):
+        text = help_text()
+        self.assertIn("ripristina stock", text)
+        self.assertIn("conservativo", text)
+        self.assertIn("log", text)
+        self.assertIn("riavvio", text)
+
+    def test_notes_presets_are_unit_validated(self):
+        self.assertIn("UN'unità", help_text())
+
+    def test_lists_essential_keys(self):
+        text = help_text()
+        for key in ("q esci", "? aiuto", "r refresh", "a applica",
+                    "R ripristina stock", "s stop", "u start"):
+            self.assertIn(key, text)
+
+    def test_disclaimer_constant_is_short_and_actionable(self):
+        self.assertLess(len(OC_DISCLAIMER), 120)
+        self.assertIn("ripristina stock", OC_DISCLAIMER)
+        self.assertIn("silicio", OC_DISCLAIMER)
+
+    def test_help_includes_disclaimer(self):
+        self.assertIn(OC_DISCLAIMER, help_text())
+
+
+class TestActionsStrip(unittest.TestCase):
+    """actions_strip_text(): barra azioni del tab OC — i flussi primari
+    (avvio CPU, preset GPU, restore, aiuto) sono visibili senza help."""
+
+    def test_lists_primary_flows(self):
+        text = actions_strip_text()
+        self.assertIn("CPU", text)
+        self.assertIn("GPU", text)
+        self.assertIn("[u] avvia run motore", text)
+        self.assertIn("[s] stop", text)
+        self.assertIn("[g] applica", text)
+        self.assertIn("[R] stock", text)
+        self.assertIn("[?] aiuto", text)
+
+    def test_one_line_and_concise(self):
+        text = actions_strip_text()
+        self.assertNotIn("\n", text)
+        self.assertLess(len(text), 160)
 
 
 if __name__ == "__main__":

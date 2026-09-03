@@ -93,10 +93,14 @@ class CpuSmoke:
                  oc_dir: Optional[Path] = None,
                  sudo: bool = True,
                  timeout_s: int = SMOKE_TIMEOUT_S,
-                 dmesg_cmd: str = "dmesg"):
+                 dmesg_cmd: str = "dmesg",
+                 dry_run: bool = False):
         self.reader = reader
         self.mock = mock
+        self.dry_run = dry_run
         self.mock_hw = mock_hardware
+        # Simulato = mock O dry-run: nessun subprocess, nessun marcatore
+        self._sim = mock or dry_run
         self.oc_dir = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
         self._marker = self.oc_dir / SMOKE_MARKER
         self._sudo = sudo
@@ -153,22 +157,26 @@ class CpuSmoke:
         """Smoke 30s; (ok, cause) con marcatore scritto e pulito.
 
         Un marcatore GIÀ stale (precedente smoke hangato) → fail-closed:
-        non si rientra, cause=hang.
+        non si rientra, cause=hang. In modalità SIMULATA (mock/dry-run)
+        nessun subprocess e nessun marcatore scritto (M2): letture solo
+        dal mock_hw (mai valori inventati se assente).
         """
-        if self.stale_smoke_marker():
+        if not self._sim and self.stale_smoke_marker():
             logger.warning("smoke marker stale (hang precedente) — "
                            "fail-closed, nessun nuovo smoke")
             return SmokeResult(ok=False, cause="hang", marker_cleared=False)
 
-        self._write_marker(freq, vid_cap)
+        if not self._sim:
+            self._write_marker(freq, vid_cap)
         started = time.monotonic()
-        before = self._dmesg_snapshot()
+        before = [] if self._sim else self._dmesg_snapshot()
         rc = 0
         temp_max: Optional[float] = None
         freq_min: Optional[int] = None
 
-        if self.mock:
-            # mock: letture dal mock_hardware (o reader mock), nessun comando
+        if self._sim:
+            # mock/dry-run: nessun comando reale; letture SOLO dal
+            # mock_hardware (dry-run senza mock_hw → None, C1)
             rc = 0
             temp_max = self._mock_temp()
             freq_min = self._mock_freq()
@@ -204,12 +212,15 @@ class CpuSmoke:
                 else:
                     rc = proc.returncode if rc == 0 else rc
 
-        after = self._dmesg_snapshot()
+        after = [] if self._sim else self._dmesg_snapshot()
         whea = _whea_delta([l for l in after if l not in before])
         duration = time.monotonic() - started
 
         ok, cause = self._evaluate(freq, rc, temp_max, freq_min, whea)
-        cleared = self._clear_marker()
+        cleared = True if self._sim else self._clear_marker()
+        if self._sim:
+            logger.info("[MOCK/DRY-RUN] smoke %ss simulato (freq=%d, "
+                        "vid=%s)", SMOKE_STRESS_S, freq, vid_cap)
         return SmokeResult(ok=ok, cause=cause, temp_max=temp_max,
                            freq_min=freq_min, whea_delta=whea,
                            duration_s=duration, marker_cleared=cleared)
@@ -258,7 +269,7 @@ class CpuSmoke:
     # ----------------------------- dmesg ------------------------------ #
 
     def _dmesg_snapshot(self) -> List[str]:
-        if self.mock:
+        if self._sim:
             return []
         rc, out, _err = run_command([self._dmesg_cmd], timeout=10,
                                     sudo=self._sudo, capture=True)

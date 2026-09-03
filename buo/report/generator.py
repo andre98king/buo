@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .. import __version__
 from ..utils.logging import LoggerMixin
 from ..utils.paths import (report_file_json as _default_json,
                            report_file_md as _default_md)
@@ -191,7 +192,8 @@ class ReportGenerator(LoggerMixin):
             "",
             "---",
             "",
-            "*Report generato da BC-250 Ultimate Orchestrator v1.0.0*",
+            f"*Report generato da BC-250 Ultimate Orchestrator "
+            f"v{__version__}*",
             "",
         ]
         return "\n".join(lines)
