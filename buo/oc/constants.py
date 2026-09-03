@@ -62,7 +62,7 @@ SCALE_MAX = 0
 F_SEARCH_MAX = 3850              # tetto di ricerca del motore
 WALL_FREQ = 3860                 # muro: MAI freq >= 3860
 HANG_ZONE_MIN_FREQ = 3725        # anti-zona utente (dati campo 31/08)
-HANG_ZONE_MIN_VID = 1000         # mai VID < 1000 su clock >= 3725
+HANG_ZONE_MIN_VID = 1050         # mai VID < 1050 su clock >= 3725 (02/09: 3725@1000 HANG)
 FREQ_MIN_OC = 3500               # sotto = downclock (profilo "cool", ammesso)
 
 # ---------------------------------------------------------------------------

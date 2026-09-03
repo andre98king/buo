@@ -24,7 +24,7 @@ ordine inverso rispetto all'applicazione).
 | Modulo | Responsabilità |
 |:---|:---|
 | `orchestrator.py` | Macchina a stati, coordinamento fasi |
-| `cli.py` | CLI (click + rich): unleash, status, probe, undervolt, overclock, apply, rollback, recover, resume, report, config, benchmark, safety-test, safety-monitor, install-deps, data-collect, data-upload, ml-train, tui, doctor |
+| `cli.py` | CLI (click + rich): unleash, status, probe, undervolt, overclock, apply, rollback, recover/resume, restore, report, config, benchmark, safety-test, safety-monitor, doctor, install-deps, profile (export/import), data-collect, data-upload, ml-train, tui, oc (gruppo), oc-tui |
 | `constants.py` | Hard limits immutabili, registri SMN/SMU, percorsi |
 | `config.py` | Configurazione YAML (limiti non sovrascrivibili) |
 | `audit/` | Discovery hardware + rilevamento problemi noti |
@@ -39,7 +39,8 @@ ordine inverso rispetto all'applicazione).
 | `models/` | Stima VRAM (empirica + ML opzionale) |
 | `data/` | Raccolta campioni VRAM e training ML |
 | `install/` | Download automatico dei tool della community |
-| `utils/` | Logging, shell, mock hardware, distro, paths |
+| `oc/` | Tool OC integrato (gruppo `buo oc` + `buo oc-tui`): stato del motore, profili, apply sicuro con smoke/rollback |
+| `utils/` | Logging, shell, mock hardware, distro, paths, SMN |
 
 ## Principi di sicurezza
 

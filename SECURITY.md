@@ -5,20 +5,24 @@
 | Versione | Supportata |
 |:---|:---|
 | 1.0.0 | ✅ supportata |
+| 1.1.0 | ✅ supportata |
 
 BUO è progettato per **modificare parametri hardware reali** (SMU,
-frequenze, voltaggi, moduli kernel). Leggi sempre `docs/RECOVERY.md`
-prima di eseguirlo su hardware reale: un uso scorretto può causare
-instabilità, crash o boot failure.
+frequenze, voltaggi, moduli kernel). Prima di eseguirlo su hardware reale
+leggi [docs/USER_GUIDE.md](docs/USER_GUIDE.md) e
+[docs/FAQ.md](docs/FAQ.md): un uso scorretto può causare instabilità,
+crash o boot failure.
 
 ## ⚠️ Avvertenze di sicurezza fondamentali
 
 1. **BUO esegue modifiche hardware reali** (undervolt/overclock, modprobe,
    unlock CPU/GPU). Un uso scorretto può causare instabilità, crash o
    boot failure.
-2. **Su Bazzite/ostree**: BUO **non** scrive mai `/boot` e non modifica
-   l'initramfs. Ma installa **automaticamente** i pacchetti dal package
-   manager della distro: `rpm-ostree install umr` su ostree, `dnf` + COPR
+2. **Su Bazzite/ostree**: il fix ACPI non tocca l'initramfs originale:
+   BUO crea un nuovo blob (`initramfs-acpi-<ver>.img`) e punta la boot
+   entry a quel blob (entry sempre backup-ata, idempotente, fail-closed).
+   BUO installa **automaticamente** i pacchetti dal package manager della
+   distro: `rpm-ostree install umr` su ostree, `dnf` + COPR
    `filippor/bazzite` per il governor su Fedora/Bazzite, AUR via
    `yay`/`paru` su Arch. Non esegue **mai** installer di terze parti:
    clona solo repo note (pinnate a un commit esatto e verificato) e copia

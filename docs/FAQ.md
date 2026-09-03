@@ -53,8 +53,9 @@ R: Sì: BUO rileva la distro (ostree-based) e usa il metodo ACPI corretto
 R: Quasi sicuramente è il **refresh dell'output**: gamescope emette alla
 modalità preferita dell'EDID — se il monitor dichiara preferito
 1920x1080@60Hz (col 144Hz come alternativo), l'output resta 60Hz e i
-giochi presentano a 60. Verifica:
-`sudo cat /sys/kernel/debug/dri/1/state | grep mode:`.
+giochi presentano a 60. Verifica (sostituisci `N` con la tua GPU amdgpu —
+`card0` o `card1`, vedi [HARDWARE_SETUP.md](HARDWARE_SETUP.md)):
+`sudo cat /sys/kernel/debug/dri/N/state | grep mode:`.
 Fix: Steam → Impostazioni → Display → "Automatically Set Resolution" →
 OFF → seleziona 1920x1080@144 (la scelta si salva e persiste).
 

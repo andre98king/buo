@@ -43,3 +43,6 @@ docs/TEST_PLAN.md
 
 # Benchmark/temp scripts locali
 /tmp-bench/
+
+# Memoria di lavoro AI (solo locale, mai pubblica)
+AGENTS.md

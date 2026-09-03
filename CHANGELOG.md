@@ -1,5 +1,47 @@
 # Changelog
 
+## v1.1.0 (in preparazione)
+
+> Sezione in preparazione, verificata sul codice al 03/09/2026: numero e
+> data verranno allineati al rilascio.
+
+### Aggiunto
+- **Tool OC integrato: gruppo CLI `buo oc` + cockpit `buo oc-tui`** —
+  gestione dell'overclock per-silicio dentro BUO: stato del motore
+  (`oc status`, `oc watch`), lancio/stop e azzeramento del checkpoint
+  (`oc run`, `oc stop`, `oc reset`), profili Stock/Certificato/Custom
+  (`oc profiles list|add|rm`), applicazione sicura di un profilo
+  (`oc apply`: volatile di default, `--persist` opt-in con conferma;
+  smoke test e rollback automatico su fallimento), ritorno al profilo
+  stock (`oc restore-stock`) e recupero da un apply interrotto
+  (`oc heal`). Il gruppo opera su una directory OC dedicata
+  (`/var/lib/buo/oc`) e coesiste con la fase legacy `buo overclock`,
+  invariata. Nota: il motore di ricerca (`oc3600.sh`) non è distribuito
+  nel repository — `buo oc` è pensato per macchine dove il motore è
+  installato; profili/apply/heal funzionano anche senza.
+- **Letture sensori reali in `buo status`, `buo tui` e
+  `buo safety-monitor`** — il reader hardware legge i valori reali via
+  sysfs/hwmon (core CPU attivi, frequenze, temperature, tensione GPU,
+  potenza, ventola) invece di campi vuoti o simulati, con un helper SMN
+  condiviso con l'unlock CPU.
+- **Gate di sicurezza anti-concorrenza SMU** — le letture che usano il
+  mailbox SMU/SMN (VID CPU, maschera core, potenza SoC via debugfs) sono
+  disabilitate automaticamente quando il governor SMU è attivo
+  (fail-closed: il campo mostra "non rilevabile" invece di rischiare un
+  freeze del SoC da accesso concorrente al mailbox).
+
+### Corretto
+- **TUI**: `buo tui` mostrava campi a zero/audit simulato; ora usa le
+  letture reali (`RealHardwareReader`), coerenti con `buo status`.
+- **`buo oc run`**: ora accetta i flag del motore senza interpretarli
+  (pass-through verbatim, `ignore_unknown_options`).
+
+### Test
+- Suite estesa con i test del tool OC (stato, controller, profili, apply,
+  smoke, CLI, TUI) e dei nuovi reader sensori; supera i 590 test.
+- I test restano solo `unittest` (mai pytest): nessun hardware reale
+  richiesto.
+
 ## v1.0.0 (2026-08-30)
 
 ### Corretto
@@ -100,7 +142,8 @@
   (`both`|`cpu`|`gpu`, default `both`).
 - **Nuove chiavi config**: `undervolt.cpu_target_vid` (default 1300
   conservativo, per spingere la ricerca in scala negativa) e
-  `undervolt.gpu_sweep_floor_mv` (default 700, clampato mai sotto).
+  `undervolt.gpu_sweep_floor_mv` (default 800 — floor FurMark misurato su
+  Cyan Skillfish; clamp a [700, 1100], punti mai sotto il floor).
 - **Igiene pre-rilascio**: placeholder di recupero in `RECOVERY.md`,
   `SECURITY.md` aggiornata (supporto v1.0.0),
   `create_release.sh` cwd-indipendente che esclude i file interni

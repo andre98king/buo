@@ -14,7 +14,7 @@ Comando principale:
     sudo buo unleash
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "BC-250 Community"
 
 # Import LAZY (PEP 562): `import buo` funziona anche senza le dipendenze

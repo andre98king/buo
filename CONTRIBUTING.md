@@ -64,11 +64,8 @@ Ogni funzione/classe deve avere una docstring con Args/Returns/Raises.
 ## 🧪 Testing
 
 ```bash
-# Tutti i test
-python -m unittest discover tests
-
-# (se pytest è installato)
-pytest --cov=buo tests/
+# Tutti i test (comando canonico del progetto — mai pytest)
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 Nuovi moduli → nuovi test. I test devono funzionare senza hardware reale (mock).
@@ -85,7 +82,7 @@ Nuovi moduli → nuovi test. I test devono funzionare senza hardware reale (mock
 
 ### Checklist PR
 
-- [ ] Test passano (`python -m unittest discover tests`)
+- [ ] Test passano (`python3 -m unittest discover -s tests -p 'test_*.py'`)
 - [ ] Docstring aggiornate
 - [ ] README aggiornato
 - [ ] Changelog aggiornato

@@ -155,12 +155,14 @@ class TestProfileValidator(Base):
         if frag:
             self.assertIn(frag, reason)
 
-    def test_zone_hang_vid_below_1000_block(self):
+    def test_zone_hang_vid_below_1050_block(self):
         self.assert_block(self.p(HANG_ZONE_MIN_FREQ, -7, 950), "zona di hang")
         self.assert_block(self.p(3750, -7, 999), "zona di hang")
+        # 02/09 campo: 3725@1000 HANG → soglia salita a 1050
+        self.assert_block(self.p(3725, -7, 1000), "zona di hang")
 
-    def test_zone_hang_vid_1000_ok(self):
-        ok, _ = self.v.zone_ok(self.p(3725, -7, 1000))
+    def test_zone_hang_vid_1050_ok(self):
+        ok, _ = self.v.zone_ok(self.p(3725, -7, 1050))
         self.assertTrue(ok)
 
     def test_zone_vid_none_block(self):
@@ -170,9 +172,13 @@ class TestProfileValidator(Base):
         ok, _ = self.v.zone_ok(self.p(3775, -7, 1206))
         self.assertTrue(ok)
 
-    def test_3850_1000_ok(self):
-        ok, _ = self.v.zone_ok(self.p(3850, -7, 1000))
+    def test_3850_1050_ok(self):
+        ok, _ = self.v.zone_ok(self.p(3850, -7, 1050))
         self.assertTrue(ok)
+
+    def test_3850_1000_block(self):
+        # 02/09 campo: VID 1000 a >=3725 è zona di hang
+        self.assert_block(self.p(3850, -7, 1000), "zona di hang")
 
     def test_wall_freq_block(self):
         self.assert_block(self.p(WALL_FREQ, 0, 1200), "muro")

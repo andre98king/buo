@@ -1,371 +1,312 @@
-# 🚀 BC-250 Ultimate Orchestrator (BUO)
+# BUO — BC-250 Ultimate Orchestrator
 
-<div align="center">
+![Versione](https://img.shields.io/badge/versione-1.1.0-green)
+![Python](https://img.shields.io/badge/python-%E2%89%A53.10-blue)
+![Licenza](https://img.shields.io/badge/licenza-GPL--3.0-orange)
 
-![BC-250](https://img.shields.io/badge/BC--250-ULTIMATE-blue?style=for-the-badge)
-![Version](https://img.shields.io/badge/version-1.0.0-green)
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-![License](https://img.shields.io/badge/license-GPLv3-orange)
+**BUO** è uno strumento a riga di comando (Python, CLI `click`+`rich`, con
+TUI opzionale `textual`) che guida in modo **sicuro e verificato**
+l'ottimizzazione dell'**ASRock BC-250** (APU AMD Cyan Skillfish): analizza
+la scheda, sblocca le risorse nascoste, risolve i problemi noti, trova un
+buon compromesso prestazioni/consumi con undervolt e overclock entro limiti
+di sicurezza, e valida ogni modifica con stress test reali.
 
-**Ottimizzazione automatica per ASRock BC-250 — Un solo comando, il massimo per la tua scheda.**
-
-[Installazione](#-installazione) • [Utilizzo](#-utilizzo) • [Configurazione](#-configurazione) • [Sicurezza](#-sicurezza) • [Documentazione](#-documentazione) • [Contribuire](#-contribuire)
-
-</div>
-
----
-
-## 📖 Panoramica
-
-**BUO (BC-250 Ultimate Orchestrator)** automatizza l'intero processo di ottimizzazione della scheda ASRock BC-250 (APU AMD Cyan Skillfish, gfx1013):
-
-- 🔍 **Analizza** l'hardware e rileva tutti i problemi noti
-- 🔓 **Sblocca**: CPU 6→8 core, GPU 24→40 CU (con health test e maschera dei difetti)
-- 🔧 **Risolve**: TLB fault, compute queue (ACE), IOMMU, ACPI C-State, GTT, sensori
-- ⚡ **Ottimizza**: undervolt + overclock power-limited per la massima efficienza
-- 📊 **Valida**: stress test, verifica dei fix, benchmark before/after con report
-- 🛡️ **Protegge**: hard limits immutabili, safety monitor, checkpoint, rollback a cascata
-
-> **Un solo comando:** `sudo buo unleash`
-
----
-
-## 🎯 Perché BUO?
-
-| Problema | Soluzione BUO |
-|:---|:---|
-| 6 core CPU bloccati | Sblocco automatico a 8 core (con test di stabilità) |
-| 24 CU GPU limitate | Sblocco a 40 CU (con health test per-WGP) |
-| Overclock manuale rischioso | Undervolt/overclock automatico entro limiti sicuri |
-| VRAM senza sensori | Stima intelligente basata su modello empirico (+ML) |
-| TLB fault (crash AI/ML) | Patch kernel automatica |
-| Compute queue rotta (−20% FPS) | Fix ACE (kernel+Mesa) |
-| Nessun rollback | Rollback a cascata di ogni modifica |
-| Processi manuali complessi | Un unico comando, tutto automatico |
-
----
-
-## ⚡ Performance Attese (dati della community)
-
-| Metrica | Stock | Ottimizzato | Guadagno |
-|:---|:---|:---|:---|
-| CPU Core | 6 | **8** | +33% |
-| GPU CU | 24 | **38-40** | +58-67% |
-| Cyberpunk 2077 (1440p) | 46 FPS | **58 FPS** | +25% (con ACE fix) |
-| AI Inference (it/s) | 2.1 | **3.4** | +62% |
-| Efficienza (FPS/W) | 0.175 | **0.255** | +46% |
-| Temperatura GPU | 80°C | **67°C** | −13°C |
-
-### ✅ Validato sul campo (28/08/2026)
-
-| Risorsa | Risultato reale |
-|:---|:---|
-| CPU | **8 core / 16 thread** attivi e sani (mask 0xFF, test-cores 16/16, 0 MCE) — primo caso documentato su Bazzite/GRUB-BLS |
-| GPU | **40/40 CU** attive (runtime UMR, persistente al boot) |
-| Display | **144Hz** su Steam Gaming Mode (fix EDID/gamescope) |
-| Gaming | Marvel Rivals **picco 120 FPS** (era 60-70 bloccati); GPU max 86°C, CPU max 85°C in partita |
-| UV GPU | attivo (curva SMU 800/900/1000mV @ 1/1.5/2GHz + throttle 85°C) |
-
----
-
-## 📋 Requisiti
-
-### Hardware
-- ASRock BC-250
-- Alimentatore ≥ 350W
-- Raffreddamento consigliato: 2x ventole 120mm (es. Arctic P12 Pro, push-pull)
-
-### Software
-- **Linux**: Fedora 43, Bazzite, CachyOS/Arch (consigliate; Debian parziale)
-- **Kernel**: ≥ 6.11 (meglio 6.18+ o kernel CachyOS)
-- **Mesa**: ≥ 25.1
-- **Python**: ≥ 3.10
-
----
-
-## 🚀 Installazione
-
-### Metodo Manuale
+È pensato per chi possiede una BC-250 e preferisce un percorso automatico e
+ripetibile a una collezione di script da eseguire a mano.
 
 ```bash
-# Clona il repository
+sudo buo unleash
+```
+
+> **Nota di trasparenza sullo sviluppo.** BUO è nato come progetto personale
+> ed è stato sviluppato con l'assistenza di modelli di intelligenza
+> artificiale, che hanno contribuito a codice, test e documentazione. I
+> valori hardware usati dal progetto **non sono inventati**: ogni
+> configurazione proposta è stata validata sul campo con stress test reali,
+> mai copiata da altre fonti senza verifica. La base tecnica — sblocchi,
+> undervolt/overclock, fix ACPI — è il reverse engineering della community
+> BC-250 (elektricM/amd-bc250-docs, bc250_smu_oc, il governor
+> cyan-skillfish e altri): BUO orchestra quei tool in modo sicuro e
+> automatico. A quella community va il merito principale; questo progetto
+> cerca solo di renderne i risultati accessibili e ripetibili.
+
+---
+
+## Come funziona, in breve
+
+Un run completo segue una pipeline a fasi, ognuna con checkpoint e (dove
+serve) rollback:
+
+```
+init → pre_audit → unlock → fix → optimize → apply → validate → complete
+```
+
+- **init / pre_audit** — verifica di sanità (kernel, Mesa, temperature) e
+  analisi dell'hardware: nessuna modifica.
+- **unlock** — sblocco delle risorse bloccate dal produttore (core CPU e CU
+  GPU), con test di stabilità e health check per ogni passo.
+- **fix** — correzione dei problemi noti della scheda (es. tabelle ACPI,
+  fault TLB, compute queue, GTT, sensori/ventole), ognuno con verifica e
+  rollback.
+- **optimize** — ricerca di un punto undervolt/overclock sicuro per il tuo
+  silicio: ogni candidato viene prima testato sotto stress.
+- **apply** — applica e rende persistente la configurazione trovata.
+- **validate** — stress test finale, verifica dei fix e report
+  before/after.
+
+Tutto è **fail-closed**: se un test di stabilità non può essere eseguito,
+BUO si ferma invece di applicare valori non verificati. Ogni file modificato
+viene salvato prima dell'intervento e un **safety monitor** controlla
+temperature e potenza durante l'esecuzione.
+
+---
+
+## Requisiti
+
+- Una **ASRock BC-250** con Linux (il progetto è sviluppato e validato su
+  Bazzite/Fedora ostree; altre distro sono supportate in modo meno
+  completo).
+- **Python ≥ 3.10**.
+- Connessione internet al primo avvio: BUO installa da solo i tool della
+  community mancanti (vedi sotto). Senza rete esiste un percorso offline.
+
+## Installazione
+
+```bash
 git clone https://github.com/andre98king/buo.git
 cd buo
 
-# Installa le dipendenze
+# Consigliato: ambiente virtuale
+python3 -m venv .venv && source .venv/bin/activate
+
 pip install -r requirements.txt
+sudo pip install -e .            # installa il comando `buo`
 
-# Installa l'applicazione
-sudo pip install -e .
-
-# Crea le directory necessarie
+# Directory di sistema e configurazione
 sudo mkdir -p /var/lib/buo /var/log/buo /etc/buo
 sudo cp config/buo.yaml /etc/buo/
 ```
 
-### Verifica dell'Installazione
+Verifica dell'installazione (senza hardware reale):
 
 ```bash
-# Senza hardware reale (simulazione)
-buo status --mock
+buo --version
+buo status --mock        # stato hardware simulato
+buo install-deps --check # quali tool della community sono presenti
 ```
 
-### Primo avvio: BUO si occupa di tutto
+Per Bazzite/ostree (sistema immutabile) e per l'installazione offline usa
+la guida dedicata: [docs/INSTALL.md](docs/INSTALL.md).
 
-Al primo `sudo buo unleash` su hardware reale, BUO **cerca ogni tool nel
-sistema e, se manca, lo scarica/installa e lo configura da solo** (il
-governor GPU è l'eccezione: la sua installazione è **opt-in**, vedi sotto):
+### Tool della community
 
-| Tool | Come lo installa BUO |
-|:---|:---|
-| bc250_smu_oc, bc250-40cu-unlock, bc250-acpi-fix | clone shallow da GitHub → script in `/usr/local/bin` |
-| cyan-skillfish-governor | **pacchetto distro**: COPR `filippor/bazzite` (Fedora/Bazzite) o AUR (Arch) → poi config di default sicura scritta automaticamente |
-| umr | **pacchetto distro** (`rpm-ostree install umr` su ostree) — attivo al prossimo reboot |
-| stress/stress-ng | wrapper automatico se manca `stress` |
+BUO non reinventa nulla: usa i tool che la community BC-250 ha costruito e
+li installa da solo al primo run (repo pinnate a commit verificati):
 
-Nessun installer di terze parti viene mai eseguito: solo repo note e
-pacchetti ufficiali del package manager della distro. L'auto-install dei
-tool è **attivo di default** (`deps.auto_install: true`); anche il governor
-è **attivo di default** (`deps.auto_install_governor: true`, sempre solo via
-package manager ufficiale). Configuri tutto in `/etc/buo/buo.yaml` o pre-installi con:
+- `bc250_smu_oc` (undervolt/overclock CPU), `bc250-40cu-unlock` (GPU),
+  `bc250-cu-live-manager`, `bc250_memcfg`, `bc250-acpi-fix`;
+- il governor GPU `cyan-skillfish-governor-smu` e `umr` come pacchetti del
+  package manager della distro (mai installer di terze parti).
+
+Se preferisci installarli prima:
 
 ```bash
-sudo buo install-deps       # scarica e installa i tool ora
-buo install-deps --check    # verifica cosa c'è e cosa manca
+sudo buo install-deps        # scarica e installa i tool mancanti
+buo install-deps --check     # verifica cosa c'è e cosa manca
 ```
 
-**Senza rete?** Esporta un **bundle offline** su una macchina connessa e
-importalo sulla BC-250 (contiene solo i checkout pinnati e verificati,
-non i pacchetti distro):
+Senza rete: genera un bundle offline su una macchina connessa
+(`sudo buo install-deps --export-bundle bundle.tar.gz`), copialo su USB e
+importalo sulla BC-250 (`sudo buo install-deps --offline bundle.tar.gz`).
+Il bundle contiene solo i checkout verificati — dettagli in
+[docs/INSTALL.md](docs/INSTALL.md#6-installazione-offline-senza-rete).
 
-```bash
-sudo buo install-deps --export-bundle buo-bundle.tar.gz      # macchina CON rete
-sudo buo install-deps --offline /percorso/buo-bundle.tar.gz  # BC-250 SENZA rete
-```
+## Utilizzo
 
-`sudo buo unleash --offline-bundle <file>` (o `deps.offline_bundle` in
-`buo.yaml`) importa il bundle da solo prima dell'auto-install.
-
----
-
-## 🎮 Utilizzo
-
-### Comando Principale
+### Il comando principale
 
 ```bash
 # Ottimizzazione completa (tutto automatico)
 sudo buo unleash
 
-# Simulazione senza modifiche
+# Prima di toccare nulla: simulazione completa
 sudo buo unleash --dry-run
 
-# Modalità interattiva (conferma per ogni fase)
+# Primo giro consigliato: conferma per ogni fase
 sudo buo unleash --interactive
 ```
 
-### Altri Comandi
+Opzioni principali di `unleash`: `--dry-run` (nessuna modifica),
+`--interactive` (conferma per fase), `--quick` (solo undervolt/overclock,
+senza fix kernel), `--skip-benchmark`, `--skip-validation`, `--mock`
+(hardware simulato), `--offline-bundle <file>` (importa il bundle prima
+dell'auto-install).
+
+### Diagnostica e stato (sola lettura)
 
 ```bash
-buo status                 # Stato hardware e ottimizzazioni
-buo status --mock          # Con hardware simulato
-buo probe                  # 🔍 Solo analisi hardware (nessuna modifica)
-sudo buo undervolt         # 🔽 Solo undervolt CPU/GPU
-sudo buo overclock         # ⬆️ Solo overclock power-limited
-sudo buo apply             # ⚙️ Applica la configurazione trovata
-buo report                 # Report dell'ultima esecuzione (Markdown)
-buo report --format json   # Report in JSON
-buo report --dashboard     # Dashboard HTML con grafici before/after
-buo report --include-raw   # Include i dati benchmark grezzi
-sudo buo rollback          # Rollback a cascata completo
-sudo buo rollback --phase gpu_40cu   # Rollback da una fase specifica
-sudo buo recover           # Riprende dopo crash/reboot
-buo resume                 # ♻️ Riprende dal checkpoint (alias di recover)
-buo config                 # Mostra la configurazione corrente
-sudo buo config --edit     # Modifica la configurazione (editor)
-buo benchmark --mock       # Solo benchmark (simulati)
-buo safety-test            # Verifica i safety gates (senza modifiche)
-buo safety-monitor         # 🛡️ Solo monitoraggio live (Ctrl+C per uscire)
-buo doctor                 # 🩺 Diagnostica completa in un solo comando (sola lettura)
-buo install-deps           # Scarica e installa i tool della community
-buo install-deps --check   # Verifica i tool senza scaricare
-buo data-collect           # 📥 Raccoglie campioni per il modello VRAM
-buo data-collect --vram-sensor /dev/ttyUSB0   # Con termocoppia reale
-buo data-upload            # 📤 Carica dati anonimizzati (federated, esplicito)
-buo ml-train               # 🧠 Addestra il modello ML VRAM sui dati raccolti
-buo tui                    # 🖥️ Cockpit interattivo (dashboard live)
-buo tui --mock             # Cockpit con hardware simulato
+buo status                 # stato hardware e ottimizzazioni
+buo probe                  # solo analisi (nessuna modifica)
+buo doctor                 # diagnostica completa per il supporto
+buo report                 # report dell'ultimo run (Markdown)
+buo report --dashboard     # report HTML con grafici before/after
+buo safety-test            # verifica i gate di sicurezza
+buo config                 # mostra la configurazione corrente
 ```
 
-> `buo tui` richiede la dipendenza opzionale **textual**:
-> `pip install textual` (o `pip install -e '.[tui]'`). Senza di essa la
-> CLI classica resta pienamente funzionante.
+### Operazioni singole (la maggior parte richiede root)
 
-### Opzioni di `unleash`
+```bash
+sudo buo undervolt         # solo ricerca undervolt CPU/GPU
+sudo buo overclock         # solo overclock entro il budget di potenza
+sudo buo apply             # applica la configurazione trovata
+sudo buo rollback          # annulla ogni modifica (rollback a cascata)
+sudo buo rollback --phase <fase>   # rollback da una fase specifica
+sudo buo recover           # riprende da un checkpoint dopo un reboot
+sudo buo restore           # riporta la macchina allo stato salvato
+sudo buo restore --profile profilo.json
+sudo buo profile export    # backup del profilo macchina (JSON)
+sudo buo profile import profilo.json
+```
 
-| Opzione | Descrizione |
-|:---|:---|
-| `--dry-run` | Simula tutto senza modifiche — test sicuro |
-| `--interactive` | Chiede conferma per ogni fase e modifica |
-| `--skip-benchmark` | Salta i benchmark (più veloce) |
-| `--skip-validation` | Salta lo stress test finale |
-| `--quick` | Solo undervolt/overclock, senza fix kernel |
-| `--mock` | Hardware simulato (sviluppo/test) |
-| `--verbose` | Log dettagliato |
+(`resume` è un alias di `recover`.)
 
----
+### TUI (opzionale)
 
-## 🛡️ Avvisi automatici (semi-automaticità)
+```bash
+buo tui                    # cockpit interattiva (richiede: pip install textual)
+```
 
-BUO trasforma i passi manuali in **avvisi automatici** con conferma
-esplicita solo dove serve. Nessuna modifica parte senza verifiche:
+### Tool OC avanzato (per-silicio)
 
-| Situazione rilevata | Comportamento di BUO |
-|:---|:---|
-| Unlock 8 core **senza** fix ACPI (SSDT-CST/PST) | ⛔ **BLOCCATO** (fail-closed): l'unlock CPU non parte; istruzioni per e-tho/bc250-acpi-fix. In `--interactive` puoi confermare il rischio |
-| 8 core + 40 CU con PSU < 350W | ⚠️ Avviso budget di potenza (picco FurMark 250-320W); consigliati undervolt + cap GPU 1500 MHz |
-| 40 CU attive via runtime UMR (ostree) | 💾 Avviso: restano **volatili** al reboot; in `--interactive` BUO chiede se persisterle (install-service + write-service-table) |
-| Toolchain 40-CU mancante (`umr`, live-manager) | 📥 **Auto-install** dal package manager (rpm-ostree/dnf) + avviso se serve reboot |
-| Governor GPU non attivo | 📥 **Auto-install** (COPR/AUR) + config di default sicura; altrimenti problema `governor_missing` nel pre-audit |
+Il gruppo `buo oc` gestisce la ricerca di overclock per-silicio: stato del
+motore, profili, applicazione sicura con smoke test e rollback automatico.
 
-Tutti gli avvisi compaiono nel log di esecuzione e nel report finale.
+```bash
+sudo buo oc status               # stato del motore e della macchina
+buo oc profiles list             # profili Stock / Certificato / Custom
+sudo buo oc apply <profilo>      # applica (volatile di default)
+sudo buo oc restore-stock        # torna al profilo stock
+buo oc-tui                       # cockpit OC interattiva (textual)
+```
 
----
+Altri comandi: `buo oc run`, `oc stop`, `oc reset`, `oc watch`,
+`oc profiles add|rm`, `oc heal`. Il motore di ricerca vero e proprio
+(`oc3600.sh`) non è distribuito nel repository: `buo oc` opera sulla
+directory `/var/lib/buo/oc` di macchine dove il motore è installato. I
+comandi di profilo/apply/heal funzionano anche senza motore.
 
-## ⚙️ Configurazione
+### Strumenti opzionali (dati/ML)
 
-File: `/etc/buo/buo.yaml` (esempio in `config/buo.yaml`)
+```bash
+buo data-collect          # raccoglie campioni (es. per la stima VRAM)
+buo data-upload           # invia i dati raccolti (opzionale, richiede requests)
+buo ml-train              # addestra il modello ML di stima (opzionale)
+```
+
+## Configurazione
+
+File: `/etc/buo/buo.yaml` (esempio nel repository: `config/buo.yaml`).
 
 ```yaml
 hardware:
-  psu_wattage: 350        # W — il tuo alimentatore
-  cooling_type: "push-pull"
+  psu_wattage: 350        # W — alimentatore dichiarato
 
 safety:
   cpu_temp_max: 90        # °C — soglie consigliate
+  gpu_temp_max: 85        # °C
+  gpu_freq_max: 2200      # MHz
   power_budget: 300       # W
 
 deps:
-  auto_install: true            # scarica/installa i tool mancanti da solo
-  auto_install_governor: true   # il governor viene installato da solo (COPR/AUR)
-
-phases:
-  fix:
-    tlb: true             # patch TLB fault
-    ace: true             # fix compute queue
-    iommu: true           # verifica IOMMU attivo (no-op: MAI iommu=off)
-    acpi: true            # SSDT C-State
-    gtt: true             # ttm.pages_limit
+  auto_install: true      # BUO installa da solo i tool mancanti
 ```
 
-> ⚠️ Gli **hard limits** (VID ≤ 1325 mV, GPU ≤ 1100 mV, ecc.) sono
-> codificati in `buo/constants.py` e **non** possono essere modificati
-> dalla configurazione: la sicurezza non è negoziabile.
+Nota: le chiavi sotto `safety` sono **piatte** (niente sottosezioni come
+`safety.cpu.*`); chiavi sconosciute generano un avviso, mai un silenzio.
 
----
+Gli **hard limits** (VID ≤ 1325 mV, tensione GPU ≤ 1100 mV, ecc.) sono
+codificati in `buo/constants.py` e **non** possono essere modificati dalla
+configurazione: la sicurezza non è negoziabile.
 
-## 🛡️ Sicurezza
-
-### Sequenza garantita: **ANALIZZA → TESTA → MODIFICA**
-
-BUO non modifica nulla prima di aver analizzato e testato:
-
-| Fase | Cosa fa | Modifica? |
-|:---|:---|:---|
-| **init** | Verifica di sanità: kernel ≥ 6.11, Mesa ≥ 25.1, temperature — altrimenti **BLOCCO** | ❌ No |
-| **pre_audit** | Scopre l'hardware, rileva i problemi noti, **benchmark BEFORE** | ❌ No |
-| **unlock** | Sblocchi con test di stabilità per ogni passo (core, CU health test per-WGP) | ⚠️ Reversibili (rollback) |
-| **fix** | Fix di sistema, ognuno con verifica applicata/rollback | ⚠️ Reversibili (rollback) |
-| **optimize** | Undervolt: **test di stabilità reale** su ogni tensione proposta | ⚠️ Test + valori provvisori |
-| **apply** | Solo DOPO i test: rende persistente la configurazione trovata | ✅ Sì, la modifica finale |
-| **validate** | Stress test + verifica di ogni fix + benchmark AFTER + report | ❌ Solo lettura |
-
-**Principio fail-closed:** se BUO non può eseguire un test di stabilità
-reale (es. `bc250-detect` non installato), si **RIFIUTA di procedere**
-invece di applicare valori non verificati. In `--dry-run` nessun modulo
-tocca l'hardware: tutto è simulato, nulla viene scritto.
-
-BUO implementa inoltre **6 livelli di protezione**:
-
-| Livello | Descrizione |
-|:---|:---|
-| **1. Hard Limits** | Codificati nel codice, immutabili: VID < 1325mV, GPU < 1100mV |
-| **2. Safety Monitor** | Thread separato, sampling 0.5s, ABORT + rollback su violazione |
-| **3. Checkpoint** | Stato salvato prima di ogni modifica — ripresa dopo reboot |
-| **4. Rollback a Cascata** | 12 livelli, dall'ultima modifica alla più vecchia |
-| **5. Dry-Run / Interactive** | Simulazione completa o conferma per ogni passo |
-| **6. Backup Automatico** | Ogni file modificato viene salvato prima dell'intervento |
+## Test
 
 ```bash
-# Test di sicurezza (senza modifiche)
-buo safety-test
-
-# Modalità recovery dopo un problema
-sudo buo recover
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
----
+La suite (oltre 590 test) usa hardware simulato: **non serve una BC-250**
+per eseguirla. Alcuni test verificano l'interazione con i tool di sistema
+(git, systemd, tar) e in ambienti particolari possono risultare
+"ambientali": se un test fallisce, verifica prima che non sia dovuto
+all'ambiente prima di aprirne uno nuovo. Con le dipendenze opzionali
+installate (`pip install -e '.[tui,ml]'`) la copertura è completa.
 
-## 📁 Struttura del Progetto
+## Sicurezza
 
-```
-buo/
-├── __init__.py            # Versione ed export
-├── __main__.py            # python -m buo
-├── cli.py                 # CLI (click + rich)
-├── orchestrator.py        # Macchina a stati (unleash)
-├── config.py              # Configurazione YAML
-├── constants.py           # Hard limits immutabili
-├── exceptions.py          # Eccezioni personalizzate
-│
-├── audit/                 # FASE 0 — pre-audit (hardware, problemi)
-├── unlock/                # FASE 1 — sblocchi (CPU, GPU, health, mask + wrapper)
-├── fix/                   # FASE 1b — fix (TLB, ACE, IOMMU, ACPI, VRAM, GTT, fan)
-├── optimize/              # FASE 2 — undervolt/overclock + governor
-├── validate/              # FASE 3 — stress test, verifica fix
-├── safety/                # Safety monitor + limiti
-├── state/                 # Checkpoint, rollback, recovery, reboot
-├── benchmark/             # Benchmark standard (furmark, stress-ng, vkmark)
-├── report/                # Report Markdown/JSON
-├── models/                # Stima VRAM (empirica + ML opzionale)
-└── utils/                 # Logging, shell, mock, distro, paths
-```
+- **Hard limits immutabili** nel codice (VID CPU ≤ 1325 mV, GPU ≤ 1100 mV):
+  nessuna configurazione può superarli.
+- **Fail-closed**: nessuna modifica senza test di stabilità reale; in
+  `--dry-run` nessun modulo tocca l'hardware.
+- **Safety monitor** in thread separato durante i run: temperatura e
+  potenza controllate, abort + rollback su violazione.
+- **Checkpoint e rollback a cascata**: lo stato è salvato prima di ogni
+  modifica; ogni fix è reversibile.
+- **Supply chain**: i tool della community sono pinnati a commit esatti e
+  verificati (rev-parse + albero pulito + hash); il bundle offline è
+  controllato con check fail-closed.
+- Le letture che usano il mailbox SMU sono automaticamente disabilitate
+  quando il governor SMU è attivo (accesso concorrente vietato).
 
----
+Per segnalare una vulnerabilità: [SECURITY.md](SECURITY.md).
 
-## 📚 Documentazione
+## Avvertenze
 
-- **[Setup su hardware reale](docs/HARDWARE_SETUP.md)** — guida passo-passo per Bazzite + BIOS mod
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — guida per contribuire
+- BUO esegue **overclock e undervolt reali**: comportano rischi di
+  instabilità, temperature elevate e usura. Il progetto riduce i rischi con
+  limiti immutabili, test e rollback, ma **non può eliminarli**: usalo a
+  tuo rischio.
+- I risultati dipendono dal singolo silicio: non promettiamo numeri, e
+  diffida di chi ne promette.
+- BUO è uno strumento per appassionati, sviluppato come progetto personale
+  di una community: **nessuna garanzia**, nessun supporto commerciale.
+- La scheda BC-250 è una scheda da mining riadattata: il supporto
+  ufficiale ASRock per questo uso non esiste.
 
----
-
-## 🙏 Ringraziamenti
-
-Grazie alla comunità BC-250 per il lavoro incredibile:
-
-- **duggasco** — 40-CU unlock e health test
-- **filippor** — cyan-skillfish-governor-smu
-- **DryhoppedIPA** — bc250-gfx1013-fix (compute queue)
-- **bc250-collective** — tool di overclock e ACPI fix
-- **Forbidden-Darkness** — UEFI firmware menu
-- **RescueMei** — DXE core unlock
-- **MastaG** — kernel CachyOS
-- **elektricM** — documentazione community
-- **Tutta la community** — test, dati, feedback
-
----
-
-## 📄 Licenza
+## Licenza
 
 Doppia licenza:
 
-- **Codice** (`buo/`): [GNU General Public License v3.0](LICENSE)
-- **Documentazione e asset**: [Creative Commons Attribution-ShareAlike 4.0](LICENSE-docs)
+- **Codice**: [GNU General Public License v3.0](LICENSE)
+- **Documentazione**: [Creative Commons Attribution-ShareAlike 4.0](LICENSE-docs)
 
----
+## Contribuire
 
-<div align="center">
+Ogni contributo è benvenuto: bug report, test, documentazione, nuove
+verifiche sul campo. Leggi [CONTRIBUTING.md](CONTRIBUTING.md) prima di
+aprire una issue o una pull request (in particolare: i test si eseguono con
+`unittest`, i valori hardware non si inventano mai e gli hard limits non si
+toccano).
 
-**⭐ Se ti piace il progetto, metti una stella su GitHub!**
+## Documentazione
 
-</div>
+- [docs/INSTALL.md](docs/INSTALL.md) — installazione completa (incl. Bazzite/ostree e offline)
+- [docs/USER_GUIDE.md](docs/USER_GUIDE.md) — guida all'uso
+- [docs/HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md) — setup su hardware reale
+- [docs/FAQ.md](docs/FAQ.md) — domande frequenti
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — architettura interna
+- [CHANGELOG.md](CHANGELOG.md) — cronologia delle versioni
+
+## Ringraziamenti
+
+Grazie alla community BC-250, che ha fatto il lavoro di base su questa
+scheda:
+
+- **elektricM/amd-bc250-docs** — documentazione e reverse engineering
+- **bc250-collective** — `bc250_smu_oc` e fix ACPI
+- **duggasco** — unlock GPU 40-CU e health test
+- **WinnieLV** — `bc250-cu-live-manager`
+- **fanoush** — `bc250_memcfg`
+- il governor **cyan-skillfish** (e chi lo mantiene nei pacchetti distro)
+
+Senza il loro lavoro questo progetto non esisterebbe.

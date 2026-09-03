@@ -70,7 +70,7 @@ def oc_group() -> None:
     Opera ESCLUSIVAMENTE su OC_DIR (/var/lib/buo/oc) — stato del MOTORE,
     NON il checkpoint dell'orchestratore. Coesiste con la fase legacy
     `buo overclock` (invariata). Sicurezza: mai SMU con governor attivo;
-    anti-zona 3725+/VID<1000; apply volatile di default (--persist opt-in).
+    anti-zona 3725+/VID<1050; apply volatile di default (--persist opt-in).
     """
 
 

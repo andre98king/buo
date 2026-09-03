@@ -37,4 +37,5 @@ Reale: …
 
 ## Note
 
-Hai già consultato `docs/RECOVERY.md`? (sì/no)
+Hai già consultato [docs/FAQ.md](../../docs/FAQ.md) e provato
+`sudo buo rollback` / `sudo buo recover`? (sì/no)
