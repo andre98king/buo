@@ -39,7 +39,7 @@ class TestLazyImport(unittest.TestCase):
         code = (
             "import sys; sys.path.insert(0, '.')\n"
             "import buo\n"
-            "assert buo.__version__ == '1.3.0'\n"
+            "assert buo.__version__ == '1.4.0'\n"
             "assert callable(buo.Orchestrator)\n"
             "assert callable(buo.cli)\n"
             "from buo import cli\n"

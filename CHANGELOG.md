@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.4.0 (2026-09-03)
+
+- Revamp output CLI (P0+P1): emoji di prefisso via dal log/console (marcatori preservati), riepilogo finale di run, errori rassicuranti, `buo status` a parole, report/doctor/profiles/sweep allineati.
+- Politica termica a due livelli: HARD real-time CPU 95/GPU 105 vs target operativo applicato (SMU 90, governor 85/75) — il sintetico non boccia più config sicure in game.
+- Revamp cockpit TUI (P0+P1): Worker asincrono apply (UI mai congelata), scroll 80x24, conferme, onestà dati, emoji via.
+- Watch-log: la konsole si riapre da sola dopo il reboot di una run (autostart KDE).
+- Default portabili: cpu_target_vid auto, cpu_search_freq 3500, stress 10, health_test smart.
+- Abort terminale: unleash sempre fresh; rollback ripristina la CPU stock.
+
 ## v1.3.0 (2026-09-03)
 
 ### Aggiunto
