@@ -9,10 +9,16 @@ hardware:
 
 safety:
   cpu_vid_recommended_max: 1300   # mV (hard limit immutabile: 1325)
-  cpu_temp_max: 90                # °C
+  # Politica termica a due livelli (03/09): cpu_temp_max/gpu_temp_max
+  # sono i limiti HARD dell'abort real-time (SafetyMonitor/stress).
+  # Il TARGET OPERATIVO applicato resta nel governor (throttle 85/75)
+  # e nel max_temperature del conf SMU (90) — NON è un criterio di
+  # validazione/sweep: una config che in stress sintetico fa 86-92 °C
+  # (in game ~71-75 °C) NON viene più bocciata.
+  cpu_temp_max: 95                # °C — HARD abort real-time
   cpu_freq_max: 4000              # MHz
   gpu_voltage_recommended_max: 1050  # mV (hard limit immutabile: 1100)
-  gpu_temp_max: 85                # °C
+  gpu_temp_max: 105               # °C — HARD abort real-time
   gpu_freq_max: 2200              # MHz
   power_budget: 300               # W (margine per PSU 350W)
 

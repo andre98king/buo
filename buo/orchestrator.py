@@ -1159,8 +1159,9 @@ class Orchestrator(LoggerMixin):
             "test_seconds": self.config.undervolt_gpu_sweep_test_seconds,
             "confirm_seconds": self.config.undervolt_gpu_sweep_confirm_seconds,
             "max_minutes": self.config.undervolt_gpu_sweep_max_minutes,
-            "temp_gate": self.config.undervolt_gpu_sweep_temp_gate,
         }
+        # N.B. nessun "temp_gate": il gate termico dei probe È l'HARD
+        # (politica a due livelli 03/09, LIMITS.gpu.temp_max in gpu.py).
 
     def _read_stock_vid(self) -> Optional[int]:
         """Misura del VID stock (mV) per cpu_target_vid=auto.
@@ -1384,7 +1385,13 @@ class Orchestrator(LoggerMixin):
             with _os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(
                     f"[overclock]\nfrequency = {f}\n"
-                    f"scale = {s}\nmax_temperature = {LIMITS.cpu.temp_max}\n",
+                    # Politica a due livelli (03/09): il max_temperature
+                    # del conf SMU è il TARGET OPERATIVO applicato
+                    # (temp_apply, sotto l'HARD di abort temp_max): lo
+                    # SMU throttla al livello 2, BUO aborta solo se il
+                    # livello 1 (HARD) viene superato.
+                    f"scale = {s}\n"
+                    f"max_temperature = {LIMITS.cpu.temp_apply}\n",
                 )
             w = BC250ApplyWrapper()
             if not w.available:

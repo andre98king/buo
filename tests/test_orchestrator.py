@@ -124,6 +124,29 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(r["applied"])
         self.assertTrue(r["mock"])
 
+    def test_apply_cpu_config_conf_keeps_operating_max_temperature(self):
+        """Politica termica a due livelli (03/09): il max_temperature del
+        conf SMU è il TARGET OPERATIVO applicato (LIMITS.cpu.temp_apply),
+        NON segue l'HARD di abort (LIMITS.cpu.temp_max): la soglia
+        applicata resta sotto l'abort così il run non viene bocciato dal
+        carico sintetico."""
+        from unittest import mock
+        from buo.constants import LIMITS
+        cfg = BUOConfig()
+        orch = Orchestrator(config=cfg, mock=False, dry_run=False)
+        w = mock.Mock()
+        w.available = True
+        w.apply.return_value = {"returncode": 0, "stderr": ""}
+        with mock.patch("buo.unlock.wrappers.bc250_overclock."
+                        "BC250ApplyWrapper", return_value=w):
+            out = orch._apply_cpu_config(3500, scale=0)
+        self.assertTrue(out["applied"])
+        conf_path = w.apply.call_args.args[0]
+        with open(conf_path, encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn(f"max_temperature = {LIMITS.cpu.temp_apply}", content)
+        self.assertLess(LIMITS.cpu.temp_apply, LIMITS.cpu.temp_max)
+
     def test_apply_cpu_config_clamps_frequency(self):
         """La frequenza è clampata ai limiti immutabili (mai oltre)."""
         orch = self._make(dry_run=True)

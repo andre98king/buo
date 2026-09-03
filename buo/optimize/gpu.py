@@ -248,8 +248,10 @@ class GPUUndervoltOptimizer(LoggerMixin):
                 return self._community_result(start_freq, max_voltage)
             backup = self._read_config_bytes()
 
-        # stato per i probe (temp gate, budget, backup da ripristinare)
-        self._probe_temp_gate = sweep["temp_gate"]
+        # stato per i probe (budget, backup da ripristinare). Il gate
+        # termico dei probe È l'HARD (politica a due livelli 03/09):
+        # LIMITS.gpu.temp_max letto in _interpret_probe — il target
+        # operativo (throttle/curva) non è un criterio dello sweep.
         self._probe_power_budget = power_budget
         self._probe_backup = backup
 
@@ -463,7 +465,7 @@ class GPUUndervoltOptimizer(LoggerMixin):
                 return ProbeResult(False, str(e))
             after_dmesg = self._read_dmesg()
             fault = self._dmesg_fault_detected(before_dmesg, after_dmesg)
-            result = self._interpret_probe(rc, gpu_t, self._probe_temp_gate,
+            result = self._interpret_probe(rc, gpu_t, LIMITS.gpu.temp_max,
                                            fault, pw)
             # FLOOR SMU: confronto SOTTO CARICO. Se l'SMU non segue il
             # target (reale >= target + soglia), il punto NON è
@@ -491,9 +493,10 @@ class GPUUndervoltOptimizer(LoggerMixin):
     def _interpret_probe(rc: int, gpu_t: Optional[float], temp_gate: int,
                          dmesg_fault: bool = False,
                          power_max: Optional[float] = None) -> ProbeResult:
-        """Stabilità di un probe: rc==0, GPU sotto il gate, nessun fault
-        dmesg. Sensore non leggibile (None) → criterio saltato (C1, mai
-        valori fittizi)."""
+        """Stabilità di un probe: rc==0, GPU sotto il gate HARD, nessun
+        fault dmesg. Il gate è l'HARD (LIMITS.gpu.temp_max, politica
+        03/09): il target operativo NON boccia i candidati. Sensore non
+        leggibile (None) → criterio saltato (C1, mai valori fittizi)."""
         stable = rc == 0
         reason = None
         if stable and gpu_t is not None and gpu_t >= temp_gate:

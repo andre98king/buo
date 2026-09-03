@@ -17,6 +17,7 @@ import unittest.mock as mock
 from pathlib import Path
 
 from buo.config import BUOConfig
+from buo.constants import LIMITS
 from buo.exceptions import SafetyViolation
 from buo.optimize.gpu import GPUUndervoltOptimizer, ProbeResult
 
@@ -112,15 +113,16 @@ class FakeStress:
     """Fake di StressTest per il ciclo di vita REALE del probe
     (probe=None → self._probe): _run_loaded sempre stabile (rc=0)."""
 
-    def __init__(self, rc=0):
+    def __init__(self, rc=0, gpu_temp=40.0):
         self.rc = rc
+        self.gpu_temp = gpu_temp
         self.runs = []   # [(cmd, seconds)]
 
     def _run_loaded(self, cmd, seconds, reader, budget, on_tick=None):
         if on_tick is not None:
             on_tick()   # un campione sotto carico (fake deterministico)
         self.runs.append((list(cmd), seconds))
-        return (self.rc, 40.0, 40.0, 85.0)
+        return (self.rc, 40.0, self.gpu_temp, 85.0)
 
 
 class _SweepBase(unittest.TestCase):
@@ -155,6 +157,9 @@ class _SweepBase(unittest.TestCase):
         )
 
     def sweep(self, **overrides):
+        # temp_gate NON esiste più come opzione (politica 03/09): il
+        # gate termico dei probe È l'HARD LIMITS.gpu.temp_max, letto
+        # direttamente in _interpret_probe — non un parametro dello sweep.
         params = {
             "enabled": True,
             "freqs": [1500],
@@ -164,7 +169,6 @@ class _SweepBase(unittest.TestCase):
             "test_seconds": 30,
             "confirm_seconds": 60,
             "max_minutes": 15,
-            "temp_gate": 85,
         }
         params.update(overrides)
         return params
@@ -270,21 +274,34 @@ class TestSweepAlgorithm(_SweepBase):
 
 
 class TestTempGate(unittest.TestCase):
-    """#6: gate termico per-punto (interpretazione del probe)."""
+    """#6: gate termico per-punto = HARD (politica 03/09: il gate dei
+    probe È LIMITS.gpu.temp_max, NON il target operativo 85)."""
 
     def test_should_fail_when_gpu_temp_above_gate(self):
-        r = GPUUndervoltOptimizer._interpret_probe(0, 88.0, 85)
+        r = GPUUndervoltOptimizer._interpret_probe(
+            0, LIMITS.gpu.temp_max + 1, LIMITS.gpu.temp_max)
         self.assertFalse(r.stable)
-        self.assertIn("85", r.reason)
+        self.assertIn(str(LIMITS.gpu.temp_max), r.reason)
 
     def test_should_pass_when_gpu_temp_below_gate(self):
-        r = GPUUndervoltOptimizer._interpret_probe(0, 80.0, 85)
+        r = GPUUndervoltOptimizer._interpret_probe(
+            0, LIMITS.gpu.temp_max - 5, LIMITS.gpu.temp_max)
         self.assertTrue(r.stable)
         self.assertEqual(r.reason, "ok")
 
     def test_should_fail_on_nonzero_rc(self):
-        r = GPUUndervoltOptimizer._interpret_probe(1, 40.0, 85)
+        r = GPUUndervoltOptimizer._interpret_probe(
+            1, 40.0, LIMITS.gpu.temp_max)
         self.assertFalse(r.stable)
+
+    def test_88c_synthetic_is_stable_above_old_gate(self):
+        """88°C sintetici (sopra il vecchio gate 85, sotto l'HARD 105)
+        NON bocciano il candidato: il delta sintetico-vs-reale è gestito
+        dal target operativo, non dal criterio dello sweep."""
+        r = GPUUndervoltOptimizer._interpret_probe(
+            0, 88.0, LIMITS.gpu.temp_max)
+        self.assertTrue(r.stable)
+        self.assertEqual(r.reason, "ok")
 
 
 class TestSafetyAndContract(_SweepBase):
@@ -333,8 +350,40 @@ class TestSafetyAndContract(_SweepBase):
                  "power_max", "reason"})
 
 
+class TestProbeGateIsHardLimit(_SweepBase):
+    """Politica termica a due livelli (03/09): il gate termico dei probe
+    dello sweep È l'HARD (LIMITS.gpu.temp_max), NON il target operativo
+    85 — un candidato che sotto FurMark tocca 100 °C (sopra il vecchio
+    gate, sotto l'HARD) è STABILE e può vincere (prima → fallback
+    community). Sopra l'HARD il candidato resta bocciato."""
+
+    def setUp(self):
+        super().setUp()
+        # il probe reale fa un settle di 2s per candidato: silenzia il
+        # sonno nei test (nessuna dipendenza dal timing reale)
+        self._sleep_patch = mock.patch("buo.optimize.gpu.time.sleep")
+        self._sleep_patch.start()
+        self.addCleanup(self._sleep_patch.stop)
+
+    def test_candidate_peaking_100c_is_accepted(self):
+        stress = FakeStress(gpu_temp=100.0)
+        opt = self.make_opt(probe=None, stress=stress, reader=object())
+        with mock.patch.object(opt, "_read_dmesg", return_value=[]):
+            res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "per-silicon")
+        self.assertEqual(res["safe_points"], [{"freq": 1500, "voltage": 800}])
+
+    def test_candidate_peaking_above_hard_is_rejected(self):
+        stress = FakeStress(gpu_temp=LIMITS.gpu.temp_max + 1)
+        opt = self.make_opt(probe=None, stress=stress, reader=object())
+        with mock.patch.object(opt, "_read_dmesg", return_value=[]):
+            res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "community_defaults")
+
+
 class TestConfigOptions(unittest.TestCase):
-    """#9: default e clamp delle 9 opzioni gpu_sweep_*."""
+    """#9: default e clamp delle 8 opzioni gpu_sweep_* (gpu_sweep_temp_gate
+    RIMOSSA con la politica 03/09: il gate dei probe È l'HARD)."""
 
     def test_defaults(self):
         cfg = BUOConfig()
@@ -349,7 +398,8 @@ class TestConfigOptions(unittest.TestCase):
         self.assertEqual(cfg.undervolt_gpu_sweep_test_seconds, 30)
         self.assertEqual(cfg.undervolt_gpu_sweep_confirm_seconds, 60)
         self.assertEqual(cfg.undervolt_gpu_sweep_max_minutes, 15)
-        self.assertEqual(cfg.undervolt_gpu_sweep_temp_gate, 85)
+        # gpu_sweep_temp_gate rimosso (politica 03/09)
+        self.assertFalse(hasattr(cfg, "undervolt_gpu_sweep_temp_gate"))
 
     def test_clamps(self):
         cfg = BUOConfig({"phases": {"undervolt": {
@@ -359,7 +409,6 @@ class TestConfigOptions(unittest.TestCase):
             "gpu_sweep_test_seconds": 5,
             "gpu_sweep_confirm_seconds": 5,
             "gpu_sweep_max_minutes": 0,
-            "gpu_sweep_temp_gate": 200,
         }}})
         self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 700)   # MAI sotto 700
         self.assertEqual(cfg.undervolt_gpu_sweep_step_mv, 50)
@@ -367,10 +416,19 @@ class TestConfigOptions(unittest.TestCase):
         self.assertEqual(cfg.undervolt_gpu_sweep_test_seconds, 15)
         self.assertEqual(cfg.undervolt_gpu_sweep_confirm_seconds, 15)
         self.assertEqual(cfg.undervolt_gpu_sweep_max_minutes, 1)
-        self.assertEqual(cfg.undervolt_gpu_sweep_temp_gate, 85)   # ≤ temp_max
         # floor oltre l'hard limit assoluto → clampato a 1100
         cfg = BUOConfig({"phases": {"undervolt": {"gpu_sweep_floor_mv": 1500}}})
         self.assertEqual(cfg.undervolt_gpu_sweep_floor_mv, 1100)
+
+    def test_removed_temp_gate_key_warns_not_silent(self):
+        """Un vecchio buo.yaml con gpu_sweep_temp_gate → avviso fail-soft
+        'chiave IGNORATA' (schema piatto), MAI silenzio né applicazione
+        (il gate dei probe È l'HARD, non configurabile)."""
+        with self.assertLogs("buo.config", level="WARNING") as cm:
+            BUOConfig({"phases": {"undervolt": {
+                "gpu_sweep_temp_gate": 85}}})
+        self.assertTrue(
+            any("gpu_sweep_temp_gate" in msg for msg in cm.output))
 
     def test_floor_override_750(self):
         """Override del floor a 750 → applicato (clamp finale a 750,
@@ -420,8 +478,10 @@ class TestConfigOptions(unittest.TestCase):
         for key in ("gpu_sweep_enabled", "gpu_sweep_freqs", "gpu_sweep_step_mv",
                     "gpu_sweep_floor_mv", "gpu_sweep_max_steps",
                     "gpu_sweep_test_seconds", "gpu_sweep_confirm_seconds",
-                    "gpu_sweep_max_minutes", "gpu_sweep_temp_gate"):
+                    "gpu_sweep_max_minutes"):
             self.assertIn(key, d)
+        # gpu_sweep_temp_gate rimosso (politica 03/09): non serializzato
+        self.assertNotIn("gpu_sweep_temp_gate", d)
 
 
 class TestPrereqsAndFallbacks(_SweepBase):

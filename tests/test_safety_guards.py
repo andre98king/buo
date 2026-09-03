@@ -49,8 +49,8 @@ class TestHardLimitClamp(unittest.TestCase):
                     "power_budget": 10000},
             vram_estimation=False,
         )
-        self.assertEqual(m.limits.cpu_temp_max, LIMITS.cpu.temp_max)       # 90
-        self.assertEqual(m.limits.gpu_temp_max, LIMITS.gpu.temp_max)       # 85
+        self.assertEqual(m.limits.cpu_temp_max, LIMITS.cpu.temp_max)       # 95
+        self.assertEqual(m.limits.gpu_temp_max, LIMITS.gpu.temp_max)       # 105
         self.assertEqual(m.limits.power_budget, LIMITS.power.power_budget)  # 300
 
     def test_custom_limits_below_hard_limit_are_kept(self):

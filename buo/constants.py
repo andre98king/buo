@@ -33,7 +33,10 @@ class CPULimits:
     vid_min: int = 800                # mV — minimo sicuro per binary search
     freq_max: int = 4000              # MHz — OC max documentato
     freq_min: int = 3500              # MHz — stock
-    temp_max: int = 90                # °C — safety gate
+    temp_max: int = 95                # °C — HARD abort real-time (livello 1,
+                                      #      mai superato, sotto i limiti AMD)
+    temp_apply: int = 90              # °C — target OPERATIVO applicato (livello
+                                      #      2: max_temperature del conf SMU)
     temp_critical: int = 100          # °C — throttle hardware
 
 
@@ -45,8 +48,9 @@ class GPULimits:
     voltage_min: int = 700            # mV — minimo sicuro per binary search
     freq_max: int = 2200              # MHz — instabile per molti chip
     freq_min: int = 500               # MHz
-    temp_max: int = 85                # °C — safety gate
-    temp_critical: int = 100          # °C
+    temp_max: int = 105               # °C — HARD abort real-time (livello 1,
+                                      #      mai superato; sotto l'edge AMD 110)
+    temp_critical: int = 100          # °C — base del gate pre-operativo preflight
 
 
 @dataclass(frozen=True)

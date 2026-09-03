@@ -243,5 +243,91 @@ class TestStressScopeConfig(unittest.TestCase):
                          f"avvisi inattesi: {records}")
 
 
+class TestTwoLevelThermalPolicy(unittest.TestCase):
+    """Politica termica a due livelli (approvata 03/09): la validate
+    PASSA se durante lo stress NON scatta l'HARD (CPU 95 / GPU 105);
+    il vecchio gate operativo (CPU 90 / GPU 85) non è più un criterio
+    di bocciatura. L'HARD resta fail-closed (abort sopra 95/105)."""
+
+    class _WarmReader:
+        """Picco SINTETICO sopra il vecchio gate (90/85) ma sotto l'HARD
+        (95/105): prima della politica veniva bocciato ingiustamente
+        (dato campo: gaming ~75°C vs FurMark ~91°C, delta ~16°C)."""
+
+        def get_cpu_temp(self):
+            return 93.0
+
+        def get_gpu_temp(self):
+            return 92.0
+
+        def get_total_power(self):
+            return 85.0
+
+    def _spawn_spy(self):
+        """Patch which/Popen come TestStressScope: spawna processi innocui."""
+        import unittest.mock as mock
+        real_popen = subprocess.Popen
+
+        def _fake_popen(cmd, **kwargs):
+            return real_popen(["sleep", "0.2"])
+
+        patches = [
+            mock.patch("buo.validate.stress.which",
+                       side_effect=lambda name: f"/usr/bin/{name}"),
+            mock.patch("buo.validate.stress.subprocess.Popen",
+                       side_effect=_fake_popen),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(patches[0].stop)
+        self.addCleanup(patches[1].stop)
+
+    def test_validate_passes_above_old_gate_below_hard(self):
+        """GPU 92 / CPU 93 (sopra il vecchio gate 85/90, sotto l'HARD
+        105/95): la run di validazione PASSA."""
+        self._spawn_spy()
+        result = StressTest(reader=self._WarmReader()).run(
+            duration_minutes=1, power_budget=300)
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["cpu_temp_max"], 93.0)
+        self.assertEqual(result["gpu_temp_max"], 92.0)
+
+    def test_no_abort_just_below_hard(self):
+        """Bordo appena sotto l'HARD (CPU 94 / GPU 104): nessun abort."""
+        class _EdgeReader(self._WarmReader):
+            def get_cpu_temp(self):
+                return 94.0
+
+            def get_gpu_temp(self):
+                return 104.0
+
+        rc, cpu_max, gpu_max, power_max = StressTest(
+            reader=_EdgeReader())._run_loaded(
+            ["sleep", "2"], 2, _EdgeReader(), 300)
+        self.assertEqual(rc, 0)
+        self.assertEqual(cpu_max, 94.0)
+        self.assertEqual(gpu_max, 104.0)
+
+    def test_hard_abort_above_95_cpu(self):
+        """HARD rispettato: CPU a 96°C (> 95) → abort."""
+        class _OverCpuReader(self._WarmReader):
+            def get_cpu_temp(self):
+                return 96.0
+
+        with self.assertRaises(SafetyViolation):
+            StressTest(reader=_OverCpuReader())._run_loaded(
+                ["sleep", "30"], 30, _OverCpuReader(), 300)
+
+    def test_hard_abort_above_105_gpu(self):
+        """HARD rispettato: GPU a 106°C (> 105) → abort."""
+        class _OverGpuReader(self._WarmReader):
+            def get_gpu_temp(self):
+                return 106.0
+
+        with self.assertRaises(SafetyViolation):
+            StressTest(reader=_OverGpuReader())._run_loaded(
+                ["sleep", "30"], 30, _OverGpuReader(), 300)
+
+
 if __name__ == "__main__":
     unittest.main()

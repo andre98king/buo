@@ -72,6 +72,16 @@ class TestGovernorConfig(unittest.TestCase):
         self.assertEqual(data["temperature"]["throttling"], 88)
         self.assertEqual(data["temperature"]["throttling_recovery"], 78)
 
+    def test_default_thermal_thresholds_are_operating_target(self):
+        """Politica termica a due livelli (03/09): il throttling di
+        default (85/75) È il TARGET OPERATIVO applicato al governor —
+        resta invariato e sotto l'HARD di abort (GPU 105)."""
+        ok = self._write([{"freq": 1500, "voltage": 900}])
+        self.assertTrue(ok)
+        data = _parse_toml(self.cfg.read_text())
+        self.assertEqual(data["temperature"]["throttling"], 85)
+        self.assertEqual(data["temperature"]["throttling_recovery"], 75)
+
     def test_safe_points_above_max_freq_filtered(self):
         """Con max_freq=1500 i punti oltre il cap vanno SCARTATI, non
         scritti: un punto sopra il cap creerebbe interpolazioni fuori

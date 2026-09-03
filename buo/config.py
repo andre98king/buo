@@ -52,15 +52,6 @@ def _sweep_clamp(value, lo: int, hi: int, default: int,
     return v
 
 
-def _sweep_at_most(value, cap: int, default: int, name: str) -> int:
-    v = _sweep_int(value, default, name)
-    if v > cap:
-        logging.getLogger(__name__).warning(
-            "Config: %s=%d > %d → clampato a %d", name, v, cap, cap)
-        return cap
-    return v
-
-
 def _sweep_step(value) -> int:
     """step 10–50 mV, multiplo di 5 (design §6)."""
     v = _sweep_clamp(value, 10, 50, 25, "gpu_sweep_step_mv")
@@ -144,7 +135,7 @@ _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
         "gpu_sweep_enabled", "gpu_sweep_freqs", "gpu_sweep_step_mv",
         "gpu_sweep_floor_mv", "gpu_sweep_max_steps",
         "gpu_sweep_test_seconds", "gpu_sweep_confirm_seconds",
-        "gpu_sweep_max_minutes", "gpu_sweep_temp_gate",
+        "gpu_sweep_max_minutes",
     }),
     "overclock": frozenset({"enable", "power_budget"}),
     "validation": frozenset({"stress_duration", "stress_scope"}),
@@ -330,9 +321,11 @@ class BUOConfig:
         self.undervolt_gpu_sweep_max_minutes: int = _sweep_clamp(
             undervolt.get("gpu_sweep_max_minutes", 15), 1, 60, 15,
             "gpu_sweep_max_minutes")
-        self.undervolt_gpu_sweep_temp_gate: int = _sweep_at_most(
-            undervolt.get("gpu_sweep_temp_gate", 85), LIMITS.gpu.temp_max, 85,
-            "gpu_sweep_temp_gate")
+        # gpu_sweep_temp_gate RIMOSSA (politica termica a due livelli,
+        # 03/09): il gate termico dei probe dello sweep È l'HARD
+        # (LIMITS.gpu.temp_max), non il target operativo — un vecchio
+        # buo.yaml che la contiene riceve l'avviso fail-soft
+        # "chiave IGNORATA" (_warn_unknown), mai silenzio.
 
         overclock = phases.get("overclock", {})
         self.overclock_enable: bool = bool(overclock.get("enable", True))
@@ -463,7 +456,6 @@ class BUOConfig:
                     "gpu_sweep_test_seconds": self.undervolt_gpu_sweep_test_seconds,
                     "gpu_sweep_confirm_seconds": self.undervolt_gpu_sweep_confirm_seconds,
                     "gpu_sweep_max_minutes": self.undervolt_gpu_sweep_max_minutes,
-                    "gpu_sweep_temp_gate": self.undervolt_gpu_sweep_temp_gate,
                 },
                 "overclock": {
                     "enable": self.overclock_enable,

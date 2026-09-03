@@ -44,10 +44,28 @@ class TestSafetyMonitor(unittest.TestCase):
 
     def test_cpu_temp_over_limit_triggers_abort(self):
         hw = MockHardware()
-        hw.state.cpu_temp = 95.0  # oltre 90°C
+        hw.state.cpu_temp = 99.0  # oltre l'HARD 95°C
         violations = []
         self._run_monitor(hw, violations)
         self.assertEqual(len(violations), 1)
+
+    def test_gpu_temp_over_limit_triggers_abort(self):
+        hw = MockHardware()
+        hw.state.gpu_temp = 108.0  # oltre l'HARD 105°C
+        violations = []
+        self._run_monitor(hw, violations)
+        self.assertEqual(len(violations), 1)
+
+    def test_temps_below_hard_do_not_abort(self):
+        """Politica termica a due livelli (03/09): sotto l'HARD (CPU 95 /
+        GPU 105) nessun abort — il vecchio gate operativo (90/85) non è
+        più una soglia del monitor real-time."""
+        hw = MockHardware()
+        hw.state.cpu_temp = 94.0   # sotto l'HARD 95 (sopra il vecchio 90)
+        hw.state.gpu_temp = 104.0  # sotto l'HARD 105 (sopra il vecchio 85)
+        violations = []
+        self._run_monitor(hw, violations)
+        self.assertEqual(violations, [])
 
     def test_power_over_budget_triggers_abort(self):
         hw = MockHardware()
@@ -131,7 +149,7 @@ class TestSafetyMonitor(unittest.TestCase):
 
         class Hot86(self._BlindReader):
             def get_cpu_temp(self):
-                return 86.0     # sotto l'hard 90 ma sopra la config 85
+                return 86.0     # sotto l'hard 95 ma sopra la config 85
 
         violations = []
         monitor = SafetyMonitor(

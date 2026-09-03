@@ -18,8 +18,14 @@ class TestHardLimits(unittest.TestCase):
         self.assertEqual(LIMITS.gpu.voltage_absolute_max, 1100)
 
     def test_temperature_limits(self):
-        self.assertEqual(LIMITS.cpu.temp_max, 90)
-        self.assertEqual(LIMITS.gpu.temp_max, 85)
+        # Politica termica a due livelli (03/09): temp_max = HARD abort
+        # real-time (CPU 95 / GPU 105, sotto i limiti AMD con margine);
+        # il target OPERATIVO applicato (cpu.temp_apply, max_temperature
+        # del conf SMU) resta SOTTO l'HARD (mai un criterio di abort).
+        self.assertEqual(LIMITS.cpu.temp_max, 95)
+        self.assertEqual(LIMITS.gpu.temp_max, 105)
+        self.assertEqual(LIMITS.cpu.temp_apply, 90)
+        self.assertLess(LIMITS.cpu.temp_apply, LIMITS.cpu.temp_max)
 
     def test_power_budget(self):
         self.assertEqual(LIMITS.power.power_budget, 300)
