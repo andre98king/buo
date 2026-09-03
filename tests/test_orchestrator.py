@@ -202,5 +202,153 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(r["governor_config"])
 
 
+class TestAbortTerminal(unittest.TestCase):
+    """Bug sul campo 03/09: gli ABORT (safety/errore) sono TERMINALI.
+
+    Un abort azzera lo stato di run del checkpoint (current_phase → init),
+    così né `buo unleash` né `buo resume` proseguono una run appena
+    fallita (ri-eseguivano la fase abortita → circolare). La run interrotta
+    da REBOOT (il processo muore senza passare dagli handler di abort)
+    NON viene azzerata e resta riprendibile da `buo resume`.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["BUO_STATE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("BUO_STATE_DIR", None)
+        self._tmp.cleanup()
+
+    def _make(self):
+        hw = MockHardware(seed=42)
+        hw.state.is_acpi_fixed = True
+        cfg = BUOConfig()
+        cfg.validation_stress_duration = 0
+        cfg.benchmark_enabled = False
+        return Orchestrator(config=cfg, mock=True, dry_run=False,
+                            mock_hardware=hw)
+
+    def _seed_interrupted_run(self, orch, phase="validate"):
+        """Checkpoint di un run interrotto a metà SENZA abort (es. reboot
+        dopo apply): fasi fino a `phase` completate, corrente = `phase`."""
+        from buo.constants import PHASES
+        for p in PHASES[:PHASES.index(phase)]:
+            orch.checkpoint.set_phase(p, {}, completed=True)
+        orch.checkpoint.set_current_phase(phase)
+
+    def _run_recording_phases(self, orch):
+        """orch.run() registrando le fasi eseguite in ordine."""
+        from unittest import mock
+        seen = []
+        orig = orch._execute_phase
+
+        def spy(phase):
+            seen.append(phase)
+            return orig(phase)
+
+        with mock.patch.object(orch, "_execute_phase", side_effect=spy):
+            rc = orch.run()
+        return rc, seen
+
+    def _abort_at_validate(self, exc, expected_rc):
+        """Run completa (mock) che abortisce a validate."""
+        from unittest import mock
+        orch = self._make()
+        orch.checkpoint.clear()
+        with mock.patch.object(orch, "_phase_validate", side_effect=exc), \
+             mock.patch.object(orch.rollback, "rollback") as rb:
+            rc = orch.run()
+        self.assertEqual(rc, expected_rc)
+        rb.assert_called_once()
+        return orch
+
+    def test_safety_abort_marks_run_terminal(self):
+        """Abort di safety → stato di run azzerato (current_phase init,
+        ledger e contatore reboot vuoti): il run successivo riparte da
+        init, NON dalla fase abortita."""
+        from buo.constants import EXIT_SAFETY_VIOLATION
+        from buo.exceptions import SafetyViolation
+        orch = self._abort_at_validate(SafetyViolation("CPU 90°C"),
+                                       EXIT_SAFETY_VIOLATION)
+        self.assertEqual(orch.checkpoint.get_current_phase(), "init",
+                         "l'abort deve azzerare current_phase")
+        self.assertEqual(orch.checkpoint.get("applied_steps", []), [],
+                         "l'abort deve azzerare il ledger")
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 0,
+                         "l'abort deve azzerare il contatore reboot")
+
+        orch2 = self._make()  # nuovo processo: stesso stato su disco
+        rc, seen = self._run_recording_phases(orch2)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen[0], "init",
+                         "il run post-abort deve partire da init")
+
+    def test_phase_error_marks_run_terminal(self):
+        """Errore di fase → come l'abort di safety: terminale, il run
+        successivo riparte da init."""
+        from buo.constants import EXIT_ERROR
+        orch = self._abort_at_validate(RuntimeError("fix fallito"),
+                                       EXIT_ERROR)
+        self.assertEqual(orch.checkpoint.get_current_phase(), "init")
+        orch2 = self._make()
+        rc, seen = self._run_recording_phases(orch2)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen[0], "init",
+                         "il run post-errore deve partire da init")
+
+    def test_resume_after_abort_does_not_resume_failed_run(self):
+        """`buo resume` (run() senza argomenti) dopo un abort NON riprende
+        la run fallita: lo stato è terminale → parte da init."""
+        from buo.constants import EXIT_SAFETY_VIOLATION
+        from buo.exceptions import SafetyViolation
+        self._abort_at_validate(SafetyViolation("CPU 90°C"),
+                                EXIT_SAFETY_VIOLATION)
+        orch2 = self._make()
+        rc, seen = self._run_recording_phases(orch2)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen[0], "init",
+                         "il resume post-abort deve partire da init")
+
+    def test_resume_after_reboot_interruption_resumes_from_phase(self):
+        """REGRESSIONE da non rompere: una run interrotta da REBOOT
+        (checkpoint con fase intermedia, NESSUN abort) resta riprendibile
+        da `buo resume` dalla fase interrotta — init NON viene rieseguito."""
+        orch = self._make()
+        orch.checkpoint.clear()
+        self._seed_interrupted_run(orch, "validate")
+        rc, seen = self._run_recording_phases(orch)
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen[0], "validate",
+                         "il resume deve ripartire dalla fase interrotta")
+        self.assertNotIn("init", seen)
+
+    def test_abort_restores_applied_cpu_config_to_stock(self):
+        """Bug di sicurezza 03/09: la config CPU applicata allo SMU
+        volatile durante il run (qui: mock optimize applica 3700 +
+        is_overclocked) deve essere RIPRISTINATA a stock dall'abort —
+        la macchina non resta MAI con un OC/UV non validato applicato
+        (il rollback filtra sul ledger: cpu_overclock deve esserci)."""
+        from unittest import mock
+        from buo.constants import EXIT_SAFETY_VIOLATION
+        from buo.exceptions import SafetyViolation
+
+        orch = self._make()
+        orch.checkpoint.clear()
+        # abort di safety a validate: apply/optimize hanno GIÀ applicato
+        # la config CPU (mock: freq 3700, is_overclocked True)
+        with mock.patch.object(orch, "_phase_validate",
+                               side_effect=SafetyViolation("CPU 90°C")):
+            rc = orch.run()
+        self.assertEqual(rc, EXIT_SAFETY_VIOLATION)
+        # rollback (filtrato sul ledger) deve aver incluso cpu_overclock
+        # (config tracciata all'apply) → SMU tornato a stock
+        self.assertEqual(orch.hardware.state.cpu_freq, 3500,
+                         "l'abort deve riportare la CPU a stock (3500)")
+        self.assertFalse(orch.hardware.state.is_overclocked,
+                         "l'abort non deve lasciare un OC non validato "
+                         "applicato allo SMU")
+
+
 if __name__ == "__main__":
     unittest.main()

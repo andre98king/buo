@@ -165,7 +165,12 @@ def unleash(mock: bool, dry_run: bool, interactive: bool, verbose: bool,
     orchestrator = _make_orchestrator(mock, dry_run, interactive, verbose,
                                       config=config,
                                       offline_bundle=offline_bundle)
-    exit_code = orchestrator.run()
+    # Bug 03/09: `buo unleash` = SEMPRE run fresca da init. La ripresa
+    # automatica dopo un reboot è compito di buo-resume.service
+    # (`buo resume`): un checkpoint con fase intermedia (run abortita o
+    # interrotta) NON deve far ripartire unleash dalla fase salvata
+    # (ri-eseguiva la fase appena fallita → circolare).
+    exit_code = orchestrator.run(start_phase="init")
 
     if exit_code == 0:
         from .utils.paths import report_file_md

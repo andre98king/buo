@@ -258,8 +258,10 @@ class Orchestrator(LoggerMixin):
                 len(restore.get("applied_fixes", []) or []),
                 restore.get("created", "data sconosciuta"))
 
-        # Esecuzione parziale (comando fase standalone)?
-        self._partial_run = start_phase is not None
+        # Esecuzione parziale (comando fase standalone)? `unleash` passa
+        # start_phase="init" per partire SEMPRE da init: è un run COMPLETO
+        # da init, non un'esecuzione parziale (messaggio finale di run).
+        self._partial_run = start_phase is not None and start_phase != "init"
         self._stop_after = stop_after
 
         # Il dry-run è pura simulazione: NON tocca lo stato persistente.
@@ -1276,6 +1278,7 @@ class Orchestrator(LoggerMixin):
             self.logger.info("CPU config: [DRY-RUN] simulata")
             return {"applied": True, "dry_run": True, "freq": freq}
         if self.mock:
+            self._mark_step("cpu_overclock")
             return {"applied": True, "mock": True, "freq": freq}
         try:
             from pathlib import Path as _P
@@ -1306,6 +1309,13 @@ class Orchestrator(LoggerMixin):
             if result["returncode"] != 0:
                 return {"applied": False,
                         "error": (result.get("stderr") or "apply fallito")[:200]}
+            # Ledger (bug di sicurezza 03/09): la config CPU è stata
+            # APPLICATA allo SMU volatile — va tracciata come cpu_overclock
+            # (livello di rollback registrato → bc250-apply --uninstall).
+            # Senza, il rollback post-abort (filtrato sul ledger) la
+            # saltava e la macchina restava con un OC/UV non validato
+            # applicato (es. 91°C sostenuti fino al reboot manuale).
+            self._mark_step("cpu_overclock")
             out: Dict[str, Any] = {
                 "applied": True, "freq": f, "scale": s,
                 "method": "bc250-apply (volatile)",
@@ -1532,6 +1542,15 @@ class Orchestrator(LoggerMixin):
             from .state.reboot import RebootManager
             RebootManager().cleanup()
             self._exit_ostree_cleanup()
+            # ABORT TERMINALE (bug 03/09): dopo rollback+cleanup lo stato
+            # di run viene azzerato (stesso pattern del reset init di un
+            # run nuovo) — né `buo unleash` né `buo resume` proseguono la
+            # run appena fallita. La run interrotta da REBOOT (processo
+            # morto, nessun handler) NON passa da qui e resta riprendibile.
+            self.checkpoint.set_current_phase("init")
+            self.checkpoint.set("applied_steps", [])
+            self.checkpoint.set("reboot_count", 0)
+            self.checkpoint.set("unlock_blocked_acpi", False)
         self.results["notes"].append(
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
@@ -1552,6 +1571,12 @@ class Orchestrator(LoggerMixin):
             from .state.reboot import RebootManager
             RebootManager().cleanup()
             self._exit_ostree_cleanup()
+            # ABORT TERMINALE: come per l'abort di sicurezza (vedi
+            # _handle_safety_violation): la run fallita NON è riprendibile.
+            self.checkpoint.set_current_phase("init")
+            self.checkpoint.set("applied_steps", [])
+            self.checkpoint.set("reboot_count", 0)
+            self.checkpoint.set("unlock_blocked_acpi", False)
         self.results["notes"].append(f"Errore in {phase}: {error}")
 
     def _run_can_schedule_reboot(self, current: str) -> bool:

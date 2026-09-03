@@ -225,5 +225,78 @@ class TestHonestReadOnlyCommands(unittest.TestCase):
         self.assertIn("SIMULATO", res.output)
 
 
+class TestUnleashStartsFresh(unittest.TestCase):
+    """Bug sul campo 03/09: `buo unleash` = SEMPRE run fresca da init.
+
+    Un checkpoint con fase intermedia (run interrotta, es. da reboot o
+    abortita) NON viene ripreso da `unleash`: la ripresa dopo reboot è
+    compito di buo-resume.service (`buo resume`), che continua a
+    riprendere dal checkpoint.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["BUO_STATE_DIR"] = self._tmp.name
+        os.environ["BUO_DEPS_DIR"] = self._tmp.name
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        os.environ.pop("BUO_STATE_DIR", None)
+        os.environ.pop("BUO_DEPS_DIR", None)
+        self._tmp.cleanup()
+
+    def _seed_interrupted_run(self, phase):
+        """Checkpoint di una run interrotta dal reboot a `phase` (fasi
+        precedenti completate, nessun abort)."""
+        from buo.constants import PHASES
+        from buo.state.checkpoint import CheckpointManager
+        from buo.utils.paths import state_dir
+        cm = CheckpointManager(state_dir())
+        cm.clear()
+        for p in PHASES[:PHASES.index(phase)]:
+            cm.set_phase(p, {}, completed=True)
+        cm.set_current_phase(phase)
+
+    def _invoke_recording_phases(self, args):
+        """Invoca la CLI registrando le fasi eseguite dall'orchestratore."""
+        from buo.orchestrator import Orchestrator
+        seen = []
+        orig = Orchestrator._execute_phase
+
+        def spy(self, phase):
+            seen.append(phase)
+            return orig(self, phase)
+
+        # Sostituzione con FUNZIONE (non mock): il binding del metodo
+        # resta attivo → spy riceve (self=orchestratore, phase).
+        Orchestrator._execute_phase = spy
+        try:
+            result = self.runner.invoke(cli, args)
+        finally:
+            Orchestrator._execute_phase = orig
+        return result, seen
+
+    def test_unleash_starts_from_init_despite_interrupted_checkpoint(self):
+        """unleash con checkpoint a metà (validate) → la prima fase
+        eseguita è init, NON validate."""
+        self._seed_interrupted_run("validate")
+        result, seen = self._invoke_recording_phases(
+            ["unleash", "--mock"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(seen[0], "init",
+                         "unleash deve partire da init, non dal checkpoint")
+
+    def test_resume_still_resumes_interrupted_checkpoint(self):
+        """REGRESSIONE da non rompere: `buo resume` (buo-resume.service)
+        riprende dal checkpoint con fase intermedia (validate)."""
+        self._seed_interrupted_run("validate")
+        result, seen = self._invoke_recording_phases(
+            ["resume", "--mock"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(seen[0], "validate",
+                         "resume deve riprendere dalla fase interrotta")
+        self.assertNotIn("init", seen)
+
+
 if __name__ == "__main__":
     unittest.main()
