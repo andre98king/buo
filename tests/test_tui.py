@@ -44,6 +44,21 @@ class TestDashboardText(unittest.TestCase):
         text = dashboard_text({"cpu_temp": 45.0, "gpu_temp": 40.0})
         self.assertIn("ok", text)  # stato termico come PAROLA (niente ✅)
 
+    def test_dashboard_critical_at_hard_limit(self):
+        """Politica termica 2 livelli (03/09): CRITICO = HARD real-time
+        (LIMITS: CPU 95 / GPU 105), NON il vecchio gate 90/85."""
+        from buo.constants import LIMITS
+        ok_txt = dashboard_text({"cpu_temp": LIMITS.cpu.temp_max - 1.0,
+                                 "gpu_temp": LIMITS.gpu.temp_max - 1.0})
+        self.assertIn("ok", ok_txt)
+        self.assertNotIn("CRITICO", ok_txt)
+        crit_txt = dashboard_text({"cpu_temp": float(LIMITS.cpu.temp_max),
+                                   "gpu_temp": float(LIMITS.gpu.temp_max)})
+        self.assertIn("CRITICO", crit_txt)
+        # sotto il vecchio gate 90/85 NON deve essere CRITICO (era il bug)
+        mid = dashboard_text({"cpu_temp": 93.0, "gpu_temp": 100.0})
+        self.assertNotIn("CRITICO", mid)
+
     def test_dashboard_missing_shows_dash(self):
         """C1 a schermo: sensori a 0/None → '—', MAI '0 MHz'/'0.0°C'."""
         r = {k: 0 for k in ("cpu_cores", "cpu_freq", "cpu_vid", "cpu_temp",

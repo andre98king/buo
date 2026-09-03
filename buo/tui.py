@@ -32,6 +32,7 @@ messaggio chiaro e la CLI classica (rich) resta pienamente funzionante.
 
 from typing import Any, Dict, Optional
 
+from .constants import LIMITS
 from .utils.logging import get_logger
 
 logger = get_logger("tui")
@@ -165,7 +166,9 @@ def dashboard_text(r: Dict[str, Any], mock: bool = False) -> str:
         c_parts.append(f"{ctemp:.1f}°C")
     c_word = ""
     if ctemp:
-        c_word = "ok" if ctemp < 90 else "CRITICO"
+        # CRITICO = limite HARD real-time (politica a due livelli 03/09):
+        # sotto l'HARD il throttle operativo (SMU 90) gestisce il calore.
+        c_word = "ok" if ctemp < LIMITS.cpu.temp_max else "CRITICO"
     if c_parts:
         cpu1 = " CPU   " + " · ".join(c_parts)
         if c_word:
@@ -195,7 +198,7 @@ def dashboard_text(r: Dict[str, Any], mock: bool = False) -> str:
         g_parts.append(f"{gtemp:.1f}°C")
     g_word = ""
     if gtemp:
-        g_word = "ok" if gtemp < 85 else "CRITICO"
+        g_word = "ok" if gtemp < LIMITS.gpu.temp_max else "CRITICO"
     if g_parts:
         gpu1 = " GPU   " + " · ".join(g_parts)
         if g_word:
