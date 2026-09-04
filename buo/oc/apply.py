@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..constants import SMU_OC_SERVICE
+from ..constants import LIMITS, SMU_OC_SERVICE
 from ..utils.shell import run_command
 from .constants import (
     APPLY_LOG,
@@ -187,16 +187,26 @@ class ApplyManager:
         self._log(details, f"backup: {self.smu_conf} → {dest}")
         return dest
 
-    def _write_conf(self, profile: Profile) -> Path:
+    def _write_conf(self, profile: Profile,
+                    mt_override: Optional[int] = None,
+                    test: bool = False) -> Path:
         """conf [overclock] dal profilo; max_temperature dal silicio se noto
-        (clamp [85,90]), altrimenti 85. In mock/dry-run il file NON viene
+        (clamp [85,90]), altrimenti 85. mt_override (es. HARD per lo smoke
+        di test) bypassa la banda operativa. test=True → nome distinto
+        (apply-<id>.test.conf) così la conf operativa finale non
+        sovrascrive quella di test. In mock/dry-run il file NON viene
         scritto (M2): il path viene comunque restituito per la sequenza
         simulata."""
-        mt = self.silicon.thermal_max_temperature()
-        if mt is None:
-            mt = TEMP_GATE
-        mt = max(TEMP_GATE, min(TEMP_CRITICAL, int(mt)))
-        conf = self.oc_dir / f"apply-{profile.id}.conf"
+        if mt_override is not None:
+            mt = mt_override
+        else:
+            mt = self.silicon.thermal_max_temperature()
+            if mt is None:
+                mt = TEMP_GATE
+            mt = max(TEMP_GATE, min(TEMP_CRITICAL, int(mt)))
+        conf = self.oc_dir / (
+            f"apply-{profile.id}.test.conf" if test
+            else f"apply-{profile.id}.conf")
         if self.mock or self.dry_run:
             logger.info("[MOCK/DRY-RUN] conf %s non scritta", conf.name)
             return conf
@@ -306,10 +316,16 @@ class ApplyManager:
             return ApplyOutcome("aborted", profile.id, False,
                                 "governor non fermato", details)
 
-        # 5. Apply conf (volatile)
-        conf = self._write_conf(profile)
-        rc, _o, err = self._cmd([self.bc250_apply, "--apply", str(conf)],
-                                timeout=90)
+        # 5. Apply conf di TEST con tetto HARD (politica 2 livelli 03/09):
+        #    lo smoke misura la STABILITA' della frequenza, non il throttle
+        #    operativo — con il max_temperature operativo (85-90) l'SMU
+        #    throttla durante lo stress sintetico e la freq oscilla sotto
+        #    la soglia di stretch (falsi rifiuti intermittenti, sul campo).
+        test_conf = self._write_conf(profile,
+                                     mt_override=LIMITS.cpu.temp_max,
+                                     test=True)
+        rc, _o, err = self._cmd(
+            [self.bc250_apply, "--apply", str(test_conf)], timeout=90)
         if rc != 0:
             return self._rollback(profile, backup, details,
                                   f"bc250-apply rc={rc}: {err.strip()}")
@@ -321,6 +337,17 @@ class ApplyManager:
         if not result.ok:
             return self._rollback(profile, backup, details,
                                   f"smoke fail: {result.cause}")
+
+        # 6b. Riapplica la conf OPERATIVA (max_temperature dal silicio,
+        #     banda [85,90]): lo stato finale throttle al livello 2; il
+        #     test appena passato garantisce la stabilità sotto l'HARD.
+        conf = self._write_conf(profile)
+        rc, _o, err = self._cmd(
+            [self.bc250_apply, "--apply", str(conf)], timeout=90)
+        if rc != 0:
+            return self._rollback(profile, backup, details,
+                                  f"bc250-apply (operativa) rc={rc}: "
+                                  f"{err.strip()}")
 
         # 7. Persist opzionale (SOLO --persist + conferma)
         persisted = False
