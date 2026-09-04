@@ -136,18 +136,15 @@ class TestApplySequence(Base):
         mgr.apply(self.stock())
         apply_calls = [c for c in self.rec.calls
                        if Path(c[0]).name == "bc250-apply" and "--apply" in c]
-        # 2 apply: conf di TEST a tetto HARD (smoke) + conf OPERATIVA finale
-        self.assertEqual(len(apply_calls), 2)
+        # 1 apply: conf operativa con max_temperature = temp_apply (90)
+        self.assertEqual(len(apply_calls), 1)
         from buo.constants import LIMITS
-        test_conf = Path(apply_calls[0][-1])
-        self.assertTrue(test_conf.exists())
-        self.assertIn(f"max_temperature = {LIMITS.cpu.temp_max}",
-                      test_conf.read_text(encoding="utf-8"))
-        op_conf = Path(apply_calls[1][-1])
-        content = op_conf.read_text(encoding="utf-8")
+        conf = Path(apply_calls[0][-1])
+        self.assertTrue(conf.exists())
+        content = conf.read_text(encoding="utf-8")
         self.assertIn("frequency = 3500", content)
         self.assertIn("scale = 0", content)
-        self.assertIn("max_temperature = 85", content)
+        self.assertIn(f"max_temperature = {LIMITS.cpu.temp_apply}", content)
 
     def test_success_persist(self):
         mgr = self.mk()
