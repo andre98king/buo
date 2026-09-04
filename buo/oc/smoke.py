@@ -107,6 +107,18 @@ class CpuSmoke:
         self.mock_hw = mock_hardware
         # Simulato = mock O dry-run: nessun subprocess, nessun marcatore
         self._sim = mock or dry_run
+        # Default reader su path REALE: reader=None (cli `buo oc apply`,
+        # fallback TUI) → RealHardwareReader, altrimenti _safe_temp/
+        # _safe_freq darebbero sempre None → stretch/thermal MAI valutati
+        # (falso pass silenzioso). Import LAZY in __init__ (niente import
+        # top-level: zero rischio di cicli); se fallisce reader resta None
+        # e lo smoke degrada come oggi (fail visibile in log, mai abort).
+        if self.reader is None and not self._sim:
+            try:
+                from ..safety.reader import RealHardwareReader
+                self.reader = RealHardwareReader()
+            except Exception:
+                self.reader = None
         self.oc_dir = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
         self._marker = self.oc_dir / SMOKE_MARKER
         self._sudo = sudo
@@ -219,8 +231,27 @@ class CpuSmoke:
                     # darebbero un FALSO stretch (osservato sul campo:
                     # apply 3825 falliva 'stretch' in modo intermittente,
                     # mai a regime).
-                    if f is not None and sample > self._freq_warmup_s:
-                        freq_min = f if freq_min is None else min(freq_min, f)
+                    #
+                    # CUTOFF TEMPORALE a fine run (SMOKE_STRESS_S − 1):
+                    # i worker stress-ng escono in STAGGER al loro timeout
+                    # (~30s) e la core campionata (cpu0) resta scarica col
+                    # parent ancora vivo (poll() None) → la freq crolla a
+                    # idle. Campionato lì dentro = FALSO stretch con drop
+                    # dall'8% al 60% in UN campione (osservato sul campo:
+                    # 1398/1552/2028/2883/3194 MHz a t≈30s, artefatto ~1
+                    # run su 3, anche su STOCK 3500 = stretch impossibile).
+                    # Un filtro per entità del drop NON basta (drop piccoli
+                    # tipo 3194 = −8.6% sfuggono): la finestra è TEMPORALE
+                    # (uscita al timeout), quindi si smette di tracciare
+                    # freq_min ~1s prima della durata nominale. I campioni
+                    # tracciati (1..~28s) sono tutti sotto carico pieno:
+                    # una stretch VERA (graduale o sostenuta, o rc≠0 con
+                    # --verify) resta rilevata.
+                    elapsed = time.monotonic() - started
+                    if (f is not None and sample > self._freq_warmup_s
+                            and elapsed < SMOKE_STRESS_S - 1):
+                        freq_min = (f if freq_min is None
+                                    else min(freq_min, f))
                 if proc.poll() is None:
                     self._kill(proc)
                     rc = 124 if rc == 0 else rc

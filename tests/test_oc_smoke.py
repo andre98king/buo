@@ -31,6 +31,17 @@ class FakeReader:
         return self.freq
 
 
+class FakeSeqReader(FakeReader):
+    """Reader stateful: consuma una lista di freq (una per campione)."""
+
+    def __init__(self, freqs, temp=60.0):
+        super().__init__(temp=temp)
+        self._freqs = list(freqs)
+
+    def get_cpu_freq(self):
+        return self._freqs.pop(0)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -146,6 +157,44 @@ class TestSmokeOutcome(Base):
         r = self.smoke(reader, freq_warmup_s=0).run(3700, 975)
         self.assertEqual(r.freq_min, 3700)
 
+    @mock.patch("buo.oc.smoke.time.monotonic")
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_freq_cutoff_end_of_run(self, popen, monotonic):
+        """Fine run: i worker stress-ng escono in stagger al loro timeout
+        (~30s) e cpu0 crolla a idle col parent ancora vivo — campionare lì
+        = FALSO stretch con drop dall'8% al 60% in UN campione (osservato
+        sul campo a t≈30s: 1398/1552/2028/2883/3194 MHz, artefatto ~1 run
+        su 3, anche su STOCK). Il cutoff temporale (elapsed ≥ SMOKE_STRESS_S
+        − 1 = 29s) esclude la finestra di rilascio: il campione a 29.6s
+        con freq crollata NON conta per freq_min."""
+        # started, cond₁, elapsed₁, cond₂, elapsed₂, duration
+        monotonic.side_effect = [1000.0, 1001.5, 1001.5,
+                                 1029.6, 1029.6, 1002.0]
+        proc = self._popen(first_none=True)
+        proc.poll.side_effect = [None, None, 0, 0]   # 2 iterazioni del loop
+        popen.return_value = proc
+        r = self.smoke(FakeSeqReader([3825, 2000]),
+                       timeout_s=60, freq_warmup_s=0).run(3825, 975)
+        self.assertTrue(r.ok)
+        self.assertIsNone(r.cause)
+        self.assertEqual(r.freq_min, 3825)   # il 2000 (coda) è stato ignorato
+
+    @mock.patch("buo.oc.smoke.time.monotonic")
+    @mock.patch("buo.oc.smoke.subprocess.Popen")
+    def test_freq_cutoff_keeps_midrun_samples(self, popen, monotonic):
+        """Un crollo a METÀ run (elapsed 2.5s < cutoff, carico pieno) è
+        tracciato: la stretch vera resta rilevata anche col cutoff."""
+        monotonic.side_effect = [1000.0, 1001.5, 1001.5,
+                                 1002.5, 1002.5, 1003.0]
+        proc = self._popen(first_none=True)
+        proc.poll.side_effect = [None, None, 0, 0]
+        popen.return_value = proc
+        r = self.smoke(FakeSeqReader([3825, 2000]),
+                       timeout_s=60, freq_warmup_s=0).run(3825, 975)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.cause, "stretch")
+        self.assertEqual(r.freq_min, 2000)
+
 
 class TestMarker(Base):
     @mock.patch("buo.oc.smoke.subprocess.Popen")
@@ -237,6 +286,32 @@ class TestDryRun(Base):
         r = s.run(3700, 975)
         self.assertTrue(r.ok)
         self.assertFalse(r.cause == "hang")
+
+
+class TestDefaultReader(Base):
+    """FIX 2: su path REALE reader=None → RealHardwareReader di default
+    (import lazy in __init__); mock/dry-run NON costruiscono MAI un reader
+    reale (C1: mai hardware finto, mai letture reali in simulazione)."""
+
+    def test_real_reader_none_builds_hardware_reader(self):
+        with mock.patch("buo.safety.reader.RealHardwareReader") as cls:
+            s = CpuSmoke(None, oc_dir=self.oc)
+        cls.assert_called_once()
+        self.assertIs(s.reader, cls.return_value)
+
+    def test_simulated_never_builds_hardware_reader(self):
+        with mock.patch("buo.safety.reader.RealHardwareReader") as cls:
+            CpuSmoke(None, mock=True, oc_dir=self.oc)
+            CpuSmoke(None, dry_run=True, oc_dir=self.oc)
+            cls.assert_not_called()
+
+    def test_reader_build_failure_degrades(self):
+        """Se RealHardwareReader() fallisce lo smoke degrada (reader=None,
+        niente abort): _safe_temp/_safe_freq → None, mai eccezioni."""
+        with mock.patch("buo.safety.reader.RealHardwareReader",
+                        side_effect=RuntimeError("no hardware")):
+            s = CpuSmoke(None, oc_dir=self.oc)
+        self.assertIsNone(s.reader)
 
 
 if __name__ == "__main__":
