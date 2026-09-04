@@ -8,7 +8,7 @@ Reboot Manager — reboot automatici con ripresa.
 Crea il servizio systemd buo-resume.service (che riesegue `buo resume`
 al boot) e poi esegue il reboot. Il checkpoint viene salvato
 dall'orchestratore PRIMA di chiamare schedule(). Alla creazione del
-servizio installa anche il watch-log KDE (konsole sul log live al login),
+servizio installa anche il watch KDE (konsole col viewer al login),
 così l'utente vede la run riprendere dopo il reboot.
 """
 
@@ -22,23 +22,28 @@ from ..constants import EXIT_REBOOT
 from ..utils.logging import LoggerMixin
 
 
-# Template del viewer (installato come WATCH_VIEW da _watch_view()).
-# Stringa PIANA (non f-string): i path @LOG@/@STATE@ vengono interpolati
-# all'installazione; l'override env BUO_WATCH_LOG/BUO_WATCH_STATE serve
-# SOLO ai test.
-_WATCH_VIEW_SRC = '''#!/usr/bin/env python3
+# Template del viewer DUAL-MODE (installato come WATCH_VIEW da
+# _watch_view()): cockpit textual se disponibile nel python del venv,
+# altrimenti viewer ANSI a flusso (fallback, rev. 2). Stringa PIANA
+# (non f-string): @PYTHON@/@LOG@/@STATE@ interpolati all'installazione;
+# env BUO_WATCH_LOG/BUO_WATCH_STATE/BUO_WATCH_FORCE_ANSI solo per i test.
+_WATCH_VIEW_SRC = '''#!@PYTHON@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 BC-250 Community
-"""Vista live della run buo (resume/unleash) dopo il reboot.
+"""Vista live della run buo (resume/unleash) dopo il reboot — DUAL-MODE.
 
 Generato da RebootManager._watch_view() e installato come buo-watch.py;
 la konsole lo lancia al login SOLO se una run è attiva (gate del wrapper).
-Solo stdlib. Nessun valore aggiunto: mostra le righe del log (prefisso
-rimosso) dall'ultimo 'Avvio ottimizzazione' e, a run finita, classifica
-l'esito sui SOLI marker presenti nel segmento letto. Veste ANSI SGR a
-mano (§3.10): il colore avvolge il RIGO stampato, il testo resta identico.
+Textual nel python della shebang (il venv di buo) → cockpit a pannelli
+read-only; altrimenti → viewer ANSI a flusso (fallback, testi identici).
+textual è importato SOLO dentro _watch_app(); le funzioni pure
+(parse_line / style_for / status_lines / banner_lines / classify) non
+hanno dipendenze. Nessun valore aggiunto: il colore avvolge il RIGO, il
+testo resta identico (C1); l'esito è classificato SOLO dai marker del
+segmento letto (mai da state.json).
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -51,9 +56,8 @@ STATE = "@STATE@"
 
 SEP = "─" * 56
 
-# ANSI SGR (mappati 1:1 sui colori rich della CLI: cli.py/tui.py).
-# Costanti modulo: MAI interpolate nei testi, avvolgono SOLO il rigo
-# stampato; ogni riga stilizzata termina con RST.
+# ANSI SGR (mappati 1:1 sui colori rich della CLI: cli.py/tui.py). Usati
+# SOLO dal fallback ANSI; ogni riga stilizzata termina con RST.
 RST = "\\x1b[0m"
 BOLD = "\\x1b[1m"
 DIM = "\\x1b[2m"
@@ -66,6 +70,21 @@ BOLD_RED = "\\x1b[1;31m"
 YELLOW = "\\x1b[33m"
 BOLD_YELLOW = "\\x1b[1;33m"
 BOLD_WHITE = "\\x1b[1;37m"
+
+# Mappa token di stile (mappa semantica §4.6) → sequenza SGR.
+_SGR = {
+    "bold cyan": BOLD_CYAN,
+    "cyan": CYAN,
+    "bold green": BOLD_GREEN,
+    "green": GREEN,
+    "bold red": BOLD_RED,
+    "red": RED,
+    "yellow": YELLOW,
+    "bold yellow": BOLD_YELLOW,
+    "bold white": BOLD_WHITE,
+    "bold": BOLD,
+    "dim": DIM,
+}
 
 # Mappa fase → (numero, etichetta) — tenere allineato con
 # UX_REVAMP_CLI_SPEC §2.1/2.2 (ordine = PHASES in buo/constants.py).
@@ -80,8 +99,12 @@ PHASE_LABELS = {
 }
 
 
-def colorize(text, code):
-    """Avvolge il rigo con code+RST; il testo non viene mai alterato."""
+# --- funzioni PURE (testabili senza textual) -------------------------
+
+
+def wrap_ansi(text, token):
+    """Avvolge il rigo (token → SGR + RST); testo mai alterato (C1)."""
+    code = _SGR.get(token)
     if not code:
         return text
     return code + text + RST
@@ -94,14 +117,6 @@ def parse_line(line):
     if len(parts) == 4:
         return parts[1].strip(), parts[3]
     return None
-
-
-def filter_line(line):
-    """Rimuove il prefisso 'asctime | LEVEL | name | ' se presente."""
-    parsed = parse_line(line)
-    if parsed is None:
-        return line
-    return parsed[1]
 
 
 def phase_line(state):
@@ -118,6 +133,40 @@ def phase_line(state):
     return "Fase %d di 7: %s" % (num, label)
 
 
+def status_lines(state, resumed):
+    """Righe di stato (§5.1): [riga modo, riga fase?] — la fase è OMESSA
+    se il file non è leggibile o current_phase è fuori tabella (C1)."""
+    lines = ["La run è RIPRESA dopo il reboot ed è in corso." if resumed
+             else "Ottimizzazione in corso."]
+    pl = phase_line(state)
+    if pl:
+        lines.append(pl)
+    return lines
+
+
+def style_for(level, msg, summary=False):
+    """NOME di stile del rigo di log (mappa §4.6, con stato summary);
+    primo match vince; default = nessuno stile (mai inventare un colore).
+    Ritorna (token, summary_aggiornato)."""
+    if "SAFETY VIOLATION" in msg:
+        return "bold red", summary
+    if msg.startswith("OTTIMIZZAZIONE COMPLETATA"):
+        return "bold green", summary
+    if msg.startswith("Fase: "):
+        return "bold cyan", summary
+    if msg.startswith("Riepilogo finale"):
+        return "bold white", True
+    if summary:  # righe del riepilogo finale (dim; rollback in giallo)
+        if "rollback:" in msg:
+            return "bold yellow", True
+        return "dim", True
+    if level in ("ERROR", "CRITICAL"):
+        return "red", summary
+    if level == "WARNING":
+        return "yellow", summary
+    return "", summary
+
+
 def classify(segment):
     """Esito dal SOLO segmento di log letto (primo match vince)."""
     text = "".join(segment)
@@ -130,86 +179,72 @@ def classify(segment):
     return "unclear"
 
 
-def line_style(level, msg, summary=False):
-    """Stile del rigo di log (codice ANSI, stato summary); primo match
-    vince; default = nessun colore (mai inventare uno stile)."""
-    if "SAFETY VIOLATION" in msg:
-        return BOLD_RED, summary
-    if msg.startswith("OTTIMIZZAZIONE COMPLETATA"):
-        return BOLD_GREEN, summary
-    if msg.startswith("Fase: "):
-        return BOLD_CYAN, summary
-    if msg.startswith("Riepilogo finale"):
-        return BOLD_WHITE, True
-    if summary:  # righe del riepilogo finale (dim; rollback in giallo)
-        if "rollback:" in msg:
-            return BOLD_YELLOW, True
-        return DIM, True
-    if level in ("ERROR", "CRITICAL"):
-        return RED, summary
-    if level == "WARNING":
-        return YELLOW, summary
-    return "", summary
-
-
-def banner_for(outcome):
-    """Blocco terminale per l'esito (testi esatti, righe < 80)."""
+def banner_lines(outcome):
+    """Righe del blocco d'esito (§5.3, VERBATIM, senza separatore)."""
     if outcome == "completed":
-        return (SEP + "\\n"
-                "Run COMPLETATA — esito positivo.\\n"
-                "Riepilogo finale qui sopra. Puoi chiudere questa finestra.\\n")
-    if outcome == "safety":
-        return (SEP + "\\n"
-                "SAFETY VIOLATION — run interrotta per sicurezza.\\n"
-                "Dettagli e motivo nelle righe qui sopra.\\n"
-                "\\n"
-                "Le modifiche applicate in questa run sono state annullate\\n"
-                "(rollback automatico). La macchina riparte normalmente.\\n"
-                "\\n"
-                "Cosa fare:\\n"
-                " 1. se il motivo è termico: aspetta che la macchina si raffreddi\\n"
-                " 2. diagnostica: sudo buo doctor\\n"
-                " 3. riprova: sudo buo unleash\\n")
+        return ["Run COMPLETATA — esito positivo.",
+                "Riepilogo finale qui sopra. Puoi chiudere questa finestra."]
     if outcome == "error":
-        return (SEP + "\\n"
-                "Run INTERROTTA — l'ottimizzazione non è stata completata.\\n"
-                "Le modifiche applicate in questa run sono state annullate\\n"
-                "(rollback automatico): la macchina resta nella configurazione\\n"
-                "precedente.\\n"
-                "\\n"
-                "Cosa fare:\\n"
-                " 1. controlla le ultime righe qui sopra (o /var/log/buo/buo.log)\\n"
-                " 2. diagnostica: sudo buo doctor\\n"
-                " 3. riprova: sudo buo unleash\\n")
-    return (SEP + "\\n"
-            "La run si è fermata senza un esito riconoscibile nel log\\n"
-            "(possibile riavvio in corso o interruzione improvvisa).\\n"
-            "Se la macchina NON si sta riavviando: controlla il log\\n"
-            "/var/log/buo/buo.log e riprova con: sudo buo unleash\\n")
+        return ["Run INTERROTTA — l'ottimizzazione non è stata completata.",
+                "Le modifiche applicate in questa run sono state annullate",
+                "(rollback automatico): la macchina resta nella configurazione",
+                "precedente.",
+                "",
+                "Cosa fare:",
+                " 1. controlla le ultime righe qui sopra (o /var/log/buo/buo.log)",
+                " 2. diagnostica: sudo buo doctor",
+                " 3. riprova: sudo buo unleash"]
+    if outcome == "safety":
+        return ["SAFETY VIOLATION — run interrotta per sicurezza.",
+                "Dettagli e motivo nelle righe qui sopra.",
+                "",
+                "Le modifiche applicate in questa run sono state annullate",
+                "(rollback automatico). La macchina riparte normalmente.",
+                "",
+                "Cosa fare:",
+                " 1. se il motivo è termico: aspetta che la macchina si raffreddi",
+                " 2. diagnostica: sudo buo doctor",
+                " 3. riprova: sudo buo unleash"]
+    return ["La run si è fermata senza un esito riconoscibile nel log",
+            "(possibile riavvio in corso o interruzione improvvisa).",
+            "Se la macchina NON si sta riavviando: controlla il log",
+            "/var/log/buo/buo.log e riprova con: sudo buo unleash"]
 
 
-def render_banner(outcome):
-    """Blocco terminale con la veste ANSI dell'esito — testo invariato:
-    _strip_ansi(render_banner(o)) == banner_for(o)."""
-    lines = banner_for(outcome).rstrip("\\n").split("\\n")
-    styled = []
-    for i, line in enumerate(lines):
+# --- fallback ANSI (rev. 2, testi e SGR invariati) -------------------
+
+
+def banner_ansi(outcome):
+    """Blocco esito del fallback: separatore dim + righe stilizzate."""
+    lines = [wrap_ansi(SEP, "dim")]
+    for i, line in enumerate(banner_lines(outcome)):
         if not line:
-            styled.append("")
+            lines.append("")
         elif outcome == "unclear":
-            styled.append(colorize(line, DIM))
-        elif i == 0:  # separatore (header e blocchi)
-            styled.append(colorize(line, DIM))
+            lines.append(wrap_ansi(line, "dim"))
+        elif i == 0:
+            token = "bold green" if outcome == "completed" else "bold red"
+            lines.append(wrap_ansi(line, token))
         elif outcome == "completed":
-            code = BOLD_GREEN if i == 1 else DIM
-            styled.append(colorize(line, code))
-        elif i == 1:  # headline error/safety
-            styled.append(colorize(line, BOLD_RED))
+            lines.append(wrap_ansi(line, "dim"))  # hint
         elif line == "Cosa fare:":
-            styled.append(colorize(line, BOLD))
+            lines.append(wrap_ansi(line, "bold"))
         else:
-            styled.append(line)  # corpo e passi normali
-    return "\\n".join(styled) + "\\n"
+            lines.append(line)  # corpo e passi normali
+    return "\\n".join(lines) + "\\n"
+
+
+def _emit_line(out, line, summary):
+    """Stampa una riga del log (filtro + stile ANSI); ritorna lo stato
+    summary. Riga non formattata → verbatim, senza colore."""
+    parsed = parse_line(line)
+    if parsed is None:
+        out.write(line + "\\n")
+        return summary
+    level, msg = parsed
+    token, summary = style_for(level, msg, summary)
+    out.write(wrap_ansi(msg, token) + "\\n")
+    return summary
 
 
 def pgrep_active(pattern):
@@ -238,35 +273,20 @@ def run_offset(path):
         return 0
 
 
-def write_line(out, line, summary):
-    """Stampa una riga del log (filtrata e stilizzata); ritorna lo stato
-    summary aggiornato. Riga non formattata → verbatim, senza colore."""
-    parsed = parse_line(line)
-    if parsed is None:
-        out.write(line + "\\n")
-        return summary
-    level, msg = parsed
-    code, summary = line_style(level, msg, summary)
-    out.write(colorize(msg, code) + "\\n")
-    return summary
-
-
-def main():
+def run_ansi():
+    """Fallback ANSI (rev. 2): header, flusso live, blocco esito, exit 0."""
     log = os.environ.get("BUO_WATCH_LOG") or LOG
     state = os.environ.get("BUO_WATCH_STATE") or STATE
     out = sys.stdout
-    out.write(colorize("BUO — BC-250 Ultimate Orchestrator", BOLD_CYAN)
+    resumed = pgrep_active("[b]uo resume")
+    out.write(wrap_ansi("BUO — BC-250 Ultimate Orchestrator", "bold cyan")
               + "\\n\\n")
-    if pgrep_active("[b]uo resume"):
-        out.write(colorize("La run è RIPRESA dopo il reboot ed è in corso.",
-                           BOLD_GREEN) + "\\n")
-    else:
-        out.write(colorize("Ottimizzazione in corso.", BOLD_GREEN) + "\\n")
-    pl = phase_line(state)
-    if pl:
-        out.write(colorize(pl, CYAN) + "\\n")
-    out.write(colorize("Log live della run:", DIM) + "\\n")
-    out.write(colorize(SEP, DIM) + "\\n")
+    lines = status_lines(state, resumed)
+    out.write(wrap_ansi(lines[0], "bold green") + "\\n")
+    if len(lines) > 1:
+        out.write(wrap_ansi(lines[1], "cyan") + "\\n")
+    out.write(wrap_ansi("Log live della run:", "dim") + "\\n")
+    out.write(wrap_ansi(SEP, "dim") + "\\n")
     out.flush()
 
     segment = []
@@ -283,7 +303,7 @@ def main():
             if raw:
                 line = raw.decode("utf-8", "replace").rstrip("\\n")
                 segment.append(line)
-                summary = write_line(out, line, summary)
+                summary = _emit_line(out, line, summary)
                 out.flush()
                 continue
             if not pgrep_active("[b]uo (resume|unleash)"):
@@ -294,15 +314,203 @@ def main():
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\\n")
                     segment.append(line)
-                    summary = write_line(out, line, summary)
+                    summary = _emit_line(out, line, summary)
                 break
             time.sleep(1)
     finally:
         if f:
             f.close()
-    out.write(render_banner(classify(segment)))
+    out.write(banner_ansi(classify(segment)))
     out.flush()
     return 0
+
+
+# --- modalità cockpit (textual, importato SOLO qui) -------------------
+
+
+def _watch_app(log, state):
+    """Classe App cockpit (read-only); None se textual non c'è.
+
+    Pannelli: LOG in alto (1fr) e STATO/ESITO in basso (auto) — così i
+    riferimenti spaziali dei blocchi esito ("qui sopra") restano veri.
+    """
+    import importlib.util
+    if importlib.util.find_spec("textual") is None:
+        return None
+    from collections import deque
+
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.containers import VerticalScroll
+    from textual.widgets import Footer, Header, Static
+
+    def _esc(text):
+        """Escapa '[' per i widget con markup: testo LETTERALE a schermo."""
+        return text.replace("[", "\\\\[")
+
+    resumed = pgrep_active("[b]uo resume")
+
+    class WatchApp(App):
+        """Cockpit read-only della run: log live sopra, stato/esito sotto."""
+
+        TITLE = "BUO — BC-250 Ultimate Orchestrator"
+        CSS = """
+        #logbox { border: round $secondary; height: 1fr; padding: 0 1; }
+        #log    { width: 1fr; }
+        #stato  { border: round $accent; height: auto; padding: 0 1;
+                  margin: 1 0 0 0; }
+        """
+        BINDINGS = [
+            Binding("q", "quit", "Chiudi"),
+            Binding("escape", "quit", "Chiudi"),
+        ]
+
+        def __init__(self):
+            super().__init__()
+            self.sub_title = (
+                "watch run · ripresa dopo il reboot" if resumed
+                else "watch run · ottimizzazione in corso")
+            self._log_path = log
+            self._state_path = state
+            self._fh = None
+            self._offset = run_offset(log)
+            # ponytail: buffer log e segmento limitati a 500 righe; i marker
+            # di esito sono terminali (fine run) → sempre nel buffer.
+            self._lines = deque(maxlen=500)   # (token|None, testo) mostrati
+            self._segment = deque(maxlen=500)  # righe grezze per classify
+            self._summary = False
+            self._done = False
+            self._outcome = None
+            self._resumed = resumed
+            self._stato_plain = ""            # testo del pannello STATO
+            self._log_plain = ""              # testo del pannello LOG
+
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with VerticalScroll(id="logbox") as logbox:
+                logbox.border_title = (
+                    "LOG LIVE · righe della run (↑/↓ scorri)")
+                yield Static("", id="log")
+            stato = Static("", id="stato")
+            stato.border_title = "STATO RUN"
+            yield stato
+            yield Footer()
+
+        def on_mount(self) -> None:
+            try:
+                self._fh = open(self._log_path, "rb")
+                self._fh.seek(self._offset)
+            except OSError:
+                self._fh = None
+            logbox = self.query_one("#logbox")
+            if logbox.can_focus:
+                logbox.focus()
+            self.set_interval(1.0, self._tick)
+            self._tick()
+
+        def on_unmount(self) -> None:
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+
+        def _read_log(self) -> None:
+            """Legge le righe nuove (fino a EOF) e aggiorna il pannello."""
+            if self._fh is None:
+                return
+            changed = False
+            while True:
+                raw = self._fh.readline()
+                if not raw:
+                    break
+                changed = True
+                line = raw.decode("utf-8", "replace").rstrip("\\n")
+                self._segment.append(line)
+                parsed = parse_line(line)
+                if parsed is None:
+                    self._lines.append((None, line))
+                else:
+                    level, msg = parsed
+                    token, self._summary = style_for(
+                        level, msg, self._summary)
+                    self._lines.append((token, msg))
+            if changed:
+                self._render_log()
+
+        def _render_log(self) -> None:
+            body = "\\n".join(
+                "[%s]%s[/]" % (tok, _esc(txt)) if tok else _esc(txt)
+                for tok, txt in self._lines)
+            self._log_plain = "\\n".join(txt for _, txt in self._lines)
+            self.query_one("#log", Static).update(body)
+            self.query_one("#logbox", VerticalScroll).scroll_end(
+                animate=False)
+
+        def _set_stato(self, plain, markup) -> None:
+            self._stato_plain = plain
+            self.query_one("#stato", Static).update(markup)
+
+        def _stato_viva(self) -> None:
+            lines = status_lines(self._state_path, self._resumed)
+            markup = "[bold green]%s[/]" % _esc(lines[0])
+            if len(lines) > 1:
+                markup += "\\n[cyan]%s[/]" % _esc(lines[1])
+            self._set_stato("\\n".join(lines), markup)
+
+        def _stato_esito(self, outcome) -> None:
+            block = banner_lines(outcome)
+            markup = []
+            for i, line in enumerate(block):
+                if not line:
+                    markup.append("")
+                elif outcome == "unclear":
+                    markup.append("[dim]%s[/]" % _esc(line))
+                elif i == 0:
+                    head = ("[bold green]" if outcome == "completed"
+                            else "[bold red]")
+                    markup.append(head + _esc(line) + "[/]")
+                elif outcome == "completed":
+                    markup.append("[dim]%s[/]" % _esc(line))  # hint
+                elif line == "Cosa fare:":
+                    markup.append("[bold]%s[/]" % _esc(line))
+                else:
+                    markup.append(_esc(line))
+            self._set_stato("\\n".join(block), "\\n".join(markup))
+
+        def _tick(self) -> None:
+            if self._done:
+                return
+            if pgrep_active("[b]uo (resume|unleash)"):
+                self._read_log()
+                self._stato_viva()
+            else:
+                time.sleep(0.5)  # settle: righe residue del processo morto
+                self._read_log()
+                self._outcome = classify(list(self._segment))
+                self._done = True
+                self._stato_esito(self._outcome)
+
+    return WatchApp
+
+
+def run_cockpit():
+    """Modalità cockpit; senza textual ricade sul fallback ANSI."""
+    cls = _watch_app(LOG, STATE)
+    if cls is None:
+        return run_ansi()
+    cls().run()
+    return 0
+
+
+def main():
+    """Scelta modalità: ANSI forzata (test) o textual assente → fallback."""
+    if os.environ.get("BUO_WATCH_FORCE_ANSI"):
+        return run_ansi()
+    if importlib.util.find_spec("textual") is None:
+        return run_ansi()
+    return run_cockpit()
 
 
 if __name__ == "__main__":
@@ -316,8 +524,8 @@ class RebootManager(LoggerMixin):
     SERVICE_NAME = "buo-resume.service"
     SERVICE_PATH = Path("/etc/systemd/system") / SERVICE_NAME
     # UX watch-log: al login successivo la konsole apre il VIEWER del log
-    # live (solo reboot con ripresa). Percorsi/utente come attributi di
-    # classe per i test.
+    # (cockpit textual o fallback ANSI — solo reboot con ripresa).
+    # Percorsi/utente come attributi di classe per i test.
     WATCH_SCRIPT = Path("/usr/local/bin/buo-watch-log.sh")
     WATCH_VIEW = Path("/usr/local/bin/buo-watch.py")
     WATCH_DESKTOP = "buo-watch.desktop"
@@ -432,18 +640,42 @@ WantedBy=multi-user.target
             return None
         return fields[5] or None
 
+    def _has_textual(self) -> bool:
+        """Probe: il python che genera (il venv di buo) ha textual?
+
+        Deciso alla GENERAZIONE (i file sono rigenerati a ogni reboot
+        schedulato e usati entro lo stesso boot): cockpit → wrapper senza
+        --hold (q chiude la finestra); fallback ANSI → --hold (schermata
+        finale statica, rev. 2). Mai hardcodare il path del venv.
+        """
+        try:
+            import importlib.util
+            return importlib.util.find_spec("textual") is not None
+        except Exception:
+            return False
+
     def _watch_script(self) -> str:
-        """Script autostart: konsole col viewer se una run è attiva."""
+        """Script autostart: konsole col viewer se una run è attiva.
+
+        --hold SOLO nel fallback ANSI (la schermata finale resta per la
+        lettura); con la cockpit niente --hold (q chiude la finestra).
+        """
+        hold = "" if self._has_textual() else "--hold "
         return f"""#!/bin/sh
 # BUO watch — se una run buo (resume/unleash) è attiva al login, riapre
 # la konsole col viewer del log; altrimenti esce in silenzio.
 pgrep -f "[b]uo (resume|unleash)" >/dev/null 2>&1 || exit 0
-exec konsole --hold --title "BUO — ottimizzazione in corso" -e {self.WATCH_VIEW}
+exec konsole {hold}--title "BUO — ottimizzazione in corso" -e {self.WATCH_VIEW}
 """
 
     def _watch_view(self) -> str:
-        """Template del viewer python, con i path di sistema interpolati."""
+        """Template del viewer (dual-mode), path e shebang interpolati.
+
+        Shebang = sys.executable del processo che genera (il python del
+        venv di buo, quello che ha textual); mai hardcodato.
+        """
         return (_WATCH_VIEW_SRC
+                .replace("@PYTHON@", sys.executable)
                 .replace("@LOG@", str(self.WATCH_LOG))
                 .replace("@STATE@", str(self.WATCH_STATE)))
 
