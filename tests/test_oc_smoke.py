@@ -67,19 +67,28 @@ class TestSmokeOutcome(Base):
         self.assertTrue(r.marker_cleared)
 
     @mock.patch("buo.oc.smoke.subprocess.Popen")
-    def test_thermal_86(self, popen):
+    def test_thermal_under_hard_passes(self, popen):
+        """Politica 2 livelli (03/09): 86°C e 90°C in smoke (sintetico,
+        in game ~70-75°C) PASSANO — prima fallivano col gate 85/90."""
         popen.return_value = self._popen(first_none=True)
         r = self.smoke(FakeReader(temp=86, freq=3700)).run(3700, 975)
-        self.assertFalse(r.ok)
-        self.assertEqual(r.cause, "thermal")
-        self.assertEqual(r.temp_max, 86.0)
+        self.assertTrue(r.ok)
+        self.assertIsNone(r.cause)
+        r90 = self.smoke(FakeReader(temp=90, freq=3700)).run(3700, 975)
+        self.assertTrue(r90.ok)
 
     @mock.patch("buo.oc.smoke.subprocess.Popen")
-    def test_critical_90(self, popen):
+    def test_thermal_at_hard_fails(self, popen):
+        """Fail termico SOLO all'HARD (LIMITS.cpu.temp_max = 95)."""
+        from buo.constants import LIMITS
         popen.return_value = self._popen(first_none=True)
-        r = self.smoke(FakeReader(temp=90, freq=3700)).run(3700, 975)
+        r = self.smoke(
+            FakeReader(temp=LIMITS.cpu.temp_max + 1, freq=3700)
+        ).run(3700, 975)
         self.assertFalse(r.ok)
-        self.assertEqual(r.cause, "critical")
+        # il kill anticipato a >= HARD produce "critical"; "thermal" è il
+        # ramo di valutazione finale — entrambi = fail (l'importante: <HARD passa)
+        self.assertIn(r.cause, ("critical", "thermal"))
 
     @mock.patch("buo.oc.smoke.subprocess.Popen")
     def test_stretch(self, popen):

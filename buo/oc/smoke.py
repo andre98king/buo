@@ -5,9 +5,13 @@
 """
 Smoke test CPU in Python — SPEC = p3_smoke del motore (P3_SMOKE_STRESS=30).
 
-Semantica replicata ESATTAMENTE: marcatore test (hang auto-detection),
-stress-ng --verify 30s (MAI --timeout 0), gate termico 85 (fail thermal) /
-90 (abort critical), freq_min >= freq−50 (clock stretching), WHEA delta 0
+Semantica: marcatore test (hang auto-detection),
+stress-ng --verify 30s (MAI --timeout 0); fail termico SOLO al limite
+HARD (LIMITS.cpu.temp_max, politica a due livelli 03/09) — il carico
+sintetico e' piu' caldo del reale (~13-16°C): una config che in smoke
+fa 85-94°C (in game ~70-80°C) DEVE passare; il throttle operativo
+(SMU temp_apply/governor) gestisce il calore sotto l'HARD.
+freq_min >= freq−50 (clock stretching), WHEA delta 0
 (whitelist AER/GHES corrected). Campionamento 1s via reader con on_tick.
 
 Mai hardware reale nei test: reader mockabile, comandi iniettabili.
@@ -23,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from ..constants import LIMITS
 from ..utils.shell import run_command
 from .constants import (
     OC_DIR_DEFAULT,
@@ -30,8 +35,6 @@ from .constants import (
     SMOKE_MARKER,
     SMOKE_STRESS_S,
     SMOKE_TIMEOUT_S,
-    TEMP_CRITICAL,
-    TEMP_GATE,
 )
 
 logger = logging.getLogger("buo.oc.smoke")
@@ -198,7 +201,7 @@ class CpuSmoke:
                     t = self._safe_temp()
                     if t is not None:
                         temp_max = t if temp_max is None else max(temp_max, t)
-                        if t >= TEMP_CRITICAL:
+                        if t >= LIMITS.cpu.temp_max:  # HARD: kill immediato
                             self._kill(proc)
                             rc = -1
                             temp_max = t
@@ -282,9 +285,12 @@ class CpuSmoke:
     def _evaluate(self, freq: int, rc: int, temp_max: Optional[float],
                   freq_min: Optional[int], whea: int
                   ) -> "tuple[bool, Optional[str]]":
-        if rc == -1 or (temp_max is not None and temp_max >= TEMP_CRITICAL):
+        if rc == -1:
             return False, "critical"
-        if temp_max is not None and temp_max >= TEMP_GATE:
+        # Fail termico SOLO all'HARD (politica 2 livelli 03/09): sotto
+        # l'HARD il throttle operativo gestisce il calore; una config che
+        # in smoke fa 85-94°C (in game ~70-80°C) DEVE passare.
+        if temp_max is not None and temp_max >= LIMITS.cpu.temp_max:
             return False, "thermal"
         if freq_min is not None and freq_min < freq - SMOKE_FREQ_MARGIN:
             return False, "stretch"
