@@ -1010,20 +1010,29 @@ class Orchestrator(LoggerMixin):
 
     def _suggest_40cu_persistence(self, results: Dict[str, Any],
                                   gpu: Dict[str, Any]) -> None:
-        """Suggerisce (e opzionalmente esegue) la persistenza 40-CU.
+        """Persistenza 40-CU al boot (auto nei run NON interattivi).
 
         Il runtime UMR è VOLATILE: al reboot le 40 CU tornano a 24. La
         persistenza (install-service + write-service-table) è validata
         sul campo e stabile, ma richiede un reboot per l'attivazione.
-        Semi-automatico: in modalità interattiva BUO chiede conferma,
-        altrimenti si limita ad avvisare con le istruzioni.
+        • run reale NON interattivo (es. `sudo buo unleash` su macchina
+          stock): persistenza AUTOMATICA — su fallimento resta un warning,
+          la run NON si blocca;
+        • interattivo: BUO chiede conferma;
+        • mock/dry-run: nessuna chiamata reale, solo la nota.
         """
         if gpu.get("method") != "runtime_umr":
             return  # kernel patch: la persistenza è nel modulo, non serve
-        self.logger.warning(
-            "40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
-            "Persistenza validata (install-service + write-service-table).")
-        if not self.interactive or self.mock or self.dry_run:
+        auto = not self.mock and not self.dry_run and not self.interactive
+        if auto:
+            self.logger.info(
+                "40 CU attive (runtime UMR): persistenza automatica al boot")
+        else:
+            self.logger.warning(
+                "40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
+                "Persistenza validata (install-service + "
+                "write-service-table).")
+        if self.mock or self.dry_run:
             results["gpu"]["persistence"] = {
                 "suggested": True,
                 "note": "Per rendere persistenti le 40 CU al boot: esegui "
@@ -1036,16 +1045,18 @@ class Orchestrator(LoggerMixin):
                 "write-service-table)"
             )
             return
-        try:
-            resp = input(
-                "   Rendere persistenti le 40 CU al boot? [y/N] "
-            ).strip().lower()
-        except EOFError:
-            resp = "n"
-        if resp not in ("y", "yes"):
-            self.logger.info("Persistenza 40-CU annullata (resterà volatile)")
-            results["gpu"]["persistence"] = {"suggested": True, "applied": False}
-            return
+        if self.interactive:
+            try:
+                resp = input(
+                    "   Rendere persistenti le 40 CU al boot? [y/N] "
+                ).strip().lower()
+            except EOFError:
+                resp = "n"
+            if resp not in ("y", "yes"):
+                self.logger.info("Persistenza 40-CU annullata (resterà volatile)")
+                results["gpu"]["persistence"] = {"suggested": True,
+                                                 "applied": False}
+                return
         p = self.gpu_unlock.persist()
         results["gpu"]["persistence"] = p
         if p.get("persisted"):

@@ -329,6 +329,76 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(r["governor_config"])
 
 
+class TestSuggest40cuPersistence(unittest.TestCase):
+    """Auto-persistenza 40-CU nei run NON interattivi (gap 04/09).
+
+    Su macchina fresca un `sudo buo unleash` NON interattivo lasciava le
+    40 CU volatili (al boot si tornava a 24): il ramo non interattivo si
+    limitava all'avviso. Ora il run reale non interattivo AUTO-PERSISTE
+    (gpu_unlock.persist()); mock/dry-run → solo nota; un fallimento di
+    persistenza è un warning MAI bloccante.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        os.environ["BUO_STATE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        os.environ.pop("BUO_STATE_DIR", None)
+        self._tmp.cleanup()
+
+    def _gpu(self):
+        gpu = {"applied": True, "method": "runtime_umr"}
+        return gpu, {"gpu": gpu}
+
+    def test_non_interactive_auto_persists(self):
+        """Run reale NON interattivo → persist() chiamato + log di
+        successo ('40 CU persistenti al boot')."""
+        from unittest import mock
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        gpu, results = self._gpu()
+        fake = mock.Mock()
+        fake.persist.return_value = {"persisted": True, "note": "ok"}
+        orch.gpu_unlock = fake
+        with self.assertLogs("buo.Orchestrator", level="INFO") as logs:
+            orch._suggest_40cu_persistence(results, gpu)
+        fake.persist.assert_called_once_with()
+        self.assertTrue(results["gpu"]["persistence"]["persisted"])
+        self.assertTrue(any("40 CU persistenti al boot" in m
+                            for m in logs.output))
+
+    def test_mock_only_notes_no_persist(self):
+        """mock → NESSUNA chiamata reale: solo la nota di persistenza
+        manuale (il ramo mock/dry-run resta invariato)."""
+        from unittest import mock
+        hw = MockHardware(seed=42)
+        orch = Orchestrator(config=BUOConfig(), mock=True, dry_run=False,
+                            mock_hardware=hw)
+        gpu, results = self._gpu()
+        fake = mock.Mock()
+        orch.gpu_unlock = fake
+        orch._suggest_40cu_persistence(results, gpu)
+        fake.persist.assert_not_called()
+        self.assertTrue(results["gpu"]["persistence"]["suggested"])
+
+    def test_persist_failure_warns_never_blocks(self):
+        """persist() fallito in un run non interattivo → warning con
+        errore, MAI un'eccezione (la run non si blocca)."""
+        from unittest import mock
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        gpu, results = self._gpu()
+        fake = mock.Mock()
+        fake.persist.return_value = {"persisted": False, "error": "boom"}
+        orch.gpu_unlock = fake
+        with self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
+            orch._suggest_40cu_persistence(results, gpu)  # non deve sollevare
+        self.assertFalse(results["gpu"]["persistence"]["persisted"])
+        self.assertTrue(any("Persistenza non riuscita" in m and "boom" in m
+                            for m in logs.output))
+
+
 class TestAbortTerminal(unittest.TestCase):
     """Bug sul campo 03/09: gli ABORT (safety/errore) sono TERMINALI.
 
