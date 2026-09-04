@@ -1558,11 +1558,16 @@ class Orchestrator(LoggerMixin):
 
         # G2: dopo un run reale completo, auto-esporta il profilo macchina
         # (così `buo restore` dopo un format trova lo stato più recente).
+        # La riga di log è PULITA (il percorso del file): il dump del dict
+        # intero su una riga INFO rendeva il log/viewer illeggibile
+        # (feedback utente 04/09); i dati strutturati stanno nel file e il
+        # riepilogo umano è già stampato da _finalize.
         if not self.dry_run and not self.mock:
             try:
-                from .profile import export_profile
-                path = export_profile()
-                self.logger.info("Profilo macchina salvato: %s", path)
+                from .profile import export_profile, default_profile_path
+                export_profile()
+                self.logger.info("Profilo macchina salvato: %s",
+                                 default_profile_path())
             except Exception as e:
                 self.logger.warning("Export profilo fallito: %s", e)
 
