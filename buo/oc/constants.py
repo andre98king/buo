@@ -51,14 +51,6 @@ SMOKE_STRESS_S = 30              # smoke test all'apply (spec p3_smoke engine)
 SMOKE_TIMEOUT_S = SMOKE_STRESS_S + 30
 SMOKE_FREQ_MARGIN = 50           # freq_min >= freq - 50 (clock stretching)
 
-# ---------------------------------------------------------------------------
-# Banda OPERATIVA max_temperature per la conf SMU (livello 2 della politica
-# termica a due livelli 03/09): il throttle applicato sta sotto l'HARD
-# real-time (LIMITS.cpu.temp_max = 95). Il FAIL termico di smoke/probe usa
-# l'HARD, NON questi valori.
-# ---------------------------------------------------------------------------
-TEMP_GATE = 85                   # floor operativo max_temperature (°C)
-TEMP_CRITICAL = 90               # tetto operativo max_temperature (°C)
 VID_CAP_HARD = 1325              # hard limit assoluto del tool SMU (mV)
 SCALE_MIN = -50
 SCALE_MAX = 0
