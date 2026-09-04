@@ -22,16 +22,211 @@ from ..constants import EXIT_REBOOT
 from ..utils.logging import LoggerMixin
 
 
+# Template del viewer (installato come WATCH_VIEW da _watch_view()).
+# Stringa PIANA (non f-string): i path @LOG@/@STATE@ vengono interpolati
+# all'installazione; l'override env BUO_WATCH_LOG/BUO_WATCH_STATE serve
+# SOLO ai test.
+_WATCH_VIEW_SRC = '''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-FileCopyrightText: 2026 BC-250 Community
+"""Vista live della run buo (resume/unleash) dopo il reboot.
+
+Generato da RebootManager._watch_view() e installato come buo-watch.py;
+la konsole lo lancia al login SOLO se una run è attiva (gate del wrapper).
+Solo stdlib. Nessun valore aggiunto: mostra le righe del log (prefisso
+rimosso) dall'ultimo 'Avvio ottimizzazione' e, a run finita, classifica
+l'esito sui SOLI marker presenti nel segmento letto.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+
+# Default interpolati all'installazione; override via env per i test.
+LOG = "@LOG@"
+STATE = "@STATE@"
+
+SEP = "─" * 56
+
+# Mappa fase → (numero, etichetta) — tenere allineato con
+# UX_REVAMP_CLI_SPEC §2.1/2.2 (ordine = PHASES in buo/constants.py).
+PHASE_LABELS = {
+    "init": (1, "Inizializzazione"),
+    "pre_audit": (2, "Pre-audit — analisi dello stato attuale"),
+    "unlock": (3, "Sblocchi — CPU 8-core e GPU 40-CU"),
+    "fix": (4, "Fix di sistema"),
+    "optimize": (5, "Ottimizzazione — undervolt e overclock"),
+    "apply": (6, "Applicazione della configurazione finale"),
+    "validate": (7, "Validazione — stress test e verifica fix"),
+}
+
+
+def filter_line(line):
+    """Rimuove il prefisso 'asctime | LEVEL | name | ' se presente."""
+    parts = line.split(" | ", 3)
+    if len(parts) == 4:
+        return parts[3]
+    return line
+
+
+def phase_line(state):
+    """Riga 'Fase N di 7: etichetta' da state.json; '' se il file non è
+    leggibile o current_phase non è tra le 7 fasi (mai testo inventato)."""
+    try:
+        with open(state, encoding="utf-8") as f:
+            current = json.load(f).get("current_phase")
+    except (OSError, ValueError):
+        return ""
+    num, label = PHASE_LABELS.get(current, (None, None))
+    if num is None:
+        return ""
+    return "Fase %d di 7: %s" % (num, label)
+
+
+def classify(segment):
+    """Esito dal SOLO segmento di log letto (primo match vince)."""
+    text = "".join(segment)
+    if "OTTIMIZZAZIONE COMPLETATA" in text:
+        return "completed"
+    if "SAFETY VIOLATION" in text:
+        return "safety"
+    if "Errore in fase" in text or "Errore fatale" in text:
+        return "error"
+    return "unclear"
+
+
+def banner_for(outcome):
+    """Blocco terminale per l'esito (testi esatti, righe < 80)."""
+    if outcome == "completed":
+        return (SEP + "\\n"
+                "Run COMPLETATA — esito positivo.\\n"
+                "Riepilogo finale qui sopra. Puoi chiudere questa finestra.\\n")
+    if outcome == "safety":
+        return (SEP + "\\n"
+                "SAFETY VIOLATION — run interrotta per sicurezza.\\n"
+                "Dettagli e motivo nelle righe qui sopra.\\n"
+                "\\n"
+                "Le modifiche applicate in questa run sono state annullate\\n"
+                "(rollback automatico). La macchina riparte normalmente.\\n"
+                "\\n"
+                "Cosa fare:\\n"
+                " 1. se il motivo è termico: aspetta che la macchina si raffreddi\\n"
+                " 2. diagnostica: sudo buo doctor\\n"
+                " 3. riprova: sudo buo unleash\\n")
+    if outcome == "error":
+        return (SEP + "\\n"
+                "Run INTERROTTA — l'ottimizzazione non è stata completata.\\n"
+                "Le modifiche applicate in questa run sono state annullate\\n"
+                "(rollback automatico): la macchina resta nella configurazione\\n"
+                "precedente.\\n"
+                "\\n"
+                "Cosa fare:\\n"
+                " 1. controlla le ultime righe qui sopra (o /var/log/buo/buo.log)\\n"
+                " 2. diagnostica: sudo buo doctor\\n"
+                " 3. riprova: sudo buo unleash\\n")
+    return (SEP + "\\n"
+            "La run si è fermata senza un esito riconoscibile nel log\\n"
+            "(possibile riavvio in corso o interruzione improvvisa).\\n"
+            "Se la macchina NON si sta riavviando: controlla il log\\n"
+            "/var/log/buo/buo.log e riprova con: sudo buo unleash\\n")
+
+
+def pgrep_active(pattern):
+    """True se un processo buo attivo matcha il pattern (pgrep)."""
+    try:
+        rc = subprocess.run(["pgrep", "-f", pattern],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL).returncode
+    except OSError:
+        return True  # pgrep assente: resta in attesa, nessun finto esito
+    return rc == 0
+
+
+def run_offset(path):
+    """Offset (byte) dell'ultima riga 'Avvio ottimizzazione' (inizio del
+    processo corrente); 0 se il marker è assente o il file è illeggibile."""
+    marker = b"Avvio ottimizzazione"
+    try:
+        with open(path, "rb") as f:
+            offset = 0
+            for raw in f:
+                if marker in raw:
+                    offset = f.tell() - len(raw)
+            return offset
+    except OSError:
+        return 0
+
+
+def main():
+    log = os.environ.get("BUO_WATCH_LOG") or LOG
+    state = os.environ.get("BUO_WATCH_STATE") or STATE
+    out = sys.stdout
+    out.write("BUO — BC-250 Ultimate Orchestrator\\n\\n")
+    if pgrep_active("[b]uo resume"):
+        out.write("La run è RIPRESA dopo il reboot ed è in corso.\\n")
+    else:
+        out.write("Ottimizzazione in corso.\\n")
+    pl = phase_line(state)
+    if pl:
+        out.write(pl + "\\n")
+    out.write("\\nLog live della run:\\n" + SEP + "\\n")
+    out.flush()
+
+    segment = []
+    try:
+        f = open(log, "rb")
+    except OSError:
+        f = None
+    else:
+        f.seek(run_offset(log))
+    try:
+        while True:
+            raw = f.readline() if f else b""
+            if raw:
+                line = raw.decode("utf-8", "replace").rstrip("\\n")
+                segment.append(line)
+                out.write(filter_line(line) + "\\n")
+                out.flush()
+                continue
+            if not pgrep_active("[b]uo (resume|unleash)"):
+                time.sleep(0.5)  # settle: righe residue del processo morto
+                while f:
+                    raw = f.readline()
+                    if not raw:
+                        break
+                    line = raw.decode("utf-8", "replace").rstrip("\\n")
+                    segment.append(line)
+                    out.write(filter_line(line) + "\\n")
+                break
+            time.sleep(1)
+    finally:
+        if f:
+            f.close()
+    out.write(banner_for(classify(segment)))
+    out.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
 class RebootManager(LoggerMixin):
     """Gestisce i reboot automatici con ripresa."""
 
     SERVICE_NAME = "buo-resume.service"
     SERVICE_PATH = Path("/etc/systemd/system") / SERVICE_NAME
-    # UX watch-log: konsole sul log live al login successivo (solo reboot
-    # con ripresa). Percorsi/utente come attributi di classe per i test.
+    # UX watch-log: al login successivo la konsole apre il VIEWER del log
+    # live (solo reboot con ripresa). Percorsi/utente come attributi di
+    # classe per i test.
     WATCH_SCRIPT = Path("/usr/local/bin/buo-watch-log.sh")
+    WATCH_VIEW = Path("/usr/local/bin/buo-watch.py")
     WATCH_DESKTOP = "buo-watch.desktop"
     WATCH_LOG = Path("/var/log/buo/buo.log")
+    WATCH_STATE = Path("/var/lib/buo/state.json")
     DESKTOP_UID = 1000
     PLASMA_SESSION_FILES = (
         Path("/usr/share/wayland-sessions/plasma.desktop"),
@@ -100,7 +295,7 @@ WantedBy=multi-user.target
         return True
 
     def _install_watch_log(self) -> None:
-        """Installa lo script + autostart KDE per il watch del log.
+        """Installa script + viewer + autostart KDE per il watch del log.
 
         Idempotente (sovrascrive gli stessi file). Best effort: un errore
         qui non deve mai bloccare la schedulazione del reboot.
@@ -118,6 +313,8 @@ WantedBy=multi-user.target
             self.WATCH_SCRIPT.write_text(self._watch_script(),
                                          encoding="utf-8")
             os.chmod(self.WATCH_SCRIPT, 0o755)
+            self.WATCH_VIEW.write_text(self._watch_view(), encoding="utf-8")
+            os.chmod(self.WATCH_VIEW, 0o755)
             autostart = Path(home) / ".config" / "autostart"
             autostart.mkdir(parents=True, exist_ok=True)
             (autostart / self.WATCH_DESKTOP).write_text(
@@ -140,13 +337,19 @@ WantedBy=multi-user.target
         return fields[5] or None
 
     def _watch_script(self) -> str:
-        """Script autostart: konsole sul log solo se una run è attiva."""
+        """Script autostart: konsole col viewer se una run è attiva."""
         return f"""#!/bin/sh
-# BUO watch-log — se una run buo (resume/unleash) è attiva al login,
-# riapre la konsole sul log live; altrimenti esce in silenzio.
+# BUO watch — se una run buo (resume/unleash) è attiva al login, riapre
+# la konsole col viewer del log; altrimenti esce in silenzio.
 pgrep -f "[b]uo (resume|unleash)" >/dev/null 2>&1 || exit 0
-exec konsole --hold -e tail -f {self.WATCH_LOG}
+exec konsole --hold --title "BUO — ottimizzazione in corso" -e {self.WATCH_VIEW}
 """
+
+    def _watch_view(self) -> str:
+        """Template del viewer python, con i path di sistema interpolati."""
+        return (_WATCH_VIEW_SRC
+                .replace("@LOG@", str(self.WATCH_LOG))
+                .replace("@STATE@", str(self.WATCH_STATE)))
 
     def _watch_desktop(self) -> str:
         """Entry autostart KDE che lancia lo script a ogni login."""
@@ -157,15 +360,18 @@ Exec={self.WATCH_SCRIPT}
 """
 
     def _make_log_readable(self) -> None:
-        """tail da utente richiede log 644 e dir 755 (best effort)."""
-        try:
-            os.chmod(self.WATCH_LOG.parent, 0o755)
-        except OSError:
-            pass
-        try:
-            os.chmod(self.WATCH_LOG, 0o644)
-        except OSError:
-            pass
+        """Watch da utente: log e stato leggibili (best effort)."""
+        for d in (self.WATCH_LOG.parent, self.WATCH_STATE.parent):
+            try:
+                os.chmod(d, 0o755)
+            except OSError:
+                pass
+        for p in (self.WATCH_LOG, self.WATCH_STATE):
+            try:
+                if p.exists():
+                    os.chmod(p, 0o644)
+            except OSError:
+                pass
 
     def cleanup(self) -> None:
         """Rimuove il servizio di ripresa."""
