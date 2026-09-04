@@ -64,6 +64,20 @@ class TestStressAbort(unittest.TestCase):
         self.assertGreaterEqual(gpu_max, 45.0)
         self.assertGreaterEqual(power_max, 120.0)
 
+    def test_progress_ticker_logs(self):
+        """Ticker di progresso (UX 04/09): le fasi lunghe (validate 10
+        min) loggano una riga INFO periodica — il watch-log non deve
+        restare silenzioso per minuti."""
+        stress = StressTest(reader=_CoolReader())
+        with self.assertLogs(stress.logger, level="INFO") as cm:
+            stress._run_loaded(["sleep", "3"], 3, _CoolReader(), 300,
+                               progress_s=1)
+        progress = [m for m in cm.output if "Stress in corso" in m]
+        self.assertTrue(progress, "nessuna riga di progresso loggata")
+        self.assertIn("CPU 50", progress[0])
+        self.assertIn("GPU 45", progress[0])
+        self.assertIn("nessun errore", progress[0])
+
     def test_blind_reader_no_crash(self):
         """Sensori non leggibili → nessun crash, nessuna violazione."""
         stress = StressTest(reader=_BlindReader())

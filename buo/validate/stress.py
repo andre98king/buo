@@ -146,7 +146,8 @@ class StressTest(LoggerMixin):
 
     def _run_loaded(self, cmd: List[str], duration_s: int, reader: Any,
                     power_budget: int,
-                    on_tick: Optional[Callable[[], None]] = None
+                    on_tick: Optional[Callable[[], None]] = None,
+                    progress_s: int = 30
                     ) -> Tuple[int, float, float, float]:
         """Esegue un comando di stress con campionamento LIVE e abort.
 
@@ -157,12 +158,18 @@ class StressTest(LoggerMixin):
         processo viene TERMINATO e si solleva SafetyViolation (C2).
         Sensori non leggibili (None) → avviso e limite saltato, MAI
         valori fittizi.
+
+        Ticker di progresso (UX 04/09): ogni `progress_s` secondi logga
+        una riga INFO (elapsed/massimi) — le fasi lunghe (validate 10
+        min) erano SILENZIOSE: chi osserva il log live (watch-log KDE) non
+        vedeva avanzamento per minuti.
         """
         proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         cpu_temp_max = gpu_temp_max = power_max = 0.0
-        deadline = (time.monotonic() + duration_s
-                    + self.deadline_grace)
+        started = time.monotonic()
+        last_progress = started
+        deadline = (started + duration_s + self.deadline_grace)
         warned = set()
         try:
             while proc.poll() is None:
@@ -205,6 +212,16 @@ class StressTest(LoggerMixin):
                             if bucket != "power" else
                             f"Potenza {value:.1f}W > {limit}W",
                             value, limit)
+                now = time.monotonic()
+                if now - last_progress >= progress_s:
+                    elapsed = int(now - started)
+                    self.logger.info(
+                        "Stress in corso: %d:%02d/%d:%02d — CPU %.0f°C · "
+                        "GPU %.0f°C (massimi, nessun errore finora)",
+                        elapsed // 60, elapsed % 60,
+                        duration_s // 60, duration_s % 60,
+                        cpu_temp_max, gpu_temp_max)
+                    last_progress = now
                 time.sleep(1)
         finally:
             if proc.poll() is None:
