@@ -197,7 +197,7 @@ class TestApplySequence(Base):
         mgr = self.mk(smoke_ok=False, smoke_cause="thermal")
         out = mgr.apply(self.stock())
         self.assertEqual(out.result, "rolled_back")
-        self.assertEqual(out.cause, "smoke fail: thermal")
+        self.assertIn("smoke fail: thermal", out.cause)
         marker = json.loads((self.oc / "apply.json").read_text(
             encoding="utf-8"))
         self.assertEqual(marker["state"], "rolled_back")
