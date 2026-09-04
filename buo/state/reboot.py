@@ -36,7 +36,8 @@ Generato da RebootManager._watch_view() e installato come buo-watch.py;
 la konsole lo lancia al login SOLO se una run è attiva (gate del wrapper).
 Solo stdlib. Nessun valore aggiunto: mostra le righe del log (prefisso
 rimosso) dall'ultimo 'Avvio ottimizzazione' e, a run finita, classifica
-l'esito sui SOLI marker presenti nel segmento letto.
+l'esito sui SOLI marker presenti nel segmento letto. Veste ANSI SGR a
+mano (§3.10): il colore avvolge il RIGO stampato, il testo resta identico.
 """
 import json
 import os
@@ -49,6 +50,22 @@ LOG = "@LOG@"
 STATE = "@STATE@"
 
 SEP = "─" * 56
+
+# ANSI SGR (mappati 1:1 sui colori rich della CLI: cli.py/tui.py).
+# Costanti modulo: MAI interpolate nei testi, avvolgono SOLO il rigo
+# stampato; ogni riga stilizzata termina con RST.
+RST = "\\x1b[0m"
+BOLD = "\\x1b[1m"
+DIM = "\\x1b[2m"
+CYAN = "\\x1b[36m"
+BOLD_CYAN = "\\x1b[1;36m"
+GREEN = "\\x1b[32m"
+BOLD_GREEN = "\\x1b[1;32m"
+RED = "\\x1b[31m"
+BOLD_RED = "\\x1b[1;31m"
+YELLOW = "\\x1b[33m"
+BOLD_YELLOW = "\\x1b[1;33m"
+BOLD_WHITE = "\\x1b[1;37m"
 
 # Mappa fase → (numero, etichetta) — tenere allineato con
 # UX_REVAMP_CLI_SPEC §2.1/2.2 (ordine = PHASES in buo/constants.py).
@@ -63,12 +80,28 @@ PHASE_LABELS = {
 }
 
 
-def filter_line(line):
-    """Rimuove il prefisso 'asctime | LEVEL | name | ' se presente."""
+def colorize(text, code):
+    """Avvolge il rigo con code+RST; il testo non viene mai alterato."""
+    if not code:
+        return text
+    return code + text + RST
+
+
+def parse_line(line):
+    """Riga formattata → (level, msg); None se non ha il formato del file
+    (traceback/continuazioni → verbatim, senza colore)."""
     parts = line.split(" | ", 3)
     if len(parts) == 4:
-        return parts[3]
-    return line
+        return parts[1].strip(), parts[3]
+    return None
+
+
+def filter_line(line):
+    """Rimuove il prefisso 'asctime | LEVEL | name | ' se presente."""
+    parsed = parse_line(line)
+    if parsed is None:
+        return line
+    return parsed[1]
 
 
 def phase_line(state):
@@ -95,6 +128,28 @@ def classify(segment):
     if "Errore in fase" in text or "Errore fatale" in text:
         return "error"
     return "unclear"
+
+
+def line_style(level, msg, summary=False):
+    """Stile del rigo di log (codice ANSI, stato summary); primo match
+    vince; default = nessun colore (mai inventare uno stile)."""
+    if "SAFETY VIOLATION" in msg:
+        return BOLD_RED, summary
+    if msg.startswith("OTTIMIZZAZIONE COMPLETATA"):
+        return BOLD_GREEN, summary
+    if msg.startswith("Fase: "):
+        return BOLD_CYAN, summary
+    if msg.startswith("Riepilogo finale"):
+        return BOLD_WHITE, True
+    if summary:  # righe del riepilogo finale (dim; rollback in giallo)
+        if "rollback:" in msg:
+            return BOLD_YELLOW, True
+        return DIM, True
+    if level in ("ERROR", "CRITICAL"):
+        return RED, summary
+    if level == "WARNING":
+        return YELLOW, summary
+    return "", summary
 
 
 def banner_for(outcome):
@@ -133,6 +188,30 @@ def banner_for(outcome):
             "/var/log/buo/buo.log e riprova con: sudo buo unleash\\n")
 
 
+def render_banner(outcome):
+    """Blocco terminale con la veste ANSI dell'esito — testo invariato:
+    _strip_ansi(render_banner(o)) == banner_for(o)."""
+    lines = banner_for(outcome).rstrip("\\n").split("\\n")
+    styled = []
+    for i, line in enumerate(lines):
+        if not line:
+            styled.append("")
+        elif outcome == "unclear":
+            styled.append(colorize(line, DIM))
+        elif i == 0:  # separatore (header e blocchi)
+            styled.append(colorize(line, DIM))
+        elif outcome == "completed":
+            code = BOLD_GREEN if i == 1 else DIM
+            styled.append(colorize(line, code))
+        elif i == 1:  # headline error/safety
+            styled.append(colorize(line, BOLD_RED))
+        elif line == "Cosa fare:":
+            styled.append(colorize(line, BOLD))
+        else:
+            styled.append(line)  # corpo e passi normali
+    return "\\n".join(styled) + "\\n"
+
+
 def pgrep_active(pattern):
     """True se un processo buo attivo matcha il pattern (pgrep)."""
     try:
@@ -159,22 +238,39 @@ def run_offset(path):
         return 0
 
 
+def write_line(out, line, summary):
+    """Stampa una riga del log (filtrata e stilizzata); ritorna lo stato
+    summary aggiornato. Riga non formattata → verbatim, senza colore."""
+    parsed = parse_line(line)
+    if parsed is None:
+        out.write(line + "\\n")
+        return summary
+    level, msg = parsed
+    code, summary = line_style(level, msg, summary)
+    out.write(colorize(msg, code) + "\\n")
+    return summary
+
+
 def main():
     log = os.environ.get("BUO_WATCH_LOG") or LOG
     state = os.environ.get("BUO_WATCH_STATE") or STATE
     out = sys.stdout
-    out.write("BUO — BC-250 Ultimate Orchestrator\\n\\n")
+    out.write(colorize("BUO — BC-250 Ultimate Orchestrator", BOLD_CYAN)
+              + "\\n\\n")
     if pgrep_active("[b]uo resume"):
-        out.write("La run è RIPRESA dopo il reboot ed è in corso.\\n")
+        out.write(colorize("La run è RIPRESA dopo il reboot ed è in corso.",
+                           BOLD_GREEN) + "\\n")
     else:
-        out.write("Ottimizzazione in corso.\\n")
+        out.write(colorize("Ottimizzazione in corso.", BOLD_GREEN) + "\\n")
     pl = phase_line(state)
     if pl:
-        out.write(pl + "\\n")
-    out.write("\\nLog live della run:\\n" + SEP + "\\n")
+        out.write(colorize(pl, CYAN) + "\\n")
+    out.write(colorize("Log live della run:", DIM) + "\\n")
+    out.write(colorize(SEP, DIM) + "\\n")
     out.flush()
 
     segment = []
+    summary = False
     try:
         f = open(log, "rb")
     except OSError:
@@ -187,7 +283,7 @@ def main():
             if raw:
                 line = raw.decode("utf-8", "replace").rstrip("\\n")
                 segment.append(line)
-                out.write(filter_line(line) + "\\n")
+                summary = write_line(out, line, summary)
                 out.flush()
                 continue
             if not pgrep_active("[b]uo (resume|unleash)"):
@@ -198,13 +294,13 @@ def main():
                         break
                     line = raw.decode("utf-8", "replace").rstrip("\\n")
                     segment.append(line)
-                    out.write(filter_line(line) + "\\n")
+                    summary = write_line(out, line, summary)
                 break
             time.sleep(1)
     finally:
         if f:
             f.close()
-    out.write(banner_for(classify(segment)))
+    out.write(render_banner(classify(segment)))
     out.flush()
     return 0
 

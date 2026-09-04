@@ -13,6 +13,7 @@ Mai file reali: percorsi e utente tutti finti su tmp_path.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,11 @@ from buo.state.reboot import RebootManager
 
 # Prefisso standard di una riga del log buo (asctime | LEVEL | name | msg).
 _PREFIX = "2026-09-04 13:25:02,391 | INFO | buo.Orchestrator | "
+
+
+def _strip_ansi(s):
+    """Rimuove le sequenze ANSI SGR (testo visibile puro)."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
 
 def _getent_line(home: str) -> str:
@@ -227,6 +233,88 @@ class WatchLogInstallTest(unittest.TestCase):
         self.assertEqual(mod.filter_line(_PREFIX + "riga | con | separatori"),
                          "riga | con | separatori")
 
+    def test_viewer_parse_line(self):
+        """Riga formattata → (level, msg); senza formato → None."""
+        self._patch()
+        self._create()
+        mod = self._viewer_module()
+        self.assertEqual(mod.parse_line(_PREFIX + "Fase: validate"),
+                         ("INFO", "Fase: validate"))
+        # il messaggio può contenere " | ": mai troncato (maxsplit=3)
+        self.assertEqual(mod.parse_line(_PREFIX + "riga | con | separatori"),
+                         ("INFO", "riga | con | separatori"))
+        self.assertIsNone(mod.parse_line("Traceback (most recent call last):"))
+        self.assertIsNone(mod.parse_line(""))
+
+    def test_viewer_colorize(self):
+        """colorize avvolge il rigo con code+RST; il testo resta identico."""
+        self._patch()
+        self._create()
+        mod = self._viewer_module()
+        self.assertEqual(mod.colorize("testo", mod.BOLD_RED),
+                         "\x1b[1;31mtesto\x1b[0m")
+        self.assertEqual(mod.colorize("testo", ""), "testo")   # default plain
+        self.assertEqual(_strip_ansi(mod.colorize("testo", mod.CYAN)),
+                         "testo")          # C1: strip == testo
+
+    def test_viewer_line_style(self):
+        """Stile per riga (mappa §3.10): primo match vince, default plain."""
+        self._patch()
+        self._create()
+        mod = self._viewer_module()
+        code, summary = mod.line_style("ERROR", "Errore in fase validate: x")
+        self.assertEqual((code, summary), (mod.RED, False))
+        code, summary = mod.line_style("CRITICAL", "x")
+        self.assertEqual(code, mod.RED)
+        code, summary = mod.line_style("WARNING", "ATTENZIONE: temp alta")
+        self.assertEqual((code, summary), (mod.YELLOW, False))
+        code, summary = mod.line_style("INFO", "SAFETY VIOLATION: caldo")
+        self.assertEqual((code, summary), (mod.BOLD_RED, False))
+        code, summary = mod.line_style("INFO", "OTTIMIZZAZIONE COMPLETATA")
+        self.assertEqual((code, summary), (mod.BOLD_GREEN, False))
+        code, summary = mod.line_style("INFO", "Fase: validate")
+        self.assertEqual((code, summary), (mod.BOLD_CYAN, False))
+        # stato riepilogo: da "Riepilogo finale" dim; rollback in giallo
+        code, summary = mod.line_style("INFO", "Riepilogo finale")
+        self.assertEqual((code, summary), (mod.BOLD_WHITE, True))
+        code, summary = mod.line_style(
+            "INFO", "  fix applicati in questa run: 5", True)
+        self.assertEqual((code, summary), (mod.DIM, True))
+        code, summary = mod.line_style(
+            "INFO", "  rollback: sudo buo rollback", True)
+        self.assertEqual((code, summary), (mod.BOLD_YELLOW, True))
+        # default: nessun colore (righe ticker/altro)
+        code, summary = mod.line_style("INFO", "Stress in corso: 3:00/10:00")
+        self.assertEqual((code, summary), ("", False))
+        self.assertEqual(mod.line_style("DEBUG", "dettaglio")[0], "")
+
+    def test_viewer_render_banner(self):
+        """Veste ANSI del blocco terminale: strip → testo esatto; stili."""
+        self._patch()
+        self._create()
+        mod = self._viewer_module()
+        for outcome in ("completed", "error", "safety", "unclear"):
+            self.assertEqual(_strip_ansi(mod.render_banner(outcome)),
+                             mod.banner_for(outcome), outcome)
+        comp = mod.render_banner("completed")
+        self.assertIn(mod.BOLD_GREEN + "Run COMPLETATA — esito positivo."
+                      + mod.RST, comp)
+        self.assertIn(mod.DIM + "Riepilogo finale qui sopra. Puoi chiudere "
+                      "questa finestra." + mod.RST, comp)
+        self.assertIn(mod.DIM + mod.SEP + mod.RST, comp)
+        err = mod.render_banner("error")
+        self.assertIn(mod.BOLD_RED + "Run INTERROTTA — l'ottimizzazione non "
+                      "è stata completata." + mod.RST, err)
+        self.assertIn(mod.BOLD + "Cosa fare:" + mod.RST, err)
+        self.assertEqual(err.count(mod.BOLD_RED), 1)  # solo la headline
+        saf = mod.render_banner("safety")
+        self.assertIn(mod.BOLD_RED + "SAFETY VIOLATION — run interrotta per "
+                      "sicurezza." + mod.RST, saf)
+        self.assertEqual(saf.count(mod.BOLD_RED), 1)
+        unc = mod.render_banner("unclear")
+        for line in unc.splitlines():
+            self.assertTrue(line.startswith(mod.DIM) or line == "", line)
+
     def test_viewer_classify(self):
         """Classificazione esito dai SOLI marker del segmento."""
         self._patch()
@@ -320,13 +408,23 @@ class WatchLogInstallTest(unittest.TestCase):
         out = ctx.exception.stdout
         if isinstance(out, bytes):      # output parziale non decodificato
             out = out.decode("utf-8", "replace")
-        self.assertIn("BUO — BC-250 Ultimate Orchestrator", out)
-        self.assertIn("La run è RIPRESA dopo il reboot ed è in corso.", out)
+        plain = _strip_ansi(out)
+        self.assertIn("BUO — BC-250 Ultimate Orchestrator", plain)
+        self.assertIn("La run è RIPRESA dopo il reboot ed è in corso.", plain)
         self.assertIn("Fase 7 di 7: Validazione — stress test e verifica fix",
+                      plain)
+        self.assertIn("Fase: validate", plain)
+        self.assertNotIn("Run COMPLETATA", plain)
+        self.assertNotIn("Run INTERROTTA", plain)
+        # veste ANSI: titolo ciano bold, stato verde, fase ciano, label dim
+        self.assertIn("\x1b[1;36mBUO — BC-250 Ultimate Orchestrator\x1b[0m",
                       out)
-        self.assertIn("Fase: validate", out)
-        self.assertNotIn("Run COMPLETATA", out)
-        self.assertNotIn("Run INTERROTTA", out)
+        self.assertIn("\x1b[1;32mLa run è RIPRESA dopo il reboot ed è in "
+                      "corso.\x1b[0m", out)
+        self.assertIn("\x1b[36mFase 7 di 7: Validazione — stress test e "
+                      "verifica fix\x1b[0m", out)
+        self.assertIn("\x1b[2mLog live della run:\x1b[0m", out)
+        self.assertIn("\x1b[1;36mFase: validate\x1b[0m", out)
 
     def test_viewer_completed_run_exits_with_banner(self):
         """Run terminata con marcatore di completamento → blocco esito ok."""
@@ -335,27 +433,52 @@ class WatchLogInstallTest(unittest.TestCase):
                  _PREFIX + "Stress in corso: 3:00/10:00 — CPU 78°C · GPU 65°C"
                  " (massimi, nessun errore finora)\n",
                  _PREFIX + "OTTIMIZZAZIONE COMPLETATA\n",
-                 _PREFIX + "Riepilogo finale\n"]
+                 _PREFIX + "Riepilogo finale\n",
+                 _PREFIX + "  fix applicati in questa run: 2 — 8 core, 40 CU\n",
+                 _PREFIX + "  stress: superato · 10 minuti\n",
+                 _PREFIX + "  rollback: sudo buo rollback\n"]
         r = self._run_viewer(pgrep_rc=1, log_lines=lines, phase="complete")
         self.assertEqual(r.returncode, 0)
-        self.assertIn("Run COMPLETATA — esito positivo.", r.stdout)
-        self.assertIn("Puoi chiudere questa finestra.", r.stdout)
+        plain = _strip_ansi(r.stdout)
+        self.assertIn("Run COMPLETATA — esito positivo.", plain)
+        self.assertIn("Puoi chiudere questa finestra.", plain)
         self.assertIn("Stress in corso: 3:00/10:00 — CPU 78°C · GPU 65°C",
-                      r.stdout)          # messaggio filtrato, prefisso via
-        self.assertNotIn("buo.Orchestrator", r.stdout)
-        self.assertNotIn("Fase 7 di 7", r.stdout)   # current_phase=complete
+                      plain)          # messaggio filtrato, prefisso via
+        self.assertIn("  rollback: sudo buo rollback", plain)
+        self.assertNotIn("buo.Orchestrator", plain)
+        self.assertNotIn("Fase 7 di 7", plain)   # current_phase=complete
+        # veste ANSI: completamento verde, riepilogo dim, rollback giallo
+        self.assertIn("\x1b[1;32mOTTIMIZZAZIONE COMPLETATA\x1b[0m", r.stdout)
+        self.assertIn("\x1b[1;37mRiepilogo finale\x1b[0m", r.stdout)
+        self.assertIn("\x1b[2m  fix applicati in questa run: 2 — 8 core, "
+                      "40 CU\x1b[0m", r.stdout)
+        self.assertIn("\x1b[1;33m  rollback: sudo buo rollback\x1b[0m",
+                      r.stdout)
+        self.assertIn("\x1b[1;32mRun COMPLETATA — esito positivo.\x1b[0m",
+                      r.stdout)
+        self.assertIn("\x1b[2mRiepilogo finale qui sopra. Puoi chiudere "
+                      "questa finestra.\x1b[0m", r.stdout)
 
     def test_viewer_error_run_exits_with_interrupted_banner(self):
         """Run terminata con Errore in fase → blocco INTERROTTA + Cosa fare."""
+        error_line = ("2026-09-04 13:25:02,391 | ERROR | buo.Orchestrator | "
+                      "Errore in fase validate: stress fallito\n")
         lines = [_PREFIX + "Avvio ottimizzazione (BUO v1.3.0)\n",
                  _PREFIX + "Fase: validate\n",
-                 _PREFIX + "Errore in fase validate: stress fallito\n"]
+                 error_line]
         r = self._run_viewer(pgrep_rc=1, log_lines=lines)
         self.assertEqual(r.returncode, 0)
+        plain = _strip_ansi(r.stdout)
         self.assertIn("Run INTERROTTA — l'ottimizzazione non è stata "
-                      "completata.", r.stdout)
-        self.assertIn("Cosa fare:", r.stdout)
-        self.assertIn("sudo buo doctor", r.stdout)
+                      "completata.", plain)
+        self.assertIn("Cosa fare:", plain)
+        self.assertIn("sudo buo doctor", plain)
+        # veste ANSI: riga ERROR rossa, headline rossa bold, "Cosa fare:" bold
+        self.assertIn("\x1b[31mErrore in fase validate: stress fallito"
+                      "\x1b[0m", r.stdout)
+        self.assertIn("\x1b[1;31mRun INTERROTTA — l'ottimizzazione non è "
+                      "stata completata.\x1b[0m", r.stdout)
+        self.assertIn("\x1b[1mCosa fare:\x1b[0m", r.stdout)
 
     def test_viewer_starts_at_last_run_marker(self):
         """Offset: si parte dall'ultimo 'Avvio ottimizzazione' (la ripresa)."""
@@ -366,9 +489,10 @@ class WatchLogInstallTest(unittest.TestCase):
                  _PREFIX + "OTTIMIZZAZIONE COMPLETATA\n"]
         r = self._run_viewer(pgrep_rc=1, log_lines=lines)
         self.assertEqual(r.returncode, 0)
-        self.assertIn("Fase: validate", r.stdout)
-        self.assertNotIn("Fase: fix", r.stdout)   # storia precedente esclusa
-        self.assertIn("Run COMPLETATA — esito positivo.", r.stdout)
+        plain = _strip_ansi(r.stdout)
+        self.assertIn("Fase: validate", plain)
+        self.assertNotIn("Fase: fix", plain)   # storia precedente esclusa
+        self.assertIn("Run COMPLETATA — esito positivo.", plain)
 
 
 if __name__ == "__main__":
