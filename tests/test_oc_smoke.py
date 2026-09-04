@@ -93,7 +93,10 @@ class TestSmokeOutcome(Base):
     @mock.patch("buo.oc.smoke.subprocess.Popen")
     def test_stretch(self, popen):
         popen.return_value = self._popen(first_none=True)
-        r = self.smoke(FakeReader(temp=60, freq=3600)).run(3700, 975)
+        # freq_warmup_s=0: il mock simula il loop intero (il warmup serve
+        # solo sul campo per il ramp della freq dopo l'apply)
+        r = self.smoke(FakeReader(temp=60, freq=3600),
+                       freq_warmup_s=0).run(3700, 975)
         self.assertFalse(r.ok)
         self.assertEqual(r.cause, "stretch")
 
@@ -140,7 +143,7 @@ class TestSmokeOutcome(Base):
     def test_freq_min_tracked(self, popen):
         popen.return_value = self._popen(first_none=True)
         reader = FakeReader(temp=60, freq=3700)
-        r = self.smoke(reader).run(3700, 975)
+        r = self.smoke(reader, freq_warmup_s=0).run(3700, 975)
         self.assertEqual(r.freq_min, 3700)
 
 

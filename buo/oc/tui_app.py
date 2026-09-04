@@ -138,7 +138,11 @@ def run_text(st: Dict[str, Any]) -> str:
                          "run (vedi ? = aiuto).")
     apply_state = st.get("apply") if isinstance(st.get("apply"), dict) else {}
     if apply_state.get("state") in ("rolled_back", "aborted", "stale"):
-        label = {"rolled_back": "ROLLED BACK", "aborted": "RIFIUTATO",
+        # Rassicurazione: rolled_back = apply NON riuscito ma config
+        # precedente RIPRISTINATA (macchina sicura) — niente toni da guasto.
+        label = {"rolled_back": "non applicato (config precedente "
+                                "ripristinata)",
+                 "aborted": "RIFIUTATO",
                  "stale": "INTERROTTO"}.get(apply_state.get("state"))
         lines.append(f"nota:        ultimo apply {label} — controlla il log")
     return "\n".join(lines)

@@ -97,7 +97,10 @@ class CpuSmoke:
                  sudo: bool = True,
                  timeout_s: int = SMOKE_TIMEOUT_S,
                  dmesg_cmd: str = "dmesg",
-                 dry_run: bool = False):
+                 dry_run: bool = False,
+                 freq_warmup_s: int = 3):
+        """freq_warmup_s: secondi di warmup PRIMA di tracciare freq_min —
+        dopo l'apply la freq deve rampare al target (falso stretch senza)."""
         self.reader = reader
         self.mock = mock
         self.dry_run = dry_run
@@ -108,6 +111,7 @@ class CpuSmoke:
         self._marker = self.oc_dir / SMOKE_MARKER
         self._sudo = sudo
         self._timeout_s = timeout_s
+        self._freq_warmup_s = freq_warmup_s
         self._dmesg_cmd = dmesg_cmd
         self._stress_cmd = stress_cmd or self._default_stress_cmd()
         self._systemctl = systemctl_cmd
@@ -196,8 +200,10 @@ class CpuSmoke:
                 proc = None
             if proc is not None:
                 deadline = started + self._timeout_s
+                sample = 0
                 while proc.poll() is None and time.monotonic() < deadline:
                     time.sleep(1)
+                    sample += 1
                     t = self._safe_temp()
                     if t is not None:
                         temp_max = t if temp_max is None else max(temp_max, t)
@@ -207,7 +213,13 @@ class CpuSmoke:
                             temp_max = t
                             break
                     f = self._safe_freq()
-                    if f is not None:
+                    # Warmup (freq_warmup_s) prima di tracciare freq_min:
+                    # dopo l'apply la freq DEVE rampare al target (parte
+                    # dallo stato precedente, es. 3500) — i primi campioni
+                    # darebbero un FALSO stretch (osservato sul campo:
+                    # apply 3825 falliva 'stretch' in modo intermittente,
+                    # mai a regime).
+                    if f is not None and sample > self._freq_warmup_s:
                         freq_min = f if freq_min is None else min(freq_min, f)
                 if proc.poll() is None:
                     self._kill(proc)

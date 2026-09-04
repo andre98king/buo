@@ -785,9 +785,13 @@ def run_tui(mock: bool = False, mock_hardware=None, oc_dir=None,
             if result == "ok":
                 self._oc_log(f"{tag}ok", "green")
             elif result == "rolled_back":
-                det = f" (smoke fallito: {cause})" if cause else ""
-                self._oc_log(f"{tag}ROLLED BACK — ripristinato il "
-                             f"backup{det}", "bold red")
+                det = f" (smoke: {cause})" if cause else ""
+                # Rassicurazione: l'apply NON è andato a buon fine ma la
+                # config precedente è stata RIPRISTINATA — la macchina è
+                # nello stato sicuro di prima (spec UX: mai toni che
+                # sembrano un guasto senza via d'uscita).
+                self._oc_log(f"{tag}non applicato{det} — config "
+                             f"precedente ripristinata (sicura)", "yellow")
             elif result == "aborted":
                 det = f" — {cause}" if cause else ""
                 self._oc_log(f"{tag}rifiutato{det}", "yellow")

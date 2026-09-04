@@ -113,14 +113,18 @@ class TestRunText(unittest.TestCase):
         self.assertNotIn("NON PRESENTE", text)
 
     def test_apply_rolled_back_nota(self):
-        """Stato apply rolled_back → riga nota con ROLLED BACK."""
+        """Stato apply rolled_back → riga nota che RASSICURA: apply non
+        riuscito ma config precedente ripristinata (non 'ROLLED BACK')."""
         st = {"state": {"phase_label": "done"},
               "process": {"active": False},
               "governor": "active",
               "engine": {"present": True},
               "apply": {"state": "rolled_back", "profile": "certified"}}
         text = run_text(st)
-        self.assertIn("ROLLED BACK", text)
+        self.assertIn("non applicato", text)
+        self.assertIn("config precedente", text)
+        self.assertIn("ripristinata", text)
+        self.assertNotIn("ROLLED BACK", text)
         self.assertIn("controlla il log", text)
 
     def test_apply_ok_no_nota(self):
