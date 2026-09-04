@@ -319,8 +319,14 @@ class ApplyManager:
             on_progress(f"smoke {SMOKE_STRESS_S}s…")
         result = self.smoke.run(profile.freq, profile.vid_cap)
         if not result.ok:
+            # Numeri reali nel log (freq_min/temp_max): il 'stretch' può
+            # essere un falso positivo da oscillazione SMU sotto stress
+            # sintetico — senza i dati non si distingue da uno vero.
+            det = (f" (freq_min={result.freq_min} target={profile.freq}, "
+                   f"temp_max={result.temp_max})")
+            self._log(details, f"smoke fail: {result.cause}{det}")
             return self._rollback(profile, backup, details,
-                                  f"smoke fail: {result.cause}")
+                                  f"smoke fail: {result.cause}{det}")
 
         # 7. Persist opzionale (SOLO --persist + conferma)
         persisted = False
