@@ -1883,8 +1883,9 @@ class Orchestrator(LoggerMixin):
         """Persistenza 40-CU al boot (auto nei run NON interattivi).
 
         Il runtime UMR è VOLATILE: al reboot le 40 CU tornano a 24. La
-        persistenza (install-service + write-service-table) è validata
-        sul campo e stabile, ma richiede un reboot per l'attivazione.
+        persistenza (conf full-die scritto DIRETTAMENTE da persist() +
+        servizio di boot abilitato — fix 05/09: mai snapshot della
+        tabella live) richiede un reboot per l'attivazione.
         • GATE D9 (design POSTUNLOCK_VALIDATION): si persiste SOLO su
           silicio validato — (a) validazione short appena passata
           (results.gpu.validation), (b) results.tsv completo (per-WGP),
@@ -1896,12 +1897,15 @@ class Orchestrator(LoggerMixin):
         • interattivo: BUO chiede conferma;
         • mock/dry-run: nessuna chiamata reale, solo la nota.
 
-        M4 (bug 05/09, verificato sul campo): write-service-table LEGGE
-        la tabella WGP corrente via umr → a governor ATTIVO la persistenza
-        fallisce (rc=1, contesa sul percorso GPU) → gira dentro
-        `_governor_paused` (stop confermato o abort, restart a fine
-        accesso). Governor non confermato FERMO → persistenza ANNULLATA
-        con warning: le 40-CU restano volatili, la run NON si blocca.
+        M4 (bug 05/09, verificato sul campo): la VECCHIA persistenza
+        (write-service-table) leggeva la tabella WGP corrente via umr →
+        a governor attivo falliva (rc=1) e su macchina a 24-CU live
+        regrediva il conf di boot a 0x07. Ora persist() scrive il conf
+        full-die senza toccare la GPU; resta comunque dentro
+        `_governor_paused` (regola SMU/GPU: stop confermato o abort,
+        restart a fine accesso). Governor non confermato FERMO →
+        persistenza ANNULLATA con warning: le 40-CU restano volatili,
+        la run NON si blocca.
         """
         if gpu.get("method") != "runtime_umr":
             return  # kernel patch: la persistenza è nel modulo, non serve
@@ -1929,19 +1933,20 @@ class Orchestrator(LoggerMixin):
         else:
             self.logger.warning(
                 "40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
-                "Persistenza validata (install-service + "
-                "write-service-table).")
+                "Persistenza disponibile (conf full-die scritto da buo + "
+                "servizio abilitato).")
         if self.mock or self.dry_run:
             results["gpu"]["persistence"] = {
                 "suggested": True,
-                "note": "Per rendere persistenti le 40 CU al boot: esegui "
-                        "la persistenza manuale (install-service + "
-                        "write-service-table)",
+                "note": "Per rendere persistenti le 40 CU al boot su una "
+                        "macchina reale: run non interattivo di buo (conf "
+                        "full-die 0x1f x4 scritto direttamente + servizio "
+                        "abilitato)",
             }
             self.results["notes"].append(
                 "40 CU attive ma VOLATILI (runtime UMR): al reboot tornano "
-                "a 24. Persistenza manuale disponibile (install-service + "
-                "write-service-table)"
+                "a 24. Persistenza al boot disponibile (conf full-die "
+                "scritto da buo, servizio abilitato)"
             )
             return
         if self.interactive:
@@ -1969,8 +1974,8 @@ class Orchestrator(LoggerMixin):
                 "solo volatili (al prossimo reboot tornano a 24)", e)
             self.results["notes"].append(
                 "Persistenza 40-CU non eseguita: governor non confermato "
-                "fermo — 40 CU volatili (persistenza manuale: "
-                "install-service + write-service-table)")
+                "fermo — 40 CU volatili (persistenza al boot: conf "
+                "full-die scritto da buo + servizio abilitato)")
             results["gpu"]["persistence"] = {
                 "persisted": False,
                 "error": str(e),

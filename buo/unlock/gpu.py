@@ -31,6 +31,17 @@ from .wrappers.bc250_live_manager import BC250LiveManagerWrapper
 class GPU40CUUnlock(LoggerMixin):
     """Sblocco delle 40 CU GPU (metodo per distro)."""
 
+    # Conf di boot del live-manager (EnvironmentFile dell'unità systemd);
+    # percorso iniettabile nei test.
+    boot_conf_path = "/etc/bc250-cu-live-manager.conf"
+    # Profilo di boot FULL-DIE: enable_all instrada tutto il die e applica
+    # proprio queste maschere (0x1f x4 = 20 WGP = 40 CU). Formato verificato
+    # sul campo (cat /etc/bc250-cu-live-manager.conf).
+    _FULL_DIE_CONF = (
+        "BC250_WGP_MASKS=0x1f,0x1f,0x1f,0x1f\n"
+        "UMR_ASIC=cyan_skillfish.gfx1013\n"
+    )
+
     def __init__(self, mock: bool = False, mock_hardware=None,
                  use_wrapper: bool = True):
         self.mock = mock
@@ -96,8 +107,8 @@ class GPU40CUUnlock(LoggerMixin):
             "method": "runtime_umr",
             "warning": (
                 "40 CU attive (volatili, runtime UMR). Per la persistenza "
-                "al boot: eseguire la persistenza manuale (install-service + "
-                "write-service-table), validata sul campo."
+                "al boot: eseguire la persistenza (conf full-die scritto "
+                "da buo + servizio abilitato), validata sul campo."
             ),
         }
 
@@ -118,8 +129,14 @@ class GPU40CUUnlock(LoggerMixin):
     def persist(self) -> Dict[str, Any]:
         """Persistenza 40 CU al boot (SOLO ostree/runtime UMR, opt-in).
 
-        Validata sul campo (28/08/2026): install-service + tabella salvata,
-        stabile al reboot. Richiede un reboot per la verifica.
+        Root cause (bug campo 05/09): il flusso storico (install-service +
+        write-service-table) SNAPSHOTTAVA la tabella WGP LIVE dello script
+        → su macchina a 24-CU live (dopo un reboot) il conf di boot veniva
+        regredito a MASKS=0x07 (24 CU). Ora il conf full-die (0x1f x4 +
+        UMR_ASIC — il target che enable_all applica) è scritto DIRETTAMENTE:
+        buo conosce il target e non dipende dallo snapshot. Il servizio di
+        boot viene solo garantito presente+enabled. Richiede un reboot per
+        l'attivazione.
         """
         if not self.is_ostree:
             return {
@@ -128,16 +145,87 @@ class GPU40CUUnlock(LoggerMixin):
             }
         if self.wrapper is None or not self.wrapper.available:
             return {"persisted": False, "error": "live-manager non installato"}
-        svc = self.wrapper.install_service()
-        if svc["returncode"] != 0:
-            return {"persisted": False, "error": svc["stderr"] or "install-service fallito"}
-        tbl = self.wrapper.write_service_table()
-        if tbl["returncode"] != 0:
-            return {"persisted": False, "error": tbl["stderr"] or "write-service-table fallito"}
+        try:
+            ok, err = self._write_boot_conf()
+            if not ok:
+                return {"persisted": False, "error": err}
+            ok, err = self._ensure_boot_service()
+            if not ok:
+                return {"persisted": False, "error": err}
+        except Exception as e:
+            # persist NON deve mai sollevare: l'orchestratore tratta un
+            # fallimento di persistenza come warning, mai bloccante.
+            return {"persisted": False,
+                    "error": "persistenza 40-CU fallita: %s" % e}
         return {
             "persisted": True,
             "note": "40 CU persistite al boot (richiede reboot per l'attivazione)",
         }
+
+    def _write_boot_conf(self):
+        """Scrive il conf di boot full-die (atomico: tmp + os.replace,
+        stesso pattern di smoke/verdict). Mai uno snapshot della tabella
+        live dello script."""
+        path = self.boot_conf_path
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(self._FULL_DIE_CONF)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except Exception as e:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return False, "scrittura conf 40-CU fallita: %s" % e
+        return True, ""
+
+    def _ensure_boot_service(self):
+        """Garantisce bc250-cu-live-manager.service presente + ENABLED.
+
+        • già enabled → skip (nessuna chiamata, nessun rischio);
+        • presente ma disabilitata → systemctl enable;
+        • ASSENTE → install-service dalla COPIA in /tmp (quirk 'same
+          file' di install-service quando lo script gira da
+          /usr/local/bin, symlink ostree — BUGS #24), pattern validato
+          da _repair_40cu_service.
+        """
+        import shutil
+        from ..utils.shell import run_command
+
+        unit = "bc250-cu-live-manager"
+        rc, out, _ = run_command(["systemctl", "is-enabled", unit],
+                                 check=False)
+        if rc == 0 and out.strip() == "enabled":
+            return True, ""
+        rc, _, _ = run_command(["systemctl", "cat", unit], check=False)
+        if rc == 0:
+            rc, _, err = run_command(["systemctl", "enable", unit],
+                                     sudo=True, check=False)
+            if rc == 0:
+                return True, ""
+            return False, err or "systemctl enable fallito"
+        lm = "/usr/local/bin/bc250-cu-live-manager"
+        if not os.path.exists(lm):
+            return False, "live-manager assente: %s" % lm
+        tmp = "/tmp/bc250-cu-live-manager"
+        try:
+            shutil.copy2(lm, tmp)
+        except Exception as e:
+            return False, "copia live-manager in /tmp fallita: %s" % e
+        try:
+            rc, _, err = run_command([tmp, "-y", "install-service"],
+                                     sudo=True, check=False)
+            if rc == 0:
+                return True, ""
+            return False, err or "install-service fallito (rc=%s)" % rc
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
 
     def rollback(self) -> bool:
         """Torna a 24 CU (metodo per distro)."""
