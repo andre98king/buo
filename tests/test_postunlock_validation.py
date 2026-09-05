@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 Validazione post-unlock (design research/DESIGN_POSTUNLOCK_VALIDATION.md,
-sezione 7): 15 scenari — mock, zero hardware, zero sleep reali (C1).
+sezione 7 + DESIGN_AUTOPROVISION_GPU_TOOLS.md §7): 22 scenari — mock,
+zero hardware, zero sleep reali (C1).
 
 Copre: validatori CPU/GPU (unità), verdetto store, revert CPU, fase
 `unlock_validate` dell'orchestratore (scenari 1-6), hook GPU post-enable
 (scenari 7-10), gate verdetto (11), anti-loop (12), dry-run/mock senza
-stato persistente (13), config (14), determinismo mock (15).
+stato persistente (13), config (14), determinismo mock (15),
+auto-provvigionamento vkmark nel ramo tool_missing e hook init
+(scenari 16-22).
 """
 
 import os
@@ -1036,6 +1039,290 @@ class TestUnlockValidationConfig(unittest.TestCase):
         finally:
             os.environ.pop("BUO_STATE_DIR", None)
             tmp.cleanup()
+
+
+# ===================================================================== #
+# 8. Auto-provvigionamento vkmark (design AUTOPROVISION §7, scenari 16-22)
+# ===================================================================== #
+
+class TestGpuAutoprovision(_OrchCase):
+    """Ramo tool_missing riscritto: provisioning → ri-valida immediata /
+    pending+reboot / ricetta a5970eb invariata; check tool PRIMA del
+    marcatore (GOTCHA §5); consumo del pending al resume (attempts ≤ 2)."""
+
+    def _umr_apply(self, applied=True):
+        return {"applied": applied, "cu_count": 40,
+                "needs_reboot": False, "method": "runtime_umr"}
+
+    def _fresh(self, orch, hw, tsv=TSV_ABSENT):
+        """Macchina fresca (results.tsv assente): health finto."""
+        orch.health_test = _FakeHealth(tsv)
+        return orch, hw
+
+    def _apply_enable(self, hw):
+        def _apply():
+            hw.state.gpu_cu_count = 40
+            hw.state.is_40cu_enabled = True
+            return self._umr_apply()
+        return _apply
+
+    def test_16_ok_immediate_revalidates_same_boot(self):
+        """tool assente + provisioning ok immediato (dnf/apt) → la
+        validazione viene RI-ESEGUITA nello stesso boot → pass →
+        stable_short + persistenza; nessun reboot, nessun pending."""
+        orch, hw = self._make(cpu_probe=False)
+        self._fresh(orch, hw)
+        state = {"tool": False}
+
+        def _provision():
+            state["tool"] = True   # dnf/apt: attivo subito
+            return {"status": "ok", "installed": True,
+                    "needs_reboot": False, "detail": "installato (dnf)"}
+
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: state["tool"]), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               side_effect=_provision), \
+             mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)):
+            out = orch._phase_unlock()
+        self.assertEqual(out["gpu"]["validation"]["outcome"], "pass")
+        self.assertEqual(orch.unlock_verdict.get("gpu"), "stable_short")
+        self.assertIsNone(orch.checkpoint.get("unlock_gpu_validate_pending"))
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 0,
+                         "nessun reboot: vkmark attivo nello stesso boot")
+        self.assertTrue(out["gpu"]["persistence"]["suggested"],
+                        "persistenza proposta (silicio validato)")
+
+    def test_17_staged_pending_then_resume_revalidates(self):
+        """tool assente + provisioning staged (ostree) → pending
+        {attempts:1} + reboot programmato; NESSUN stock dispatch, nessun
+        verdetto. Al resume (tool presente) → ri-enable (volatile perso
+        al reboot) → pass → stable_short + pending consumato."""
+        orch, hw = self._make(cpu_probe=False)
+        self._fresh(orch, hw)
+        state = {"tool": False}
+
+        def _provision_staged():
+            state["tool"] = False   # staged: NON attivo subito
+            return {"status": "ok", "installed": True,
+                    "needs_reboot": True, "detail": "staged (rpm-ostree)"}
+
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: state["tool"]), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               side_effect=_provision_staged), \
+             mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)), \
+             mock.patch.object(orch.gpu_unlock, "rollback") as rb:
+            out = orch._phase_unlock()
+        self.assertEqual(out["gpu"]["validation"]["cause"], "tool_missing")
+        self.assertEqual(orch.checkpoint.get("unlock_gpu_validate_pending"),
+                         {"attempts": 1})
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 1,
+                         "reboot dedicato per l'attivazione del layer")
+        self.assertIsNone(orch.unlock_verdict.get("gpu"),
+                          "nessun verdetto: la validazione è solo rinviata")
+        rb.assert_not_called()          # nessuno stock dispatch
+        self.assertEqual(hw.state.gpu_cu_count, 40, "40-CU volatili attive")
+
+        # ---- RESUME dopo il reboot dedicato (il volatile si è perso) ----
+        hw.state.gpu_cu_count = 24      # reboot: 40-CU volatili perse
+        hw.state.is_40cu_enabled = False
+        state["tool"] = True            # layer attivato dal reboot
+        with mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)) as spy, \
+             mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: state["tool"]):
+            out2 = orch._phase_unlock()
+        self.assertEqual(out2["gpu"]["validation"]["outcome"], "pass")
+        self.assertEqual(orch.unlock_verdict.get("gpu"), "stable_short")
+        self.assertEqual(hw.state.gpu_cu_count, 40, "ri-enable al resume")
+        spy.assert_called()             # 40-CU ri-abilitate dopo il reboot
+        self.assertIsNone(orch.checkpoint.get("unlock_gpu_validate_pending"),
+                          "pending consumato dall'esito")
+
+    def test_18_provision_failed_recipe_invariant(self):
+        """tool assente + provisioning FAILED (offline) → comportamento
+        a5970eb invariato: 40-CU ATTIVE VOLATILI (nessuno stock dispatch),
+        nessun verdetto, nessuna persistenza, nota col dettaglio del
+        fallimento."""
+        orch, hw = self._make(cpu_probe=False)
+        self._fresh(orch, hw)
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               return_value=False), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               return_value={"status": "failed",
+                                             "installed": False,
+                                             "needs_reboot": False,
+                                             "detail": "offline: repo "
+                                                       "non raggiungibile"}), \
+             mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)), \
+             mock.patch.object(orch.gpu_unlock, "rollback") as rb:
+            out = orch._phase_unlock()
+        self.assertEqual(out["gpu"]["validation"]["outcome"],
+                         "inconclusive")
+        self.assertEqual(out["gpu"]["validation"]["cause"], "tool_missing")
+        self.assertIsNone(orch.unlock_verdict.get("gpu"))
+        rb.assert_not_called()          # nessuno stock dispatch
+        self.assertEqual(hw.state.gpu_cu_count, 40, "40-CU volatili")
+        self.assertTrue(hw.state.is_40cu_enabled)
+        self.assertNotIn("persistence", out["gpu"])
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 0)
+        self.assertIsNone(orch.checkpoint.get("unlock_gpu_validate_pending"))
+        notes = "\n".join(orch.results["notes"])
+        self.assertIn("vkmark", notes)
+        self.assertIn("VOLATILI", notes)
+        self.assertIn("offline", notes, "dettaglio del fallimento in nota")
+
+    def test_19_pending_resume_retry_then_recipe_never_condemns(self):
+        """pending al resume con tool ANCORA assente → retry del
+        provisioning (attempts 1→2, staged → 2° reboot dedicato); al
+        resume successivo ancora senza tool (attempts esauriti) → ricetta
+        volatili + pending pulito. MAI never_enable_all per un problema
+        ambientale."""
+        orch, hw = self._make(cpu_probe=False)
+        self._fresh(orch, hw)
+        state = {"tool": False}
+
+        def _provision_staged():
+            return {"status": "ok", "installed": True,
+                    "needs_reboot": True, "detail": "staged (rpm-ostree)"}
+
+        # run 1: deferral (pending attempts=1) + reboot dedicato
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: state["tool"]), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               side_effect=_provision_staged), \
+             mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)):
+            orch._phase_unlock()
+        self.assertEqual(orch.checkpoint.get("unlock_gpu_validate_pending"),
+                         {"attempts": 1})
+
+        # resume 1: tool ANCORA assente → retry (attempts 1→2) + 2° reboot
+        hw.state.gpu_cu_count = 24      # il reboot ha perso il volatile
+        hw.state.is_40cu_enabled = False
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: state["tool"]), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               side_effect=_provision_staged), \
+             mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)) as spy, \
+             mock.patch.object(orch.gpu_unlock, "rollback") as rb:
+            orch._phase_unlock()
+        self.assertEqual(orch.checkpoint.get("unlock_gpu_validate_pending"),
+                         {"attempts": 2})
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 2)
+        spy.assert_not_called()         # niente ri-enable senza tool
+        rb.assert_not_called()
+        self.assertIsNone(orch.unlock_verdict.get("gpu"))
+
+        # resume 2: tool ancora assente → attempts esauriti → ricetta
+        # volatili + pending pulito (nessun altro staging, mai condanna)
+        hw.state.gpu_cu_count = 24
+        hw.state.is_40cu_enabled = False
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: state["tool"]), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               side_effect=AssertionError(
+                                   "attempts esauriti: nessun altro "
+                                   "staging")), \
+             mock.patch.object(orch.gpu_unlock, "rollback") as rb2:
+            orch._phase_unlock()
+        self.assertIsNone(orch.checkpoint.get("unlock_gpu_validate_pending"),
+                          "pending pulito dopo gli attempts")
+        self.assertIsNone(orch.unlock_verdict.get("gpu"),
+                          "MAI never_enable_all per un problema ambientale")
+        rb2.assert_not_called()
+        self.assertTrue(any("vkmark" in n for n in orch.results["notes"]))
+
+    def test_22_marker_never_written_by_provisioning(self):
+        """🔒 GOTCHA (design §5): il check tool_available viene PRIMA
+        della scrittura di unlock_gpu_validate_marker → il ramo
+        provisioning (staged + reboot) NON lascia MAI il marcatore
+        scritto: al resume non può essere letto come stale → nessuna
+        condanna hang falsa (never_enable_all)."""
+        orch, hw = self._make(cpu_probe=False)
+        self._fresh(orch, hw)
+        results = {"gpu": {}}
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               return_value=False), \
+             mock.patch.object(orch, "_provision_vkmark",
+                               return_value={"status": "ok",
+                                             "installed": True,
+                                             "needs_reboot": True,
+                                             "detail": "staged"}):
+            orch._gpu_validate(results, self._umr_apply())
+        self.assertIsNone(orch.checkpoint.get("unlock_gpu_validate_marker"),
+                          "il provisioning NON scrive il marcatore")
+        self.assertEqual(orch.checkpoint.get("unlock_gpu_validate_pending"),
+                         {"attempts": 1})
+        # e il pending non è MAI interpretato come hang al resume:
+        # il flusso lo consuma con ri-enable + ri-validazione
+        orch.checkpoint.set("applied_steps", ["gpu_40cu"])
+        hw.state.gpu_cu_count = 24
+        hw.state.is_40cu_enabled = False
+        with mock.patch.object(orch.gpu_validation, "tool_available",
+                               side_effect=lambda: True), \
+             mock.patch.object(orch.gpu_unlock, "apply",
+                               side_effect=self._apply_enable(hw)):
+            out = orch._phase_unlock()
+        self.assertEqual(out["gpu"]["validation"]["outcome"], "pass")
+        self.assertEqual(orch.unlock_verdict.get("gpu"), "stable_short",
+                         "validazione completata, nessuna condanna hang")
+
+
+class TestInitGpuTools(_OrchCase):
+    """Hook init `_ensure_gpu_tools` (design AUTOPROVISION P3a):
+    fail-soft, gate deps.auto_install + probe_gpu_unlock; MAI invocato
+    in mock/dry-run (M2/C1)."""
+
+    def _real_orch(self):
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False)
+        orch.checkpoint.clear()
+        return orch
+
+    def test_20_init_provision_invoked_and_fail_soft(self):
+        """init (run reale, gate attivi): vkmark assente → provisioning
+        invocato; esito fallito → la run NON si blocca (fail-soft)."""
+        orch = self._real_orch()
+        with mock.patch.object(orch, "_provision_vkmark",
+                               return_value={"status": "failed",
+                                             "installed": False,
+                                             "needs_reboot": False,
+                                             "detail": "offline"}) as spy:
+            orch._ensure_gpu_tools()    # non deve sollevare
+        spy.assert_called_once()
+        # e con esito staged: nessun errore, solo il log
+        with mock.patch.object(orch, "_provision_vkmark",
+                               return_value={"status": "ok",
+                                             "installed": True,
+                                             "needs_reboot": True,
+                                             "detail": "staged"}):
+            orch._ensure_gpu_tools()    # non deve sollevare
+
+    def test_20b_gate_deps_auto_install_and_probe(self):
+        """Gate: deps.auto_install=false o probe_gpu_unlock=false →
+        provisioning MAI invocato."""
+        orch = self._real_orch()
+        with mock.patch.object(orch, "_provision_vkmark") as spy:
+            orch.config.deps_auto_install = False
+            orch._ensure_gpu_tools()
+            orch.config.deps_auto_install = True
+            orch.config.probe_gpu_unlock = False
+            orch._ensure_gpu_tools()
+        spy.assert_not_called()
+
+    def test_21_mock_and_dry_run_never_provision(self):
+        """mock E dry-run: provisioning MAI invocato (spia)."""
+        for dry in (False, True):
+            orch, _ = self._make(dry_run=dry)
+            with mock.patch.object(orch, "_provision_vkmark",
+                                   wraps=orch._provision_vkmark) as spy:
+                orch._ensure_gpu_tools()
+            spy.assert_not_called()
 
 
 if __name__ == "__main__":

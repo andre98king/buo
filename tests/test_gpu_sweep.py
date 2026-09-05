@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Test della ricerca per-silicio dell'undervolt GPU (design
-research/DESIGN_GPU_UV.md, §10 — 14 casi).
+research/DESIGN_GPU_UV.md, §10 — 14 casi + DESIGN_AUTOPROVISION_GPU_TOOLS.md
+§7, scenari 23-26: auto-provvigionamento vkmark nel ramo no-tool).
 
 Seam di test: GPUUndervoltOptimizer(mock=False, governor=FakeGov,
 probe=FakeProbe, monitor=FakeMonitor). FakeProbe consulta la mappa
@@ -145,7 +146,7 @@ class _SweepBase(unittest.TestCase):
         self._tmp.cleanup()
 
     def make_opt(self, probe=None, monitor=None, reader=None, stress=None,
-                 governor=None, vddgfx_reader=None):
+                 governor=None, vddgfx_reader=None, provisioner=None):
         return GPUUndervoltOptimizer(
             mock=False,
             governor=governor if governor is not None else self.gov,
@@ -154,6 +155,7 @@ class _SweepBase(unittest.TestCase):
             reader=reader,
             probe=probe,
             vddgfx_reader=vddgfx_reader,
+            provisioner=provisioner,
         )
 
     def sweep(self, **overrides):
@@ -698,6 +700,81 @@ class TestSmuFloor(_SweepBase):
         with mock.patch("buo.utils.shell.run_command",
                         return_value=(1, "", "err")):
             self.assertIsNone(opt._read_vddgfx(800))
+
+
+class TestSweepAutoprovision(_SweepBase):
+    """Auto-provvigionamento vkmark nello sweep (design AUTOPROVISION §7,
+    scenari 23-26): best-effort, MAI reboot dedicato — il fallback
+    community resta il comportamento progettato (DESIGN_GPU_UV)."""
+
+    def _which_with_state(self, state):
+        def fake_which(tool):
+            if state["tool"] and tool in ("furmark", "vkmark"):
+                return f"/usr/bin/{tool}"
+            return None
+        return fake_which
+
+    def test_23_provision_ok_immediate_sweep_continues(self):
+        """#23: nessun tool + provisioner ok immediato → lo sweep PROSEGUE
+        per-silicio (probe mockato, NESSUN fallback community)."""
+        state = {"tool": False}
+
+        def provisioner():
+            state["tool"] = True   # dnf/apt: attivo subito
+            return {"status": "ok", "installed": True,
+                    "needs_reboot": False, "detail": "installato (dnf)"}
+
+        probe = FakeProbe(stable_map={1500: 750})
+        opt = self.make_opt(probe=probe, provisioner=provisioner)
+        with mock.patch("buo.optimize.gpu.which",
+                        side_effect=self._which_with_state(state)):
+            res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "per-silicon")
+        self.assertEqual(res["safe_points"],
+                         [{"freq": 1500, "voltage": 800}])
+        self.assertTrue(probe.calls, "sweep avviato dopo il provisioning")
+        self.assertEqual(self.gov.writes, [])  # solo a fine sweep
+
+    def test_24_provision_staged_community_and_note(self):
+        """#24: nessun tool + provisioner staged → tabella community +
+        nota "attivo al prossimo reboot" (MAI un reboot per lo sweep)."""
+        opt = self.make_opt(probe=FakeProbe(), provisioner=lambda: {
+            "status": "ok", "installed": True, "needs_reboot": True,
+            "detail": "staged (rpm-ostree)"})
+        with mock.patch("buo.optimize.gpu.which", return_value=None):
+            with self.assertLogs("buo.GPUUndervoltOptimizer", level="INFO") as cm:
+                res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "community_defaults")
+        self.assertEqual(self.gov.stops, 0,
+                         "nessuna scrittura/stop governor senza tool")
+        self.assertTrue(any("prossimo reboot" in m for m in cm.output),
+                        "nota 'attivo al prossimo reboot' nel log")
+
+    def test_25_provision_failed_community_unchanged(self):
+        """#25: nessun tool + provisioner failed → tabella community
+        (risultato INVARIATO rispetto a oggi) + nota ricetta."""
+        opt = self.make_opt(probe=FakeProbe(), provisioner=lambda: {
+            "status": "failed", "installed": False, "needs_reboot": False,
+            "detail": "offline: repo non raggiungibile"})
+        with mock.patch("buo.optimize.gpu.which", return_value=None):
+            with self.assertLogs("buo.GPUUndervoltOptimizer", level="INFO") as cm:
+                res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "community_defaults")
+        self.assertEqual(set(res.keys()),
+                         {"safe_points", "best_efficiency", "source"},
+                         "contratto di output invariato")
+        self.assertTrue(any("auto-install" in m for m in cm.output),
+                        "nota ricetta (auto-install non riuscito)")
+
+    def test_26_tool_present_provisioner_never_called(self):
+        """#26: tool presente (furmark) → provisioner MAI chiamato
+        (idempotenza: il provisioning è solo per il ramo no-tool)."""
+        prov = mock.Mock()
+        probe = FakeProbe(stable_map={1500: 750})
+        opt = self.make_opt(probe=probe, provisioner=prov)
+        res = opt.optimize(start_freq=1200, sweep=self.sweep())
+        self.assertEqual(res["source"], "per-silicon")
+        prov.assert_not_called()
 
 
 if __name__ == "__main__":

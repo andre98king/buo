@@ -83,7 +83,8 @@ class GPUUndervoltOptimizer(LoggerMixin):
 
     def __init__(self, mock: bool = False, mock_hardware=None,
                  governor=None, stress=None, monitor=None,
-                 reader=None, probe=None, vddgfx_reader=None):
+                 reader=None, probe=None, vddgfx_reader=None,
+                 provisioner=None):
         self.mock = mock
         self.mock_hw = mock_hardware
         # Dipendenze iniettabili (design §7): nei test si passano i fake;
@@ -98,6 +99,13 @@ class GPUUndervoltOptimizer(LoggerMixin):
         self.monitor = monitor
         self._reader_override = reader
         self.probe = probe          # callable (f, v, seconds) o None → self._probe
+        # Auto-provvigionamento del tool di stress GPU (design
+        # AUTOPROVISION P3c): callable → dict {status, needs_reboot,
+        # detail, installed} o None (nessun provisioning — default nei
+        # test e per uso standalone; l'orchestratore inietta il suo).
+        # MAI un reboot per lo sweep (ottimizzazione opzionale con
+        # fallback community sicuro).
+        self.provisioner = provisioner
         # Reader della VDDGFX reale (mV) per il rilevamento del floor SMU:
         # callable target_mv → mV reali o None (non leggibile). In
         # produzione senza override: debugfs amdgpu_pm_info con sudo.
@@ -200,10 +208,36 @@ class GPUUndervoltOptimizer(LoggerMixin):
         """
         # ---- prerequisiti (fail-closed: nessuna scrittura se mancano) ----
         if self._gpu_stress_tool() is None:
-            self.logger.warning(
-                "GPU non stressabile (nessun tool furmark/glmark2) → "
-                "tabella community")
-            return self._community_result(start_freq, max_voltage)
+            # Auto-provvigionamento best-effort del tool di stress
+            # (design AUTOPROVISION P3c): MAI un reboot dedicato per lo
+            # sweep (ottimizzazione opzionale con fallback community
+            # sicuro) — il layer staged si attiva al prossimo reboot.
+            if self.provisioner is not None:
+                try:
+                    prov = self.provisioner()
+                except Exception as e:
+                    prov = {"status": "failed", "detail": str(e)}
+                if prov.get("status") == "ok":
+                    if prov.get("needs_reboot"):
+                        self.logger.warning(
+                            "GPU tool: vkmark installato (staged) — attivo "
+                            "al prossimo reboot; questo run usa la tabella "
+                            "community (il prossimo farà lo sweep "
+                            "per-silicio)")
+                    elif self._gpu_stress_tool() is not None:
+                        self.logger.info(
+                            "GPU tool: vkmark installato (attivo subito) — "
+                            "sweep per-silicio avviato")
+                else:
+                    self.logger.warning(
+                        "GPU tool: auto-install vkmark non riuscito (%s) — "
+                        "tabella community; installa vkmark e riprova",
+                        (prov.get("detail") or "errore").strip()[:160])
+            if self._gpu_stress_tool() is None:
+                self.logger.warning(
+                    "GPU non stressabile (nessun tool furmark/vkmark) → "
+                    "tabella community")
+                return self._community_result(start_freq, max_voltage)
         if not self.governor.stop():
             self.logger.warning(
                 "Governor non gestibile (stop fallito) → tabella community")

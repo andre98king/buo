@@ -195,7 +195,12 @@ class Orchestrator(LoggerMixin):
 
         self.uv_cpu = CPUUndervoltOptimizer(mock=eff_mock, mock_hardware=hw,
                                             use_wrapper=not eff_mock)
-        self.uv_gpu = GPUUndervoltOptimizer(mock=eff_mock, mock_hardware=hw)
+        # provisioner = auto-install vkmark per lo sweep GPU (design
+        # AUTOPROVISION P3c, DI): solo nei run reali — in mock/dry-run lo
+        # sweep non parte mai e _provision_vkmark è comunque un no-op.
+        self.uv_gpu = GPUUndervoltOptimizer(
+            mock=eff_mock, mock_hardware=hw,
+            provisioner=self._provision_vkmark if not eff_mock else None)
         self.oc = OverclockOptimizer(mock=eff_mock, mock_hardware=hw)
         self.governor = GovernorWrapper(mock=eff_mock, mock_hardware=hw)
 
@@ -351,6 +356,7 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("unlock_cpu_validate_marker", None)
             self.checkpoint.set("unlock_gpu_validate_marker", None)
             self.checkpoint.set("unlock_cpu_validate_attempts", 0)
+            self.checkpoint.set("unlock_gpu_validate_pending", None)
             if restore is None:
                 self.checkpoint.set("restore_active", False)
                 # FIX (30/08): stesso pattern — un run nuovo SENZA restore
@@ -497,6 +503,14 @@ class Orchestrator(LoggerMixin):
         # Scarica automaticamente i tool della community mancanti
         # (solo hardware reale; in mock/dry-run non si scarica nulla)
         self._ensure_dependencies()
+
+        # Auto-provvigionamento del tool di validazione GPU (vkmark,
+        # design AUTOPROVISION P3a): fail-soft — un tool opzionale non
+        # blocca MAI la run (il ramo tool_missing di _gpu_validate
+        # ritenta); su macchina fresca il layer staged si attiva col
+        # reboot CPU già in programma → validazione al resume senza
+        # reboot aggiuntivi.
+        self._ensure_gpu_tools()
 
         # Avvia il safety monitor (sempre attivo durante l'esecuzione)
         if not self.dry_run and not self.mock:
@@ -858,6 +872,55 @@ class Orchestrator(LoggerMixin):
                 "Governor installato: sarà ATTIVO al prossimo reboot "
                 "(rpm-ostree layering)")
 
+    def _ensure_gpu_tools(self) -> None:
+        """Auto-provvigionamento del tool di validazione GPU (vkmark) a
+        init (design research/DESIGN_AUTOPROVISION_GPU_TOOLS.md, P3a):
+        su una macchina fresca il layer staged si attiva col reboot CPU
+        già in programma → la validazione GPU al resume trova vkmark
+        senza reboot aggiuntivi.
+
+        Fail-soft: un tool opzionale non blocca MAI la run (il ramo
+        tool_missing di `_gpu_validate` ritenta). Gate: `deps.auto_install`
+        (nessuna config nuova) + `probe_gpu_unlock`. Mock/dry-run: mai
+        (M2/C1 — guard nel chiamante, stesso pattern di
+        `_ensure_dependencies`).
+        """
+        if self.mock or self.dry_run:
+            return
+        if not self.config.deps_auto_install or not self.config.probe_gpu_unlock:
+            return
+        res = self._provision_vkmark()
+        if res.get("status") == "ok":
+            if res.get("needs_reboot"):
+                self.logger.info(
+                    "deps: vkmark installato (staged, rpm-ostree) — la "
+                    "validazione GPU girerà al prossimo resume")
+            else:
+                self.logger.info(
+                    "deps: vkmark presente — validazione GPU pronta")
+        else:
+            self.logger.warning(
+                "deps: auto-install vkmark NON riuscito (%s) — ricetta: "
+                "installa vkmark (radv) e riprova",
+                (res.get("detail") or "errore").strip()[:160])
+
+    def _provision_vkmark(self) -> Dict[str, Any]:
+        """`ensure_vkmark` reale (design AUTOPROVISION P2) — MAI invocato
+        in mock/dry-run (C1/M2); i test patchano questo metodo con un fake
+        (nessun subprocess reale). Sempre fail-soft: dict di esito, mai
+        eccezioni."""
+        if self.mock or self.dry_run:
+            return {"status": "failed", "installed": False,
+                    "needs_reboot": False,
+                    "detail": "simulazione (mock/dry-run): nessuna "
+                              "installazione reale"}
+        try:
+            from .install.gpu_tools import ensure_vkmark
+            return ensure_vkmark()
+        except Exception as e:
+            return {"status": "failed", "installed": False,
+                    "needs_reboot": False, "detail": str(e)}
+
     def _phase_pre_audit(self) -> Dict[str, Any]:
         """FASE 0 — PRE-AUDIT: discovery, problemi, benchmark before."""
         self.logger.info("Pre-audit — analisi dello stato attuale")
@@ -1018,7 +1081,12 @@ class Orchestrator(LoggerMixin):
                 self.logger.warning("Unlock GPU non eseguito: %s", e)
                 results["gpu"] = {"applied": False, "error": str(e)}
         elif "gpu_40cu" in done and not gpu_marker_handled:
-            if gpu_marker_fresh:
+            if self.checkpoint.get("unlock_gpu_validate_pending"):
+                # Consumo del pending (design AUTOPROVISION P4 caso B): il
+                # reboot dedicato per l'attivazione vkmark staged ha perso
+                # il volatile → ri-enable + ri-validazione al resume.
+                self._gpu_pending_resume(results)
+            elif gpu_marker_fresh:
                 # m1: validazione interrotta (SIGKILL, stesso boot) — le
                 # 40-CU attive NON certificate non vanno lasciate per il
                 # resto della run: ri-verifica dello stato corrente (D8)
@@ -1522,10 +1590,27 @@ class Orchestrator(LoggerMixin):
         SafetyViolation (D10). Pass → verdetto stable_short + persistenza;
         fail → stock dispatch + never_enable_all + disable persistenza;
         inconcluso (termico/display) → stock dispatch + NESSUN verdetto +
-        ricetta; inconcluso tool_missing (vkmark assente) → NESSUN stock
-        dispatch: le 40-CU restano ATTIVE VOLATILI (decisione utente
-        05/09: il volatile torna da solo a 24 al reboot, il fail-closed
-        peggiorerebbe l'esito di un silicio sano)."""
+        ricetta.
+
+        tool_missing (vkmark assente) → AUTO-PROVVIGIONAMENTO (design
+        AUTOPROVISION P3b, richiesta utente 05/09 "nessuno deve installare
+        i programmi da solo"):
+          1. `ensure_vkmark`; ok + attivo subito (dnf/apt) → ri-validazione
+             nello STESSO boot;
+          2. ok + staged (ostree) → marcatore `unlock_gpu_validate_pending`
+             (attempts ≤ 2) + reboot dedicato → al resume ri-enable 40-CU
+             e ri-validazione (P4 caso B);
+          3. failed (offline / pacchetto assente / non-root) o attempts
+             esauriti → comportamento a5970eb INVARIATO: 40-CU volatili,
+             NESSUN stock dispatch, nessun verdetto, nota ricetta col
+             dettaglio (P5 — un problema ambientale non diventa MAI una
+             condanna del silicio).
+
+        🔒 GOTCHA (design §5): il check `tool_available` va PRIMA della
+        scrittura di `unlock_gpu_validate_marker` — il marcatore deve
+        significare "vkmark sta girando adesso"; un reboot programmato
+        durante l'installazione NON deve lasciarlo scritto (al resume
+        sarebbe letto stale → HANG → `never_enable_all` FALSO)."""
         duration = self.config.validation_unlock_gpu_seconds
         if not self.config.probe_unlock_validate:
             # m2: probe.unlock_validate è l'interruttore master della
@@ -1538,80 +1623,206 @@ class Orchestrator(LoggerMixin):
             self.logger.info("   validazione GPU saltata (0 secondi, config)")
             return
         marker_key = "unlock_gpu_validate_marker"
-        if not self.mock and not self.dry_run:
-            self.checkpoint.set(marker_key,
-                                {"started_epoch": int(time.time())})
-        try:
-            val = self.gpu_validation.run(duration_s=duration)
-        finally:
-            if not self.mock and not self.dry_run:
-                self.checkpoint.set(marker_key, None)
-        results["gpu"]["validation"] = val
-        outcome = val.get("outcome")
-        cause = val.get("cause")
+        # Attempts di staging già consumati da un pending pre-esistente
+        # (retry di un resume): una deferral successiva parte da qui
+        # (budget totale ≤ 2, P4 step 5).
+        pending = self.checkpoint.get("unlock_gpu_validate_pending") or {}
+        base_attempts = int(pending.get("attempts", 0) or 0)
+        for attempt in (1, 2):
+            # 🔒 GOTCHA §5: scrivi il marcatore SOLO se il tool c'è (sta
+            # davvero per girare) — il ramo provisioning non deve MAI
+            # lasciarlo scritto attraverso un reboot.
+            if self.gpu_validation.tool_available() \
+                    and not self.mock and not self.dry_run:
+                self.checkpoint.set(marker_key,
+                                    {"started_epoch": int(time.time())})
+            try:
+                val = self.gpu_validation.run(duration_s=duration)
+            finally:
+                if not self.mock and not self.dry_run:
+                    self.checkpoint.set(marker_key, None)
+            results["gpu"]["validation"] = val
+            outcome = val.get("outcome")
+            cause = val.get("cause")
 
-        if outcome == "pass":
-            self.logger.info(
-                "unlock: GPU validata (vkmark %ds: temp_max=%s whea=%s "
-                "fault=%s) — verdetto stable_short", duration,
-                val.get("temp_max"), val.get("whea_delta", 0),
-                val.get("gpu_faults", 0))
-            self.unlock_verdict.set(
-                "gpu", "stable_short",
-                evidence(cause=None, tool=val.get("tool") or "vkmark",
-                         seconds=duration, temp_max=val.get("temp_max")))
-            if not already_active:
-                self._suggest_40cu_persistence(results, gpu)
+            if outcome == "pass":
+                self.logger.info(
+                    "unlock: GPU validata (vkmark %ds: temp_max=%s whea=%s "
+                    "fault=%s) — verdetto stable_short", duration,
+                    val.get("temp_max"), val.get("whea_delta", 0),
+                    val.get("gpu_faults", 0))
+                self.unlock_verdict.set(
+                    "gpu", "stable_short",
+                    evidence(cause=None, tool=val.get("tool") or "vkmark",
+                             seconds=duration, temp_max=val.get("temp_max")))
+                if not already_active:
+                    self._suggest_40cu_persistence(results, gpu)
+                self._gpu_clear_pending()
+                return
+
+            if outcome == "fail":
+                self.logger.warning(
+                    "unlock: GPU NON validata (cause=%s) — stock dispatch + "
+                    "persistenza disattivata", cause)
+                # Verdetto durevole PRIMA (se il processo muore a metà
+                # rollback, il gate del prossimo run copre lo stato)
+                self.unlock_verdict.set(
+                    "gpu", "never_enable_all",
+                    evidence(cause=cause, tool=val.get("tool") or "vkmark",
+                             seconds=duration, temp_max=val.get("temp_max")))
+                # interno no-op in mock/dry-run (mai systemctl reali)
+                self._disable_40cu_persistence()
+                self.results["notes"].append(
+                    f"40-CU NON validata (cause={cause}): tornate a 24 CU "
+                    "(stock dispatch) — verdetto never_enable_all scritto")
+                self._gpu_stock_dispatch(results)
+                self._gpu_clear_pending()
+                return
+
+            # Inconcluso — NESSUN verdetto durevole. Termico HARD / tool
+            # fallito a runtime: stock dispatch come prima (D4: torna a
+            # stock senza condanna).
+            if cause != "tool_missing":
+                self.logger.warning(
+                    "unlock: validazione GPU non conclusa (%s) — stock "
+                    "dispatch, nessun verdetto", cause)
+                self.results["notes"].append(
+                    f"Validazione GPU non conclusa ({cause}): 40-CU tornate "
+                    "a 24 CU — " + (
+                        "riprovare a macchina fredda"
+                        if cause == "thermal"
+                        else "installare vkmark (radv) e riprovare"))
+                self._gpu_stock_dispatch(results)
+                self._gpu_clear_pending()
+                return
+
+            # tool_missing → auto-provvigionamento (P3b). Primo tentativo:
+            # installa; "attivo subito" → ri-valida nello stesso boot
+            # (attempt 2); staged (ostree) → pending + reboot dedicato.
+            # Fallito o attempts esauriti → ricetta a5970eb invariata.
+            if attempt == 1:
+                if base_attempts >= 2:
+                    self._gpu_tool_recipe(
+                        results, f"staging vkmark non attivo dopo "
+                        f"{base_attempts} tentativi")
+                    return
+                prov = self._provision_vkmark()
+                if prov.get("status") == "ok" and not prov.get("needs_reboot"):
+                    self.logger.info(
+                        "unlock: vkmark installato (attivo subito) — "
+                        "ri-validazione nello stesso boot")
+                    continue
+                if prov.get("status") == "ok":
+                    # staged (ostree): validazione rinviata al resume dopo
+                    # il reboot dedicato (ri-enable + valida, P4 caso B).
+                    # NESSUN unlock_gpu_validate_marker scritto (GOTCHA §5).
+                    if not self.dry_run:
+                        self.checkpoint.set(
+                            "unlock_gpu_validate_pending",
+                            {"attempts": base_attempts + 1})
+                    self.logger.info(
+                        "unlock: validazione GPU rinviata — reboot per "
+                        "attivazione vkmark (40-CU ri-enable al resume)")
+                    self.results["notes"].append(
+                        "Validazione GPU rinviata al resume post-reboot: "
+                        "vkmark installato (staged) — ri-enable 40-CU e "
+                        "validazione al prossimo avvio")
+                    self._schedule_reboot(
+                        "validazione GPU — reboot per attivazione vkmark")
+                    return
+                self._gpu_tool_recipe(results, prov.get("detail") or "")
+                return
+            # attempt 2 (dopo un install "attivo subito"): il tool NON è
+            # ancora utilizzabile (es. vkmark presente ma radv ICD
+            # assente) → ricetta a5970eb (mai condanna).
+            self._gpu_tool_recipe(
+                results, "vkmark non utilizzabile dopo l'installazione "
+                "(verificare pacchetto e ICD radv "
+                "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json)")
             return
 
-        if outcome == "fail":
-            self.logger.warning(
-                "unlock: GPU NON validata (cause=%s) — stock dispatch + "
-                "persistenza disattivata", cause)
-            # Verdetto durevole PRIMA (se il processo muore a metà
-            # rollback, il gate del prossimo run copre lo stato)
-            self.unlock_verdict.set(
-                "gpu", "never_enable_all",
-                evidence(cause=cause, tool=val.get("tool") or "vkmark",
-                         seconds=duration, temp_max=val.get("temp_max")))
-            # interno no-op in mock/dry-run (mai systemctl reali)
-            self._disable_40cu_persistence()
-            self.results["notes"].append(
-                f"40-CU NON validata (cause={cause}): tornate a 24 CU "
-                "(stock dispatch) — verdetto never_enable_all scritto")
-            self._gpu_stock_dispatch(results)
-            return
-
-        # Inconcluso — NESSUN verdetto durevole. Decisione utente
-        # (05/09): la causa tool_missing (vkmark non installato) è un
-        # problema AMBIENTALE, non evidenza di CU difettose → NIENTE
-        # stock dispatch: le 40-CU restano ATTIVE VOLATILI (tornano da
-        # sole a 24 al reboot), nessuna certificazione/persistenza. Il
-        # fail-closed totale (stock a 24 CU) peggiorerebbe l'esito di un
-        # silicio sano senza beneficio di sicurezza.
-        if cause == "tool_missing":
-            self.logger.warning(
-                "unlock: validazione GPU non possibile (vkmark assente) "
-                "— 40 CU lasciate ATTIVE VOLATILI (nessuna "
-                "certificazione/persistenza), nessun verdetto")
-            self.results["notes"].append(
-                "Validazione GPU non possibile (vkmark assente): 40 CU "
-                "lasciate ATTIVE VOLATILI (nessuna certificazione/"
-                "persistenza) — installa vkmark per la validazione")
-            return
-
-        # Altro inconcluso (termico HARD / tool fallito a runtime):
-        # stock dispatch come prima (D4: torna a stock senza condanna).
+    def _gpu_tool_recipe(self, results: Dict[str, Any],
+                         detail: Optional[str] = None) -> None:
+        """Ricetta a5970eb INVARIATA (design AUTOPROVISION P5):
+        auto-provvigionamento fallito (offline / pacchetto assente /
+        non-root) o attempts esauriti → problema AMBIENTALE, mai
+        evidenza di CU difettose: NIENTE stock dispatch, NIENTE
+        verdetto durevole; le 40-CU restano ATTIVE VOLATILI; la nota
+        riporta il dettaglio del perché l'auto-install non è riuscito."""
         self.logger.warning(
-            "unlock: validazione GPU non conclusa (%s) — stock "
-            "dispatch, nessun verdetto", cause)
+            "unlock: validazione GPU non possibile (vkmark assente) — "
+            "40 CU lasciate ATTIVE VOLATILI (nessuna "
+            "certificazione/persistenza), nessun verdetto")
+        why = f" Auto-install non riuscito: {detail}." if detail else ""
         self.results["notes"].append(
-            f"Validazione GPU non conclusa ({cause}): 40-CU tornate a "
-            "24 CU — " + (
-                "riprovare a macchina fredda"
-                if cause == "thermal"
-                else "installare vkmark (radv) e riprovare"))
-        self._gpu_stock_dispatch(results)
+            "Validazione GPU non possibile (vkmark assente): 40 CU "
+            "lasciate ATTIVE VOLATILI (nessuna certificazione/"
+            "persistenza)."
+            + why + " Installa vkmark (radv) e riprova")
+
+    def _gpu_clear_pending(self) -> None:
+        """Consuma il marcatore `unlock_gpu_validate_pending` (esito
+        terminale della validazione o attempts esauriti)."""
+        if not self.dry_run:
+            self.checkpoint.set("unlock_gpu_validate_pending", None)
+
+    def _gpu_pending_resume(self, results: Dict[str, Any]) -> None:
+        """Consumo di `unlock_gpu_validate_pending` al resume (design
+        AUTOPROVISION P4 caso B step 4-5): il reboot dedicato ha attivato
+        il layer vkmark (staged) ma ha perso le 40-CU volatili →
+        ri-enable + ri-validazione. vkmark ANCORA assente (staging
+        fallito silenziosamente): retry del provisioning UNA volta
+        (attempts ≤ 2), poi ricetta a5970eb. MAI never_enable_all per un
+        problema ambientale (P5)."""
+        self.logger.info(
+            "unlock: validazione GPU rinviata al resume (vkmark staged) — "
+            "ri-enable 40-CU e validazione")
+        pending = self.checkpoint.get("unlock_gpu_validate_pending") or {}
+        attempts = int(pending.get("attempts", 1) or 1)
+        if not self.gpu_validation.tool_available():
+            if attempts >= 2:
+                self._gpu_tool_recipe(
+                    results, f"staging vkmark non attivo dopo {attempts} "
+                    "reboot dedicati")
+                self._gpu_clear_pending()
+                return
+            prov = self._provision_vkmark()
+            if prov.get("status") != "ok":
+                self._gpu_tool_recipe(results, prov.get("detail") or "")
+                self._gpu_clear_pending()
+                return
+            if prov.get("needs_reboot"):
+                # 2° staging (budget attempts ≤ 2): un altro reboot dedicato
+                if not self.dry_run:
+                    self.checkpoint.set("unlock_gpu_validate_pending",
+                                        {"attempts": attempts + 1})
+                self.logger.warning(
+                    "unlock: vkmark ancora assente al resume — ri-staged "
+                    "(%d/2): altro reboot dedicato", attempts + 1)
+                self._schedule_reboot(
+                    "validazione GPU — reboot per attivazione vkmark "
+                    "(retry)")
+                return
+            self.logger.info(
+                "unlock: vkmark installato al resume (attivo subito)")
+        # vkmark disponibile: ri-enable (il volatile si è perso al reboot)
+        # + validazione (D8)
+        try:
+            gpu = self.gpu_unlock.apply()
+        except Exception as e:
+            self.logger.warning("GPU: ri-enable al resume non eseguito: %s",
+                                e)
+            results["gpu"] = {"applied": False, "error": str(e)}
+            return
+        results["gpu"] = gpu
+        if gpu.get("applied"):
+            # esito terminale → il pending viene consumato dentro la
+            # validazione (pass/fail/ricetta)
+            self._gpu_post_enable(results, gpu)
+        else:
+            self.logger.warning(
+                "GPU: ri-enable al resume non riuscito (%s)",
+                gpu.get("error") or "esito apply non riuscito")
 
     def _gpu_stock_dispatch(self, results: Dict[str, Any]) -> None:
         """Revert GPU a stock (stock_dispatch, UMR volatile): best-effort."""
@@ -2314,6 +2525,7 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("unlock_cpu_validate_marker", None)
             self.checkpoint.set("unlock_gpu_validate_marker", None)
             self.checkpoint.set("unlock_cpu_validate_attempts", 0)
+            self.checkpoint.set("unlock_gpu_validate_pending", None)
             # Cleanup anti-loop: a ciclo completato il servizio di ripresa
             # va rimosso, altrimenti al prossimo boot `buo resume` vede
             # "complete" → riparte da init → riesegue tutto → reboot → loop
@@ -2355,6 +2567,7 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("unlock_cpu_validate_marker", None)
             self.checkpoint.set("unlock_gpu_validate_marker", None)
             self.checkpoint.set("unlock_cpu_validate_attempts", 0)
+            self.checkpoint.set("unlock_gpu_validate_pending", None)
         self.results["notes"].append(
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
@@ -2384,6 +2597,7 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("unlock_cpu_validate_marker", None)
             self.checkpoint.set("unlock_gpu_validate_marker", None)
             self.checkpoint.set("unlock_cpu_validate_attempts", 0)
+            self.checkpoint.set("unlock_gpu_validate_pending", None)
         self.results["notes"].append(f"Errore in {phase}: {error}")
 
     def _run_can_schedule_reboot(self, current: str) -> bool:
