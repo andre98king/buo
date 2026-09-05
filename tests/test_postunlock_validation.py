@@ -723,22 +723,59 @@ class TestPhaseUnlockGpuValidation(_OrchCase):
         self.assertNotIn("validation", out["gpu"])
         self.assertTrue(out["gpu"]["persistence"]["suggested"])
 
-    def test_scenario10_tool_missing_inconclusive_stock_no_verdict(self):
-        """vkmark assente → inconcluso: stock dispatch + ricetta, NESSUN
-        verdetto durevole, persistenza non invocata."""
+    def test_scenario10_tool_missing_no_stock_cu_stay_volatile(self):
+        """vkmark assente → inconcluso tool_missing (decisione utente
+        05/09): NESSUN stock dispatch — le 40 CU restano ATTIVE VOLATILI
+        (mock: cu 40), NESSUN verdetto durevole, nessuna
+        certificazione/persistenza, nota vkmark."""
         orch, hw = self._make(cpu_probe=False)
         self._fresh(orch, hw)
+
+        def _apply_enable():
+            # il mock distingue lo stato: enable UMR → 40 CU attive
+            hw.state.gpu_cu_count = 40
+            hw.state.is_40cu_enabled = True
+            return self._umr_apply()
+
         with mock.patch.object(orch.gpu_validation, "tool_available",
                                return_value=False), \
              mock.patch.object(orch.gpu_unlock, "apply",
-                               return_value=self._umr_apply()):
+                               side_effect=_apply_enable), \
+             mock.patch.object(orch.gpu_unlock, "rollback") as rollback_spy:
             out = orch._phase_unlock()
         self.assertEqual(out["gpu"]["validation"]["outcome"],
                          "inconclusive")
         self.assertEqual(out["gpu"]["validation"]["cause"], "tool_missing")
-        self.assertIsNone(orch.unlock_verdict.get("gpu"))
-        self.assertTrue(out["gpu"].get("rollback"))
+        self.assertIsNone(orch.unlock_verdict.get("gpu"),
+                          "inconcluso: NESSUN verdetto durevole")
+        rollback_spy.assert_not_called()  # nessuno stock dispatch
+        self.assertNotIn("rollback", out["gpu"])
+        self.assertEqual(hw.state.gpu_cu_count, 40,
+                         "40 CU ancora attive (volatili)")
+        self.assertTrue(hw.state.is_40cu_enabled)
+        self.assertNotIn("persistence", out["gpu"],
+                         "nessuna certificazione/persistenza")
         self.assertTrue(any("vkmark" in n for n in orch.results["notes"]))
+        self.assertTrue(any("VOLATILI" in n for n in orch.results["notes"]))
+
+    def test_gpu_thermal_inconclusive_still_stock_dispatch(self):
+        """Termico HARD → inconcluso thermal: stock dispatch COME PRIMA
+        (rollback invocato), NESSUN verdetto durevole, persistenza non
+        toccata (inconcluso ≠ condanna)."""
+        orch, hw = self._make(cpu_probe=False)
+        self._fresh(orch, hw)
+        hw.state.unlock_validate_thermal = True
+        with mock.patch.object(orch.gpu_unlock, "apply",
+                               return_value=self._umr_apply()), \
+             mock.patch.object(orch, "_disable_40cu_persistence") as disp:
+            out = orch._phase_unlock()
+        self.assertEqual(out["gpu"]["validation"]["outcome"],
+                         "inconclusive")
+        self.assertEqual(out["gpu"]["validation"]["cause"], "thermal")
+        self.assertIsNone(orch.unlock_verdict.get("gpu"))
+        self.assertTrue(out["gpu"].get("rollback"),
+                        "termico: stock dispatch come prima")
+        disp.assert_not_called()  # inconcluso: nessuna condanna
 
     def test_gpu_hang_stale_marker_condemns_without_rerun(self):
         """D7 GPU: marcatore STALE (macchina ripartita durante la

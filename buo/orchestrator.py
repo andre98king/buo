@@ -1521,7 +1521,11 @@ class Orchestrator(LoggerMixin):
         con sampling temp 1s + dmesg WHEA/fault. Tri-state (D4); MAI
         SafetyViolation (D10). Pass → verdetto stable_short + persistenza;
         fail → stock dispatch + never_enable_all + disable persistenza;
-        inconcluso → stock dispatch + NESSUN verdetto + ricetta."""
+        inconcluso (termico/display) → stock dispatch + NESSUN verdetto +
+        ricetta; inconcluso tool_missing (vkmark assente) → NESSUN stock
+        dispatch: le 40-CU restano ATTIVE VOLATILI (decisione utente
+        05/09: il volatile torna da solo a 24 al reboot, il fail-closed
+        peggiorerebbe l'esito di un silicio sano)."""
         duration = self.config.validation_unlock_gpu_seconds
         if not self.config.probe_unlock_validate:
             # m2: probe.unlock_validate è l'interruttore master della
@@ -1575,16 +1579,38 @@ class Orchestrator(LoggerMixin):
             self.results["notes"].append(
                 f"40-CU NON validata (cause={cause}): tornate a 24 CU "
                 "(stock dispatch) — verdetto never_enable_all scritto")
-        else:  # inconclusive (termico/tool): NESSUN verdetto durevole
+            self._gpu_stock_dispatch(results)
+            return
+
+        # Inconcluso — NESSUN verdetto durevole. Decisione utente
+        # (05/09): la causa tool_missing (vkmark non installato) è un
+        # problema AMBIENTALE, non evidenza di CU difettose → NIENTE
+        # stock dispatch: le 40-CU restano ATTIVE VOLATILI (tornano da
+        # sole a 24 al reboot), nessuna certificazione/persistenza. Il
+        # fail-closed totale (stock a 24 CU) peggiorerebbe l'esito di un
+        # silicio sano senza beneficio di sicurezza.
+        if cause == "tool_missing":
             self.logger.warning(
-                "unlock: validazione GPU non conclusa (%s) — stock "
-                "dispatch, nessun verdetto", cause)
+                "unlock: validazione GPU non possibile (vkmark assente) "
+                "— 40 CU lasciate ATTIVE VOLATILI (nessuna "
+                "certificazione/persistenza), nessun verdetto")
             self.results["notes"].append(
-                f"Validazione GPU non conclusa ({cause}): 40-CU tornate a "
-                "24 CU — " + (
-                    "riprovare a macchina fredda"
-                    if cause == "thermal"
-                    else "installare vkmark (radv) e riprovare"))
+                "Validazione GPU non possibile (vkmark assente): 40 CU "
+                "lasciate ATTIVE VOLATILI (nessuna certificazione/"
+                "persistenza) — installa vkmark per la validazione")
+            return
+
+        # Altro inconcluso (termico HARD / tool fallito a runtime):
+        # stock dispatch come prima (D4: torna a stock senza condanna).
+        self.logger.warning(
+            "unlock: validazione GPU non conclusa (%s) — stock "
+            "dispatch, nessun verdetto", cause)
+        self.results["notes"].append(
+            f"Validazione GPU non conclusa ({cause}): 40-CU tornate a "
+            "24 CU — " + (
+                "riprovare a macchina fredda"
+                if cause == "thermal"
+                else "installare vkmark (radv) e riprovare"))
         self._gpu_stock_dispatch(results)
 
     def _gpu_stock_dispatch(self, results: Dict[str, Any]) -> None:
