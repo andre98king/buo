@@ -92,10 +92,11 @@ PHASE_LABELS = {
     "init": (1, "Inizializzazione"),
     "pre_audit": (2, "Pre-audit — analisi dello stato attuale"),
     "unlock": (3, "Sblocchi — CPU 8-core e GPU 40-CU"),
-    "fix": (4, "Fix di sistema"),
-    "optimize": (5, "Ottimizzazione — undervolt e overclock"),
-    "apply": (6, "Applicazione della configurazione finale"),
-    "validate": (7, "Validazione — stress test e verifica fix"),
+    "unlock_validate": (4, "Validazione post-unlock — CPU 8-core"),
+    "fix": (5, "Fix di sistema"),
+    "optimize": (6, "Ottimizzazione — undervolt e overclock"),
+    "apply": (7, "Applicazione della configurazione finale"),
+    "validate": (8, "Validazione — stress test e verifica fix"),
 }
 
 
@@ -120,8 +121,8 @@ def parse_line(line):
 
 
 def phase_line(state):
-    """Riga 'Fase N di 7: etichetta' da state.json; '' se il file non è
-    leggibile o current_phase non è tra le 7 fasi (mai testo inventato)."""
+    """Riga 'Fase N di 8: etichetta' da state.json; '' se il file non è
+    leggibile o current_phase non è tra le 8 fasi (mai testo inventato)."""
     try:
         with open(state, encoding="utf-8") as f:
             current = json.load(f).get("current_phase")
@@ -130,7 +131,7 @@ def phase_line(state):
     num, label = PHASE_LABELS.get(current, (None, None))
     if num is None:
         return ""
-    return "Fase %d di 7: %s" % (num, label)
+    return "Fase %d di 8: %s" % (num, label)
 
 
 def status_lines(state, resumed):

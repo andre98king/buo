@@ -60,9 +60,15 @@ class BC250HealthWrapper(BaseWrapper):
 
         Returns:
             {"stable": [cu_index...], "defective": [cu_index...],
-             "total": n, "complete": bool}
+             "total": n, "complete": bool,
+             "present": bool, "rows": int}
             complete = tutte le HEALTH_WGP_TOTAL WGP hanno una riga
             PASS/FAIL (riuso "smart": design PORTABILITY_DEFAULTS 3.4).
+            present/rows distinguono results.tsv ASSENTE (present=False)
+            da PARZIALE (present=True, rows < HEALTH_WGP_TOTAL) — la
+            decisione D8 della validazione post-unlock (design
+            POSTUNLOCK_VALIDATION) legge SOLO questi due campi nuovi;
+            la semantica `complete` è invariata.
         """
         stable: List[int] = []
         defective: List[int] = []
@@ -70,7 +76,7 @@ class BC250HealthWrapper(BaseWrapper):
         path = Path(results_file)
         if not path.exists():
             return {"stable": [], "defective": [], "total": 0,
-                    "complete": False,
+                    "complete": False, "present": False, "rows": 0,
                     "error": "results.tsv non trovato"}
 
         try:
@@ -94,7 +100,10 @@ class BC250HealthWrapper(BaseWrapper):
                 "defective": sorted(defective),
                 "total": total,
                 "complete": total >= HEALTH_WGP_TOTAL,
+                "present": True,
+                "rows": total,
             }
         except Exception as e:
             return {"stable": [], "defective": [], "total": 0,
-                    "complete": False, "error": str(e)}
+                    "complete": False, "present": False, "rows": 0,
+                    "error": str(e)}

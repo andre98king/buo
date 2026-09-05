@@ -39,6 +39,10 @@ phases:
     # run non presidiata — design portabilità)
     health_test: true
     health_reboot_max: 25
+    # Validazione post-unlock (design POSTUNLOCK_VALIDATION): interruttore
+    # master della nuova fase unlock_validate (CPU post-reboot) e della
+    # validazione short GPU dopo enable_all / 40-CU attive non certificate
+    unlock_validate: true
   fix:
     tlb: true                # patch kernel TLB fault (AI/ML)
     ace: true                # fix compute queue (kernel+Mesa)
@@ -60,6 +64,11 @@ phases:
     power_budget: 300        # W
   validation:
     stress_duration: 10      # minuti (10 = soglia L2 del motore OC)
+    # Validazione post-unlock (design POSTUNLOCK_VALIDATION): durate
+    # della verifica SHORT delle unità extra. 0 = skip esplicito;
+    # clamp [10, 300] secondi.
+    unlock_cpu_seconds: 60   # s — 4× stress-ng --verify sui thread 12-15
+    unlock_gpu_seconds: 60   # s — vkmark sulle 40 CU (display + radv)
 
 benchmark:
   enabled: true

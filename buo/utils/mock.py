@@ -55,6 +55,17 @@ class MockHardwareState:
     is_ace_fixed: bool = False
     iommu_off: bool = False
 
+    # Validazione post-unlock (design research/DESIGN_POSTUNLOCK_
+    # VALIDATION.md §5): i validatori in mock leggono SOLO questi campi
+    # (C1). cpu_unlock_ok/gpu_unlock_ok=False = unità extra difettose;
+    # whea_delta/gpu_fault_lines = righe dmesg simulate;
+    # unlock_validate_thermal=True = esito termico HARD (inconcluso).
+    cpu_unlock_ok: bool = True
+    gpu_unlock_ok: bool = True
+    whea_delta: int = 0
+    gpu_fault_lines: int = 0
+    unlock_validate_thermal: bool = False
+
 
 class MockHardware:
     """Simula l'hardware BC-250 per sviluppo e test."""
@@ -77,6 +88,11 @@ class MockHardware:
             self.state.core_mask = mask
             self.state.cpu_cores = 8
             self.state.cpu_stable_cores = [0, 1, 2, 3, 4, 5, 6, 7]
+            return True
+        if mask == CORE_MASK_STOCK:
+            self.state.core_mask = mask
+            self.state.cpu_cores = 6
+            self.state.cpu_stable_cores = [0, 1, 2, 3, 4, 5]
             return True
         return False
 

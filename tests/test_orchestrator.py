@@ -330,13 +330,16 @@ class TestOrchestrator(unittest.TestCase):
 
 
 class TestSuggest40cuPersistence(unittest.TestCase):
-    """Auto-persistenza 40-CU nei run NON interattivi (gap 04/09).
+    """Auto-persistenza 40-CU nei run NON interattivi (gap 04/09) +
+    gate D9 (design POSTUNLOCK_VALIDATION): la persistenza gira SOLO su
+    silicio validato — (a) validazione short appena passata,
+    (b) results.tsv completo (per-WGP), (c) verdetto stable_short.
 
     Su macchina fresca un `sudo buo unleash` NON interattivo lasciava le
     40 CU volatili (al boot si tornava a 24): il ramo non interattivo si
     limitava all'avviso. Ora il run reale non interattivo AUTO-PERSISTE
-    (gpu_unlock.persist()); mock/dry-run → solo nota; un fallimento di
-    persistenza è un warning MAI bloccante.
+    (gpu_unlock.persist()) SOLO se certificato; mock/dry-run → solo nota;
+    un fallimento di persistenza è un warning MAI bloccante.
     """
 
     def setUp(self):
@@ -352,8 +355,8 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         return gpu, {"gpu": gpu}
 
     def test_non_interactive_auto_persists(self):
-        """Run reale NON interattivo → persist() chiamato + log di
-        successo ('40 CU persistenti al boot')."""
+        """Run reale NON interattivo su silicio CERTIFICATO (results.tsv
+        completo) → persist() chiamato + log di successo."""
         from unittest import mock
         orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
                             interactive=False)
@@ -361,12 +364,51 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         fake = mock.Mock()
         fake.persist.return_value = {"persisted": True, "note": "ok"}
         orch.gpu_unlock = fake
-        with self.assertLogs("buo.Orchestrator", level="INFO") as logs:
+        with mock.patch.object(orch, "_gpu_validation_needed",
+                               return_value="certified"), \
+             self.assertLogs("buo.Orchestrator", level="INFO") as logs:
             orch._suggest_40cu_persistence(results, gpu)
         fake.persist.assert_called_once_with()
         self.assertTrue(results["gpu"]["persistence"]["persisted"])
         self.assertTrue(any("40 CU persistenti al boot" in m
                             for m in logs.output))
+
+    def test_gate_skips_persistence_when_silicon_not_validated(self):
+        """Gate D9: results.tsv assente + nessun verdetto + nessuna
+        validazione appena passata → persistenza SALTATA con log, mai
+        chiamato persist() (persistere 40-CU non certificate renderebbe
+        permanente un difetto)."""
+        from unittest import mock
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        gpu, results = self._gpu()
+        fake = mock.Mock()
+        orch.gpu_unlock = fake
+        with mock.patch.object(orch, "_gpu_validation_needed",
+                               return_value="needed"), \
+             self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
+            orch._suggest_40cu_persistence(results, gpu)
+        fake.persist.assert_not_called()
+        self.assertEqual(results["gpu"]["persistence"].get("suggested"),
+                         False)
+        self.assertTrue(any("persistenza 40-CU SALTATA: silicio non "
+                            "validato" in m for m in logs.output))
+
+    def test_gate_skips_persistence_on_partial_tsv(self):
+        """Gate D9: results.tsv PARZIALE (maratona per-WGP in corso) →
+        persistenza saltata (non interferire)."""
+        from unittest import mock
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        gpu, results = self._gpu()
+        fake = mock.Mock()
+        orch.gpu_unlock = fake
+        with mock.patch.object(orch, "_gpu_validation_needed",
+                               return_value="partial"):
+            orch._suggest_40cu_persistence(results, gpu)
+        fake.persist.assert_not_called()
+        self.assertEqual(results["gpu"]["persistence"].get("suggested"),
+                         False)
 
     def test_mock_only_notes_no_persist(self):
         """mock → NESSUNA chiamata reale: solo la nota di persistenza
@@ -392,7 +434,9 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         fake = mock.Mock()
         fake.persist.return_value = {"persisted": False, "error": "boom"}
         orch.gpu_unlock = fake
-        with self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
+        with mock.patch.object(orch, "_gpu_validation_needed",
+                               return_value="certified"), \
+             self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
             orch._suggest_40cu_persistence(results, gpu)  # non deve sollevare
         self.assertFalse(results["gpu"]["persistence"]["persisted"])
         self.assertTrue(any("Persistenza non riuscita" in m and "boom" in m

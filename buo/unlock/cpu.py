@@ -177,3 +177,59 @@ class CPUUnlock(LoggerMixin):
         """Rollback: la modifica è volatile, basta un reboot."""
         self.logger.info("CPU unlock: volatile — un reboot ripristina 6 core")
         return True
+
+    def revert_to_stock(self) -> Dict[str, Any]:
+        """Ripristina la maschera stock 0x77 (revert 8→6 core, D5).
+
+        MECCANICA VERIFICATA sul sorgente pinnato (design D5): il msg SMU
+        Q3 0x98 scrive SOLO 0xFF (nell'handler il valore è fisso:
+        ``smn_window_write(0, arg, 0xff, 2)``) → NON è utilizzabile per
+        scrivere 0x77. Si usa la scrittura SMN diretta (stesso paio PCI
+        0xB8/0xBC di ``_smu_write``) con READBACK 0x77 di verifica.
+
+        Attenzione (evidenza community): le scritture host alla core
+        presence mask sono SILENZIOSAMENTE DROPPATE (solo l'SMU può
+        scriverla, e solo 0xFF) — sul campo questa scrittura fallirà il
+        readback e il chiamante NON deve riavviare: verdetto scritto,
+        auto-unlock di boot disabilitato, interruzione controllata con
+        istruzione power-off (il cold boot ripristina 6 core da solo).
+        """
+        if self.mock and self.mock_hw is not None:
+            before = self.mock_hw.read_core_mask()
+            ok = self.mock_hw.write_core_mask(CORE_MASK_STOCK)
+            mask = self.mock_hw.read_core_mask()
+            return {"reverted": ok and (mask & 0xFF) == CORE_MASK_STOCK,
+                    "mask": hex(mask),
+                    "already": (before & 0xFF) == CORE_MASK_STOCK}
+
+        if not os.path.exists(PCI_CONFIG_PATH):
+            return {"reverted": False,
+                    "error": "PCI config space non trovato — il cold "
+                             "boot ripristina la maschera stock"}
+
+        fd = os.open(PCI_CONFIG_PATH, os.O_RDWR)
+        try:
+            before = self._smn_read(fd, CORE_MASK_REG)
+            if before & 0xFF == CORE_MASK_STOCK:
+                self.logger.info("revert CPU: maschera già 0x77 (stock)")
+                return {"reverted": True, "mask": hex(before & 0xFF),
+                        "already": True}
+
+            # Scrittura SMN diretta (nessun msg SMU: 0x98 → solo 0xFF).
+            self._smu_write(fd, CORE_MASK_REG, CORE_MASK_STOCK)
+            time.sleep(0.2)
+            after = self._smn_read(fd, CORE_MASK_REG)
+            if after & 0xFF == CORE_MASK_STOCK:
+                self.logger.info(
+                    "revert CPU: maschera 0x77 scritta e verificata — "
+                    "reboot per 12 thread")
+                return {"reverted": True, "mask": hex(after & 0xFF)}
+            self.logger.error(
+                "revert CPU IMPOSSIBILE: readback 0x%02X != 0x77 — la "
+                "scrittura host alla core mask è stata scartata "
+                "(power-off richiesto: il cold boot ripristina 6 core)",
+                after & 0xFF)
+            return {"reverted": False, "mask": hex(after & 0xFF),
+                    "error": "readback != 0x77 dopo la scrittura SMN"}
+        finally:
+            os.close(fd)

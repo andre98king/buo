@@ -18,6 +18,8 @@ benchmark, report, models.
 """
 
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -26,8 +28,9 @@ from .audit.hardware import HardwareAudit
 from .audit.problems import ProblemDetector
 from .benchmark.runner import BenchmarkRunner
 from .config import BUOConfig
-from .constants import (EXIT_ERROR, EXIT_REBOOT, EXIT_SAFETY_VIOLATION,
-                        EXIT_SUCCESS, LIMITS, PHASES, SMU_OC_SERVICE)
+from .constants import (CORE_MASK_STOCK, EXIT_ERROR, EXIT_REBOOT,
+                        EXIT_SAFETY_VIOLATION, EXIT_SUCCESS, LIMITS, PHASES,
+                        SMU_OC_SERVICE)
 from .exceptions import ConfigurationError, SafetyViolation
 from .fix.ace import ACEComputeFix
 from .fix.acpi import ACPIFix
@@ -52,6 +55,8 @@ from .unlock.dxe import DXECoreUnlock
 from .unlock.gpu import GPU40CUUnlock
 from .unlock.health import CUHealthTest
 from .unlock.mask import CUMask
+from .unlock.validation import (CpuUnlockValidation, GpuUnlockValidation,
+                                UnlockVerdict, evidence)
 from .utils.logging import LoggerMixin, setup_logging
 from .utils.mock import MockHardware
 from .validate.stress import StressTest
@@ -137,6 +142,11 @@ class Orchestrator(LoggerMixin):
         self._init_modules()
         self._register_rollback_handlers()
 
+        # Verdetto durevole del silicio (unlock-verdict.json, D6): letto
+        # SEMPRE (il gate si applica anche in mock ai file pre-esistenti);
+        # in mock/dry-run set() aggiorna SOLO la memoria (nessun file).
+        self.unlock_verdict = UnlockVerdict(sim=mock or dry_run)
+
         self.logger.info(
             "Orchestrator inizializzato (mock=%s, dry_run=%s, interactive=%s)",
             mock, dry_run, interactive)
@@ -168,6 +178,12 @@ class Orchestrator(LoggerMixin):
         self.health_test = CUHealthTest(mock=eff_mock, mock_hardware=hw,
                                         max_reboots=self.config.probe_health_reboot_max)
         self.cu_mask = CUMask(mock=eff_mock, mock_hardware=hw)
+        # Validazione post-unlock (design POSTUNLOCK_VALIDATION): in
+        # mock/dry-run nessun subprocess (esiti SOLO dal mock_hardware).
+        self.cpu_validation = CpuUnlockValidation(
+            mock=eff_mock, dry_run=self.dry_run, mock_hardware=hw)
+        self.gpu_validation = GpuUnlockValidation(
+            mock=eff_mock, dry_run=self.dry_run, mock_hardware=hw)
 
         self.fix_tlb = TLBKernelFix(mock=eff_mock, mock_hardware=hw)
         self.fix_ace = ACEComputeFix(mock=eff_mock, mock_hardware=hw)
@@ -329,6 +345,12 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("applied_steps", [])
             self.checkpoint.set("reboot_count", 0)
             self.checkpoint.set("unlock_blocked_acpi", False)
+            # Validazione post-unlock: un run nuovo azzera marker/attempts
+            # residui (pattern unlock_blocked_acpi). Il verdetto durevole
+            # in unlock-verdict.json resta — è la memoria del silicio.
+            self.checkpoint.set("unlock_cpu_validate_marker", None)
+            self.checkpoint.set("unlock_gpu_validate_marker", None)
+            self.checkpoint.set("unlock_cpu_validate_attempts", 0)
             if restore is None:
                 self.checkpoint.set("restore_active", False)
                 # FIX (30/08): stesso pattern — un run nuovo SENZA restore
@@ -450,6 +472,7 @@ class Orchestrator(LoggerMixin):
             "init": self._phase_init,
             "pre_audit": self._phase_pre_audit,
             "unlock": self._phase_unlock,
+            "unlock_validate": self._phase_unlock_validate,
             "fix": self._phase_fix,
             "optimize": self._phase_optimize,
             "apply": self._phase_apply,
@@ -868,9 +891,24 @@ class Orchestrator(LoggerMixin):
         results: Dict[str, Any] = {}
         done = self._applied_steps()
 
-        # 1. CPU 8-core (volatile) — con GATE ACPI fail-closed
+        # 1. CPU 8-core (volatile) — con GATE ACPI fail-closed e gate
+        # verdetto durevole (D6: silicio condannato → mai più sbloccare)
         if self.config.probe_cpu_unlock and "cpu_core_unlock" not in done:
-            if not self._acpi_gate_ok():
+            if self.unlock_verdict.get("cpu") == "never_unlock":
+                self.logger.warning(
+                    "CPU: silicio marcato never_unlock — unlock 8-core "
+                    "SALTATO (vedi research/DESIGN_POSTUNLOCK_VALIDATION.md)")
+                results["cpu"] = {"unlocked": False,
+                                  "verdict_blocked": True}
+                self.results["notes"].append(
+                    "Unlock CPU saltato: silicio marcato instabile "
+                    "(verdetto never_unlock) — si prosegue a 6 core")
+                # M1: verdetto presente MA maschera ancora 0xFF (kill tra
+                # verdetto e scrittura 0x77, o revert fallito ignorato):
+                # la maschera sopravvive ai WARM reboot → revert OBBLIGATO
+                # prima di proseguire (D5: mai 16T su silicio condannato).
+                self._cpu_revert_if_condemned(results["cpu"])
+            elif not self._acpi_gate_ok():
                 self.logger.warning(
                     "GATE ACPI: fix SSDT-PST/CST mancanti — senza di esse "
                     "l'unlock 8-core porta la BC-250 in BOOT LOOP.")
@@ -910,27 +948,95 @@ class Orchestrator(LoggerMixin):
         elif "cpu_core_unlock" in done:
             self.logger.info("CPU: unlock già eseguito (checkpoint) — salto")
 
-        # 2. GPU 40-CU
-        if self.config.probe_gpu_unlock and "gpu_40cu" not in done:
+        # 2. GPU 40-CU — con gate verdetto (D6), validazione short dopo
+        # l'attivazione (D8) e persistenza solo su silicio validato (D9)
+        gpu_marker_handled = False
+        gpu_marker_fresh = False
+        if self.config.probe_gpu_unlock:
+            marker = self.checkpoint.get("unlock_gpu_validate_marker")
+            if marker and self._marker_stale(marker):
+                # D7: marcatore STALE = la macchina è ripartita durante la
+                # validazione GPU (hang): NIENTE ri-esecuzione — verdetto
+                # never_enable_all + stock dispatch + disable persistenza.
+                self.logger.error(
+                    "unlock: HANG durante la validazione GPU (marcatore "
+                    "stale) — verdetto never_enable_all, stock dispatch")
+                self.unlock_verdict.set(
+                    "gpu", "never_enable_all",
+                    evidence(cause="hang", tool="vkmark"))
+                # interno no-op in mock/dry-run (mai systemctl reali)
+                self._disable_40cu_persistence()
+                results["gpu"] = {
+                    "applied": False,
+                    "validation": {"outcome": "fail", "cause": "hang"},
+                }
+                self.results["notes"].append(
+                    "40-CU NON validata (hang durante la validazione): "
+                    "tornate a 24 CU — verdetto never_enable_all scritto")
+                self._gpu_stock_dispatch(results)
+                if not self.mock and not self.dry_run:
+                    self.checkpoint.set("unlock_gpu_validate_marker", None)
+                gpu_marker_handled = True
+            elif marker:
+                # fresco (stesso boot, processo ucciso): pulisci; lo
+                # stato attivo NON certificato va ri-verificato (m1)
+                gpu_marker_fresh = True
+                if not self.mock and not self.dry_run:
+                    self.checkpoint.set("unlock_gpu_validate_marker", None)
+        if (self.config.probe_gpu_unlock and "gpu_40cu" not in done
+                and not gpu_marker_handled):  # n5: hang già gestito sopra
             try:
                 was_enabled = self.gpu_unlock.is_enabled()
-                gpu = self.gpu_unlock.apply()
-                results["gpu"] = gpu
-                if not was_enabled and gpu.get("applied"):
-                    self.results["applied_fixes"].append("gpu_40cu")
-                    self._mark_step("gpu_40cu")  # prima del reboot
-                    if gpu.get("needs_reboot"):
-                        self._schedule_reboot("GPU 40-CU — reboot richiesto")
-                    # Runtime UMR = VOLATILE: suggerisci la persistenza
-                    # (semi-automatico: avviso + conferma interattiva).
-                    self._suggest_40cu_persistence(results, gpu)
-                elif was_enabled:
-                    self.logger.info("GPU: 40-CU già attive — salto")
+                if self.unlock_verdict.get("gpu") == "never_enable_all":
+                    self.logger.warning(
+                        "GPU: silicio marcato never_enable_all — enable_all "
+                        "SALTATO (vedi research/DESIGN_POSTUNLOCK_"
+                        "VALIDATION.md)")
+                    if was_enabled:
+                        # già attiva da persistenza legacy: torna a stock
+                        # e disattiva la persistenza (mai 40-CU su
+                        # silicio condannato a ogni boot)
+                        self.gpu_unlock.rollback()
+                        self._disable_40cu_persistence()
+                    results["gpu"] = {"applied": False,
+                                      "verdict_blocked": True}
+                    self.results["notes"].append(
+                        "enable_all GPU saltato: silicio marcato instabile "
+                        "(verdetto never_enable_all) — GPU a 24 CU")
+                else:
+                    gpu = self.gpu_unlock.apply()
+                    results["gpu"] = gpu
+                    if not was_enabled and gpu.get("applied"):
+                        self.results["applied_fixes"].append("gpu_40cu")
+                        self._mark_step("gpu_40cu")  # prima del reboot
+                        if gpu.get("needs_reboot"):
+                            self._schedule_reboot("GPU 40-CU — reboot richiesto")
+                        self._gpu_post_enable(results, gpu)
+                    elif was_enabled:
+                        self._gpu_already_active(results, gpu)
             except Exception as e:
                 self.logger.warning("Unlock GPU non eseguito: %s", e)
                 results["gpu"] = {"applied": False, "error": str(e)}
-        elif "gpu_40cu" in done:
-            self.logger.info("GPU: unlock 40-CU già eseguito (checkpoint) — salto")
+        elif "gpu_40cu" in done and not gpu_marker_handled:
+            if gpu_marker_fresh:
+                # m1: validazione interrotta (SIGKILL, stesso boot) — le
+                # 40-CU attive NON certificate non vanno lasciate per il
+                # resto della run: ri-verifica dello stato corrente (D8)
+                if self.gpu_unlock.is_enabled():
+                    self.logger.warning(
+                        "GPU: validazione interrotta (marcatore fresco) — "
+                        "ri-verifica dello stato corrente")
+                    results["gpu"] = {"applied": False,
+                                      "already_active": True,
+                                      "method": "runtime_umr"}
+                    self._gpu_already_active(results, results["gpu"])
+                else:
+                    self.logger.info(
+                        "GPU: validazione interrotta ma 40-CU non attive "
+                        "(stock) — salto")
+            else:
+                self.logger.info(
+                    "GPU: unlock 40-CU già eseguito (checkpoint) — salto")
 
         # 3. Health test CU (se abilitato) — "smart" (design
         # DESIGN_PORTABILITY_DEFAULTS 3.4): si RIUSANO i results.tsv
@@ -1008,6 +1114,512 @@ class Orchestrator(LoggerMixin):
         return bool((acpi.get("cst_present") and acpi.get("pst_present"))
                     or acpi.get("boot_fix_present"))
 
+    # ================================================================== #
+    # VALIDAZIONE POST-UNLOCK (design POSTUNLOCK_VALIDATION, 4.1/4.2)
+    # ================================================================== #
+
+    def _phase_unlock_validate(self) -> Dict[str, Any]:
+        """FASE — VALIDAZIONE post-unlock CPU (8 core, 16 thread reali).
+
+        Gira tra `unlock` e `fix` (D1/D2): solo quando i thread extra
+        sono attivi dopo il warm reboot di attivazione. Ingresso
+        idempotente e fail-closed (design 4.2); esito tri-state; il
+        revert costa UN solo reboot (il verdetto salta la fase al
+        resume). MAI SafetyViolation (D10) — unica eccezione: revert CPU
+        impossibile in software → interruzione controllata (D5).
+        """
+        self.logger.info(
+            "Validazione post-unlock CPU (thread extra, %ds, 0 WHEA "
+            "attesi)", self.config.validation_unlock_cpu_seconds)
+        data: Dict[str, Any] = {"cpu": {}}
+        cpu_out = data["cpu"]
+
+        # 1. Verdetto durevole → silicio condannato: si prosegue a stock
+        # (MAJOR M1: verdetto presente MA maschera ancora 0xFF — kill tra
+        # verdetto e scrittura 0x77, o revert fallito ignorato — la
+        # maschera sopravvive ai WARM reboot → revert OBBLIGATO prima di
+        # proseguire; D5: mai 16T su silicio condannato)
+        if self.unlock_verdict.get("cpu") == "never_unlock":
+            self.logger.warning(
+                "CPU: silicio marcato never_unlock — si prosegue a stock "
+                "(vedi research/DESIGN_POSTUNLOCK_VALIDATION.md)")
+            cpu_out["verdict_blocked"] = True
+            self._cpu_revert_if_condemned(cpu_out, phase_data=data)
+            self.results["unlock_validation"] = data
+            return data
+
+        # 2. Niente da validare (skip idempotenti)
+        if "cpu_core_unlock" not in self._applied_steps():
+            self.logger.info(
+                "CPU: unlock non eseguito da questa run — niente da "
+                "validare (8 core già da BIOS/DXE)")
+            cpu_out["skipped"] = "no_unlock_this_run"
+            self.results["unlock_validation"] = data
+            return data
+        if not self.config.probe_unlock_validate:
+            self.logger.info(
+                "Validazione post-unlock DISABILITATA (probe."
+                "unlock_validate=false)")
+            cpu_out["skipped"] = "disabled"
+            self.results["unlock_validation"] = data
+            return data
+        if self.config.validation_unlock_cpu_seconds <= 0:
+            self.logger.info(
+                "Validazione CPU saltata (0 secondi, config)")
+            cpu_out["skipped"] = "duration_zero"
+            self.results["unlock_validation"] = data
+            return data
+        mask = self._cpu_read_mask()  # M4: try/except + governor FERMO
+        if mask is not None and (mask & 0xFF) == CORE_MASK_STOCK:
+            self.logger.info(
+                "CPU: maschera 0x77 (stock) — revert già avvenuto, niente "
+                "da validare")
+            cpu_out["skipped"] = "mask_stock"
+            self.results["unlock_validation"] = data
+            return data
+        threads = self._cpu_online_threads()
+        if threads is not None and threads <= 12:
+            self.logger.info(
+                "CPU: %d thread attivi — niente da validare", threads)
+            cpu_out["skipped"] = "threads_le_12"
+            self.results["unlock_validation"] = data
+            return data
+
+        # 3. Marcatore STALE (epoch < boot) = HANG durante la validazione
+        # precedente: verdetto never_unlock + revert SENZA rieseguire lo
+        # stress (D7). 4. Marcatore FRESCO (stesso boot, processo ucciso):
+        # ri-esecuzione, max 2 attempts, poi inconcluso.
+        marker = self.checkpoint.get("unlock_cpu_validate_marker")
+        if marker and self._marker_stale(marker):
+            self.logger.error(
+                "unlock: HANG durante la validazione CPU (marcatore "
+                "stale) — verdetto never_unlock, revert a 6 core")
+            cpu_out["hang"] = True
+            self._cpu_condemn_revert(cpu_out, cause="hang", phase_data=data)
+            self.results["unlock_validation"] = data
+            return data
+        if marker:
+            attempts = int(self.checkpoint.get(
+                "unlock_cpu_validate_attempts", 0) or 0)
+            if attempts >= 2:
+                self.logger.warning(
+                    "Validazione CPU interrotta %d volte (stesso boot) — "
+                    "inconcluso: revert senza condanna", attempts)
+                cpu_out["inconclusive"] = True
+                cpu_out["cause"] = "retry_exhausted"
+                self._cpu_clear_marker()
+                self._cpu_revert_and_reboot(cpu_out, condemn=False,
+                                            phase_data=data)
+                self.results["unlock_validation"] = data
+                return data
+            if not self.mock and not self.dry_run:
+                self.checkpoint.set("unlock_cpu_validate_attempts",
+                                    attempts + 1)
+            self._cpu_clear_marker()
+            self.logger.warning(
+                "Marcatore CPU fresco (processo interrotto, stesso boot) "
+                "— ri-esecuzione della validazione")
+
+        # 5. Esegui la validazione (marcatore scritto PRIMA, pattern D7)
+        self._cpu_write_marker()
+        val = self.cpu_validation.run(
+            duration_s=self.config.validation_unlock_cpu_seconds)
+        outcome = val.get("outcome")
+        cause = val.get("cause")
+        cpu_out.update({k: v for k, v in val.items()
+                        if k in ("outcome", "cause", "temp_max",
+                                 "whea_delta", "threads")})
+        self._cpu_clear_marker()
+        if not self.mock and not self.dry_run:
+            self.checkpoint.set("unlock_cpu_validate_attempts", 0)
+
+        if outcome == "pass":
+            self.logger.info(
+                "unlock: CPU validata (%ds: temp_max=%s whea=%s) — 8 core "
+                "tenuti", self.config.validation_unlock_cpu_seconds,
+                cpu_out.get("temp_max"), cpu_out.get("whea_delta", 0))
+            self.results["unlock_validation"] = data
+            return data
+        if outcome == "fail":
+            self.logger.warning(
+                "unlock: CPU NON validata (cause=%s) — revert a 6 core + "
+                "verdetto never_unlock", cause)
+            self._cpu_condemn_revert(cpu_out, cause=cause or "stress",
+                                     phase_data=data)
+            self.results["unlock_validation"] = data
+            return data
+        # inconcluso (termico HARD / tool assente): revert SENZA condanna
+        self.logger.warning(
+            "unlock: validazione CPU non conclusa (%s) — unlock annullato "
+            "senza condanna, riprovare a macchina fredda", cause)
+        cpu_out["inconclusive"] = True
+        cpu_out["cause"] = cause
+        self.results["notes"].append(
+            f"Validazione post-unlock CPU non conclusa ({cause}): unlock "
+            "annullato (6 core) — " + (
+                "installare stress-ng/taskset e riprovare"
+                if cause == "tool_missing"
+                else "riprovare a macchina fredda"))
+        self._cpu_revert_and_reboot(cpu_out, condemn=False, phase_data=data)
+        self.results["unlock_validation"] = data
+        return data
+
+    # -------------------- CPU: marker / revert / gate ---------------- #
+
+    def _marker_stale(self, marker: Dict[str, Any]) -> bool:
+        """True se il marcatore è di un boot precedente (hang)."""
+        started = marker.get("started_epoch")
+        try:
+            from .oc.smoke import boot_epoch
+            boot = boot_epoch()
+        except Exception:
+            boot = None
+        if not started or not boot:
+            return False
+        return int(started) < boot
+
+    def _cpu_write_marker(self) -> None:
+        if not self.mock and not self.dry_run:
+            self.checkpoint.set("unlock_cpu_validate_marker",
+                                {"started_epoch": int(time.time())})
+
+    def _cpu_clear_marker(self) -> None:
+        if not self.mock and not self.dry_run:
+            self.checkpoint.set("unlock_cpu_validate_marker", None)
+
+    def _cpu_online_threads(self) -> Optional[int]:
+        """Thread online reali (mock: cores*2; None = illeggibile)."""
+        if self.mock and self.hardware is not None:
+            return int(self.hardware.state.cpu_cores or 0) * 2
+        if self.mock:
+            return None
+        from .unlock.validation import cpu_online_count
+        return cpu_online_count()
+
+    def _cpu_read_mask(self) -> Optional[int]:
+        """Lettura maschera core (SMN) con governor FERMO (M4: regola
+        assoluta AGENTS — MAI SMU con governor attivo) e try/except:
+        None se illeggibile (MAI assumere stock da una lettura fallita).
+        """
+        if self.mock:
+            try:
+                return self.cpu_unlock.read_core_mask()
+            except Exception:
+                return None
+        try:
+            with self._governor_paused():
+                return self.cpu_unlock.read_core_mask()
+        except RuntimeError:
+            raise  # governor non confermato fermo: abort, mai SMN
+        except Exception:
+            return None
+
+    @contextmanager
+    def _governor_paused(self):
+        """Governor FERMO durante un accesso SMU/SMN (regola assoluta
+        AGENTS: accessi concorrenti = freeze SoC silenzioso). Fail-closed:
+        se lo stato FERMO non è CONFERMATO → RuntimeError (abort
+        dell'accesso, mai procedere). In mock è un no-op."""
+        if self.mock:
+            yield
+            return
+        was_active: Optional[bool] = None
+        try:
+            was_active = bool(self.governor.is_running())
+        except Exception:
+            was_active = None
+        if was_active is None:
+            raise RuntimeError(
+                "Stato del governor non determinabile — accesso SMU "
+                "annullato (mai SMU con governor attivo: freeze SoC). "
+                "Verificare cyan-skillfish-governor-smu e riprovare.")
+        if was_active:
+            try:
+                stopped = self.governor.stop()
+            except Exception:
+                stopped = False
+            if not stopped:
+                raise RuntimeError(
+                    "Governor non confermato FERMO — accesso SMU annullato "
+                    "(mai SMU con governor attivo: freeze SoC). Fermare "
+                    "cyan-skillfish-governor-smu e riprovare.")
+        try:
+            yield
+        finally:
+            if was_active:
+                try:
+                    self.governor.start()
+                except Exception:
+                    self.logger.warning(
+                        "Riavvio del governor fallito dopo l'accesso SMU")
+
+    def _cpu_revert_if_condemned(self, cpu_out: Dict[str, Any],
+                                 phase_data: Optional[Dict[str, Any]] = None
+                                 ) -> None:
+        """M1: verdetto never_unlock presente MA maschera non stock (kill
+        tra verdetto e scrittura 0x77, o revert fallito ignorato — la
+        maschera sopravvive ai WARM reboot) → revert OBBLIGATO prima di
+        proseguire (D5: mai 16T su silicio condannato). Verdetto GIÀ
+        scritto → niente ri-condanna né ri-disable. Scrittura impossibile
+        → interruzione controllata (power-off)."""
+        mask = self._cpu_read_mask()
+        if mask is not None and (mask & 0xFF) == CORE_MASK_STOCK:
+            return  # già a stock: niente da fare
+        self.logger.warning(
+            "CPU: silicio condannato ma maschera %s (non stock) — revert "
+            "a 6 core prima di proseguire",
+            hex(mask & 0xFF) if mask is not None else "illeggibile")
+        cpu_out["reverted"] = True
+        self._cpu_revert_and_reboot(cpu_out, condemn=False,
+                                    phase_data=phase_data)
+
+    def _cpu_condemn_revert(self, cpu_out: Dict[str, Any],
+                            cause: str,
+                            phase_data: Optional[Dict[str, Any]] = None
+                            ) -> None:
+        """Condanna + revert (D5/D6): verdetto never_unlock scritto PRIMA
+        (durevole), disable auto-unlock di boot, poi revert maschera 0x77;
+        scrittura fallita → interruzione controllata (power-off)."""
+        cpu_out["outcome"] = "fail"
+        cpu_out["reverted"] = True
+        cpu_out["cause"] = cause
+        threads = self._cpu_online_threads() or 16
+        mask_at = self._cpu_read_mask()  # M4: governor FERMO + try/except
+        mask_hex = hex(mask_at & 0xFF) if mask_at is not None else "?"
+        self.unlock_verdict.set(
+            "cpu", "never_unlock",
+            evidence(cause=cause, threads=threads,
+                     mask_at_test=mask_hex))
+        # interno no-op in mock/dry-run (mai systemctl reali)
+        self._disable_core_unlock_boot()
+        self._cpu_revert_and_reboot(cpu_out, condemn=True,
+                                    phase_data=phase_data)
+
+    def _cpu_revert_and_reboot(self, cpu_out: Dict[str, Any],
+                               condemn: bool,
+                               phase_data: Optional[Dict[str, Any]] = None
+                               ) -> None:
+        """Revert a 0x77 (governor FERMO confermato) + warm reboot (12T).
+
+        Regola assoluta SMU (AGENTS): MAI accessi SMU/SMN con il governor
+        attivo → se risulta attivo viene fermato e lo stato FERMO va
+        CONFERMATO; stop non confermato/indeterminabile → abort del
+        revert (mai scrivere SMN a governor attivo: freeze SoC, M4).
+        Scrittura/readback falliti (sul campo le scritture host alla
+        core mask sono DROPPATE) → NIENTE reboot automatico: interruzione
+        controllata con istruzione power-off (D5) — mai riavviare con la
+        maschera ancora 0xFF su core sospetti (boot-loop manuale).
+        Se phase_data è dato (fase unlock_validate), la fase viene
+        persistita PRIMA del reboot (sys.exit): al resume il riepilogo
+        mostra l'esito reale e il run riparte da fix (NIT n4).
+        """
+        with self._governor_paused():
+            rev = self.cpu_unlock.revert_to_stock()
+        if not rev.get("reverted"):
+            self.logger.error(
+                "unlock: revert CPU IMPOSSIBILE (%s) — NIENTE reboot. "
+                "Eseguire il POWER-OFF della macchina (il cold boot "
+                "ripristina 6 core da solo), poi rilanciare `buo "
+                "unleash`.", rev.get("error") or "scrittura SMN fallita")
+            cpu_out["revert_failed"] = True
+            self.results["notes"].append(
+                "Revert CPU impossibile in software (scrittura maschera "
+                "0x77 non confermata): POWER-OFF richiesto — il cold boot "
+                "ripristina 6 core.")
+            raise RuntimeError(
+                "Revert CPU impossibile in software — POWER-OFF richiesto "
+                "(il cold boot ripristina 6 core da solo). "
+                + ("Verdetto salvato; auto-unlock di boot disabilitato."
+                   if condemn else "Nessun verdetto (esito non concluso)."))
+        cpu_out["mask"] = rev.get("mask")
+        self.logger.info(
+            "unlock: revert CPU: maschera 0x77 scritta e verificata — "
+            "reboot per 12 thread")
+        if phase_data is not None and not self.mock and not self.dry_run:
+            self.checkpoint.set_phase("unlock_validate", phase_data,
+                                      completed=True)
+            self.checkpoint.set_current_phase("fix")
+        self._schedule_reboot("CPU revert a 6 core — reboot richiesto")
+
+    def _disable_core_unlock_boot(self) -> None:
+        """Disabilita l'auto-unlock al boot (bc250-core-unlock.service,
+        touchpoint esterno D6). Best-effort: solo run reali, fail-soft —
+        il verdetto è la protezione principale."""
+        if self.mock or self.dry_run:
+            return
+        try:
+            from .utils.shell import run_command
+            rc, _, err = run_command(
+                ["systemctl", "disable", "bc250-core-unlock.service"],
+                sudo=True, check=False)
+        except Exception as e:
+            rc, err = 1, str(e)
+        if rc != 0:
+            self.logger.warning(
+                "Disabilitazione bc250-core-unlock.service fallita (%s) — "
+                "rimuoverla manualmente per evitare il re-unlock al boot "
+                "del silicio condannato", err or rc)
+
+    # --------------------- GPU: D8/D9 + validazione ------------------ #
+
+    def _gpu_validation_needed(self) -> str:
+        """D8: 'certified' (evidenza preesistente: results.tsv completo o
+        verdetto stable_short) | 'partial' (maratona per-WGP in corso:
+        non interferire) | 'needed' (results.tsv assente, nessun
+        verdetto → validazione short)."""
+        if self.unlock_verdict.get("gpu") == "stable_short":
+            return "certified"
+        try:
+            health = self.health_test.read_results()
+        except Exception:
+            health = {}
+        if health.get("complete"):
+            return "certified"
+        if health.get("present"):
+            return "partial"
+        return "needed"
+
+    def _gpu_post_enable(self, results: Dict[str, Any],
+                         gpu: Dict[str, Any]) -> None:
+        """Dopo un enable_all appena eseguito: validazione short (D8) +
+        persistenza solo su silicio validato (D9)."""
+        decision = self._gpu_validation_needed()
+        if decision == "partial":
+            self.logger.warning(
+                "persistenza 40-CU SALTATA: results.tsv parziale "
+                "(maratona per-WGP in corso) — la validazione short non "
+                "interferisce (evidenza definitiva = protocollo per-WGP)")
+            self.results["notes"].append(
+                "Persistenza 40-CU saltata: results.tsv parziale "
+                "(maratona per-WGP in corso)")
+            return
+        if decision == "certified":
+            # Evidenza preesistente (results.tsv completo / stable_short)
+            self._suggest_40cu_persistence(results, gpu)
+            return
+        self._gpu_validate(results, gpu, already_active=False)
+
+    def _gpu_already_active(self, results: Dict[str, Any],
+                            gpu: Dict[str, Any]) -> None:
+        """40-CU già attive (persistenza legacy/boot service): certificate
+        (D8) → salto; NON certificate e results.tsv assente → validazione
+        sullo stato corrente; fail → stock dispatch + disable persistenza.
+        """
+        decision = self._gpu_validation_needed()
+        if decision in ("certified", "partial"):
+            self.logger.info("GPU: 40-CU già attive — salto")
+            return
+        self.logger.warning(
+            "GPU: 40 CU attive ma non certificate — validazione short "
+            "(vkmark) sullo stato corrente")
+        self._gpu_validate(results, gpu, already_active=True)
+
+    def _gpu_validate(self, results: Dict[str, Any],
+                      gpu: Dict[str, Any],
+                      already_active: bool = False) -> None:
+        """Validazione short GPU (D8): vkmark duration=unlock_gpu_seconds
+        con sampling temp 1s + dmesg WHEA/fault. Tri-state (D4); MAI
+        SafetyViolation (D10). Pass → verdetto stable_short + persistenza;
+        fail → stock dispatch + never_enable_all + disable persistenza;
+        inconcluso → stock dispatch + NESSUN verdetto + ricetta."""
+        duration = self.config.validation_unlock_gpu_seconds
+        if not self.config.probe_unlock_validate:
+            # m2: probe.unlock_validate è l'interruttore master della
+            # validazione post-unlock (CPU E GPU) — mai girare vkmark
+            self.logger.info(
+                "   validazione GPU DISABILITATA (probe."
+                "unlock_validate=false)")
+            return
+        if duration <= 0:
+            self.logger.info("   validazione GPU saltata (0 secondi, config)")
+            return
+        marker_key = "unlock_gpu_validate_marker"
+        if not self.mock and not self.dry_run:
+            self.checkpoint.set(marker_key,
+                                {"started_epoch": int(time.time())})
+        try:
+            val = self.gpu_validation.run(duration_s=duration)
+        finally:
+            if not self.mock and not self.dry_run:
+                self.checkpoint.set(marker_key, None)
+        results["gpu"]["validation"] = val
+        outcome = val.get("outcome")
+        cause = val.get("cause")
+
+        if outcome == "pass":
+            self.logger.info(
+                "unlock: GPU validata (vkmark %ds: temp_max=%s whea=%s "
+                "fault=%s) — verdetto stable_short", duration,
+                val.get("temp_max"), val.get("whea_delta", 0),
+                val.get("gpu_faults", 0))
+            self.unlock_verdict.set(
+                "gpu", "stable_short",
+                evidence(cause=None, tool=val.get("tool") or "vkmark",
+                         seconds=duration, temp_max=val.get("temp_max")))
+            if not already_active:
+                self._suggest_40cu_persistence(results, gpu)
+            return
+
+        if outcome == "fail":
+            self.logger.warning(
+                "unlock: GPU NON validata (cause=%s) — stock dispatch + "
+                "persistenza disattivata", cause)
+            # Verdetto durevole PRIMA (se il processo muore a metà
+            # rollback, il gate del prossimo run copre lo stato)
+            self.unlock_verdict.set(
+                "gpu", "never_enable_all",
+                evidence(cause=cause, tool=val.get("tool") or "vkmark",
+                         seconds=duration, temp_max=val.get("temp_max")))
+            # interno no-op in mock/dry-run (mai systemctl reali)
+            self._disable_40cu_persistence()
+            self.results["notes"].append(
+                f"40-CU NON validata (cause={cause}): tornate a 24 CU "
+                "(stock dispatch) — verdetto never_enable_all scritto")
+        else:  # inconclusive (termico/tool): NESSUN verdetto durevole
+            self.logger.warning(
+                "unlock: validazione GPU non conclusa (%s) — stock "
+                "dispatch, nessun verdetto", cause)
+            self.results["notes"].append(
+                f"Validazione GPU non conclusa ({cause}): 40-CU tornate a "
+                "24 CU — " + (
+                    "riprovare a macchina fredda"
+                    if cause == "thermal"
+                    else "installare vkmark (radv) e riprovare"))
+        self._gpu_stock_dispatch(results)
+
+    def _gpu_stock_dispatch(self, results: Dict[str, Any]) -> None:
+        """Revert GPU a stock (stock_dispatch, UMR volatile): best-effort."""
+        try:
+            ok = bool(self.gpu_unlock.rollback())
+        except Exception as e:
+            self.logger.warning("Stock dispatch GPU fallito: %s", e)
+            ok = False
+        results["gpu"]["rollback"] = ok
+        if not ok:
+            self.results["notes"].append(
+                "Stock dispatch GPU non riuscito — 40-CU ancora attive, "
+                "verificare manualmente")
+
+    def _disable_40cu_persistence(self) -> None:
+        """Disattiva la persistenza 40-CU al boot (bc250-cu-live-manager,
+        D5 GPU). Best-effort/fail-soft: su fallimento → nota per la
+        rimozione manuale della conf."""
+        if self.mock or self.dry_run:
+            return
+        try:
+            from .utils.shell import run_command
+            rc, _, err = run_command(
+                ["systemctl", "disable", "--now",
+                 "bc250-cu-live-manager.service"],
+                sudo=True, check=False)
+        except Exception as e:
+            rc, err = 1, str(e)
+        if rc != 0:
+            self.logger.warning(
+                "Disabilitazione bc250-cu-live-manager fallita (%s) — "
+                "rimuovere manualmente la conf "
+                "/etc/bc250-cu-live-manager.conf", err or rc)
+
     def _suggest_40cu_persistence(self, results: Dict[str, Any],
                                   gpu: Dict[str, Any]) -> None:
         """Persistenza 40-CU al boot (auto nei run NON interattivi).
@@ -1015,14 +1627,36 @@ class Orchestrator(LoggerMixin):
         Il runtime UMR è VOLATILE: al reboot le 40 CU tornano a 24. La
         persistenza (install-service + write-service-table) è validata
         sul campo e stabile, ma richiede un reboot per l'attivazione.
-        • run reale NON interattivo (es. `sudo buo unleash` su macchina
-          stock): persistenza AUTOMATICA — su fallimento resta un warning,
-          la run NON si blocca;
+        • GATE D9 (design POSTUNLOCK_VALIDATION): si persiste SOLO su
+          silicio validato — (a) validazione short appena passata
+          (results.gpu.validation), (b) results.tsv completo (per-WGP),
+          (c) verdetto GPU stable_short preesistente. Altrimenti skip
+          con log+nota: persistere al boot 40-CU non certificate
+          renderebbe PERMANENTE un difetto.
+        • run reale NON interattivo: persistenza AUTOMATICA — su
+          fallimento resta un warning, la run NON si blocca;
         • interattivo: BUO chiede conferma;
         • mock/dry-run: nessuna chiamata reale, solo la nota.
         """
         if gpu.get("method") != "runtime_umr":
             return  # kernel patch: la persistenza è nel modulo, non serve
+        # D9: gate silicio validato (una sola verifica per tutti i rami)
+        validation = (results.get("gpu") or {}).get("validation") or {}
+        certified = (
+            validation.get("outcome") == "pass"
+            or self._gpu_validation_needed() == "certified"
+        )
+        if not certified:
+            self.logger.warning(
+                "persistenza 40-CU SALTATA: silicio non validato "
+                "(results.tsv assente, nessun verdetto stable_short)")
+            self.results["notes"].append(
+                "Persistenza 40-CU saltata: silicio non validato — "
+                "eseguire il protocollo per-WGP (bc250-cu-health-test.sh "
+                "start) o la validazione short")
+            results["gpu"]["persistence"] = {
+                "suggested": False, "reason": "silicon_not_validated"}
+            return
         auto = not self.mock and not self.dry_run and not self.interactive
         if auto:
             self.logger.info(
@@ -1649,6 +2283,11 @@ class Orchestrator(LoggerMixin):
             # pulito: l'unlock è stato ritentato (o saltato definitivamente)
             # e un run successivo non deve ereditare il retry.
             self.checkpoint.set("unlock_blocked_acpi", False)
+            # Validazione post-unlock: marker/attempts puliti a ciclo
+            # completato (stesso pattern degli altri marcatori transitori).
+            self.checkpoint.set("unlock_cpu_validate_marker", None)
+            self.checkpoint.set("unlock_gpu_validate_marker", None)
+            self.checkpoint.set("unlock_cpu_validate_attempts", 0)
             # Cleanup anti-loop: a ciclo completato il servizio di ripresa
             # va rimosso, altrimenti al prossimo boot `buo resume` vede
             # "complete" → riparte da init → riesegue tutto → reboot → loop
@@ -1687,6 +2326,9 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("applied_steps", [])
             self.checkpoint.set("reboot_count", 0)
             self.checkpoint.set("unlock_blocked_acpi", False)
+            self.checkpoint.set("unlock_cpu_validate_marker", None)
+            self.checkpoint.set("unlock_gpu_validate_marker", None)
+            self.checkpoint.set("unlock_cpu_validate_attempts", 0)
         self.results["notes"].append(
             f"Safety violation: {self.safety_reason} — rollback eseguito")
 
@@ -1713,13 +2355,18 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("applied_steps", [])
             self.checkpoint.set("reboot_count", 0)
             self.checkpoint.set("unlock_blocked_acpi", False)
+            self.checkpoint.set("unlock_cpu_validate_marker", None)
+            self.checkpoint.set("unlock_gpu_validate_marker", None)
+            self.checkpoint.set("unlock_cpu_validate_attempts", 0)
         self.results["notes"].append(f"Errore in {phase}: {error}")
 
     def _run_can_schedule_reboot(self, current: str) -> bool:
         """True se il segmento di fasi [current..stop_after/complete]
-        include unlock o fix (le uniche fasi che chiamano _schedule_reboot
-        o la CU health test). In mock/dry-run sempre False: la run non può
-        programmare reboot reali → niente attivazione ostree."""
+        include unlock, unlock_validate o fix (le uniche fasi che chiamano
+        _schedule_reboot o la CU health test — la validazione post-unlock
+        programma il reboot del revert CPU). In mock/dry-run sempre False:
+        la run non può programmare reboot reali → niente attivazione
+        ostree."""
         if self.dry_run or self.mock:
             return False
         end = self._stop_after or "complete"
@@ -1727,7 +2374,7 @@ class Orchestrator(LoggerMixin):
             seg = PHASES[PHASES.index(current): PHASES.index(end) + 1]
         except ValueError:
             seg = [current]
-        return "unlock" in seg or "fix" in seg
+        return any(p in seg for p in ("unlock", "unlock_validate", "fix"))
 
     def _ensure_ostree_default(self, current: str) -> bool:
         """Attivazione EAGER (D1) + fail-closed (design OSTREE_REBOOT).
@@ -2005,6 +2652,36 @@ class Orchestrator(LoggerMixin):
         else:
             stato_40cu = "non rilevabile"
         lines.append("  40-CU: %s" % stato_40cu)
+
+        # Validazione post-unlock (design POSTUNLOCK_VALIDATION §8):
+        # righe sintetiche SOLO se la fase ha prodotto un esito reale.
+        uv_data = (self.checkpoint.get_phase("unlock_validate")
+                   .get("data", {}) or {})
+        cpu_uv = uv_data.get("cpu") or {}
+        if cpu_uv.get("verdict_blocked"):
+            lines.append("  unlock CPU: saltato (silicio marcato "
+                         "never_unlock) — 6 core")
+        elif cpu_uv.get("outcome") == "pass":
+            lines.append("  unlock CPU: validato (thread extra) — 8 core "
+                         "tenuti")
+        elif cpu_uv.get("outcome") == "fail":
+            lines.append("  unlock CPU: REVERTITO (cause=%s) — si "
+                         "prosegue a 6 core" % cpu_uv.get("cause"))
+        elif cpu_uv.get("inconclusive"):
+            lines.append("  unlock CPU: non concluso (%s) — 6 core" %
+                         cpu_uv.get("cause"))
+
+        unlock_data = (self.checkpoint.get_phase("unlock")
+                       .get("data", {}) or {})
+        gpu_val = (unlock_data.get("gpu") or {}).get("validation") or {}
+        if gpu_val.get("outcome") == "pass":
+            lines.append("  unlock GPU: validato (vkmark) — 40 CU tenute")
+        elif gpu_val.get("outcome") == "fail":
+            lines.append("  unlock GPU: REVERTITO (cause=%s) — 24 CU + "
+                         "persistenza disattivata" % gpu_val.get("cause"))
+        elif gpu_val.get("outcome") == "inconclusive":
+            lines.append("  unlock GPU: non concluso (%s) — 24 CU" %
+                         gpu_val.get("cause"))
 
         validate_data = (self.checkpoint.get_phase("validate")
                          .get("data", {}) or {})

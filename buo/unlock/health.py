@@ -59,19 +59,26 @@ class CUHealthTest(LoggerMixin):
     def read_results(self) -> Dict[str, Any]:
         """Legge i risultati correnti (riuso "smart", design
         DESIGN_PORTABILITY_DEFAULTS 3.4: complete = tutte le WGP testate
-        → il consumatore salta il protocollo per-WGP)."""
+        → il consumatore salta il protocollo per-WGP). Espone anche
+        present/rows (assente/parziale/completo, decisione D8 della
+        validazione post-unlock — design POSTUNLOCK_VALIDATION)."""
         if self.mock and self.mock_hw is not None:
+            stable = list(self.mock_hw.state.gpu_stable_cu)
+            defective = list(self.mock_hw.state.gpu_defective_cu)
+            total = len(stable) + len(defective)
             return {
-                "stable": list(self.mock_hw.state.gpu_stable_cu),
-                "defective": list(self.mock_hw.state.gpu_defective_cu),
+                "stable": stable,
+                "defective": defective,
                 "total": self.mock_hw.get_cu_count(),
                 # mock: macchina simulata già testata (niente maratona)
                 "complete": True,
+                "present": True,
+                "rows": total,
             }
         if self.wrapper is not None and self.wrapper.available:
             return self.wrapper.read_results()
         return {"stable": [], "defective": [], "total": 0,
-                "complete": False}
+                "complete": False, "present": False, "rows": 0}
 
     def reset(self) -> bool:
         """Rimuove stato e configurazione del test (rollback)."""

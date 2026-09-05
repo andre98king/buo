@@ -205,6 +205,38 @@ class TestUnknownConfigKeys(unittest.TestCase):
                                   "undervolt": {"persist": True}}})
 
 
+class TestUnlockValidationConfigKeys(unittest.TestCase):
+    """Chiavi della validazione post-unlock (design POSTUNLOCK_VALIDATION
+    §5): schema piatto, note ai parser (nessun warning), in to_dict."""
+
+    def test_defaults(self):
+        cfg = BUOConfig()
+        self.assertTrue(cfg.probe_unlock_validate)
+        self.assertEqual(cfg.validation_unlock_cpu_seconds, 60)
+        self.assertEqual(cfg.validation_unlock_gpu_seconds, 60)
+
+    def test_known_keys_no_warning(self):
+        with self.assertNoLogs("buo.config", level="WARNING"):
+            BUOConfig({"phases": {"probe": {"unlock_validate": False},
+                                  "validation": {"unlock_cpu_seconds": 30,
+                                                 "unlock_gpu_seconds": 30}}})
+
+    def test_in_to_dict_roundtrip(self):
+        import tempfile
+        from pathlib import Path
+        cfg = BUOConfig({"phases": {"validation": {
+            "unlock_cpu_seconds": 0, "unlock_gpu_seconds": 120}}})
+        d = cfg.to_dict()
+        self.assertEqual(d["phases"]["validation"]["unlock_cpu_seconds"], 0)
+        self.assertEqual(d["phases"]["validation"]["unlock_gpu_seconds"],
+                         120)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "buo.yaml"
+            cfg.save(path)
+            loaded = BUOConfig.load(path)
+            self.assertEqual(loaded.validation_unlock_gpu_seconds, 120)
+
+
 class TestOstreeConfig(unittest.TestCase):
     """Sezione ostree (design OSTREE_REBOOT, D5): auto_swap_default con
     default ON + schema piatto con avviso sulle chiavi sconosciute."""

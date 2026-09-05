@@ -106,6 +106,22 @@ def _stress_scope(value, default: str = "both") -> str:
     return default
 
 
+def _unlock_seconds(value, default: int = 60, name: str = "") -> int:
+    """Durata validazione post-unlock (0 = skip esplicito, altrimenti
+    clamp [10, 300]). Design POSTUNLOCK_VALIDATION §5. Valori <= 0
+    (inclusi i negativi) = skip: una durata negativa non deve far girare
+    la validazione (NIT n3)."""
+    v = _sweep_int(value, default, name)
+    if v <= 0:
+        return 0
+    if v < 10 or v > 300:
+        logging.getLogger(__name__).warning(
+            "Config: %s=%d fuori range [10, 300] (0 = skip) → clampato",
+            name, v)
+        return max(10, min(v, 300))
+    return v
+
+
 # --------------------------------------------------------------------- #
 # Chiavi note dello schema PIATTO (config/buo.yaml). Avviso fail-soft
 # (MAI bloccante) per chiavi sconosciute o strutture annidate: un valore
@@ -127,7 +143,7 @@ _KNOWN_OSTREE_KEYS = frozenset({"auto_swap_default"})
 
 _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
     "probe": frozenset({"cpu_unlock", "gpu_unlock", "health_test",
-                        "health_reboot_max"}),
+                        "health_reboot_max", "unlock_validate"}),
     "fix": frozenset({"tlb", "ace", "iommu", "acpi", "vram", "gtt",
                       "fan"}),
     "undervolt": frozenset({
@@ -138,7 +154,8 @@ _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
         "gpu_sweep_max_minutes",
     }),
     "overclock": frozenset({"enable", "power_budget"}),
-    "validation": frozenset({"stress_duration", "stress_scope"}),
+    "validation": frozenset({"stress_duration", "stress_scope",
+                             "unlock_cpu_seconds", "unlock_gpu_seconds"}),
 }
 
 
@@ -243,6 +260,10 @@ class BUOConfig:
         self.probe_gpu_unlock: bool = bool(probe.get("gpu_unlock", True))
         self.probe_health_test: bool = bool(probe.get("health_test", True))
         self.probe_health_reboot_max: int = int(probe.get("health_reboot_max", 25))
+        # Interruttore master della validazione post-unlock (design
+        # POSTUNLOCK_VALIDATION: nuova fase unlock_validate + hook GPU).
+        self.probe_unlock_validate: bool = bool(
+            probe.get("unlock_validate", True))
 
         fix = phases.get("fix", {})
         self.fix_tlb: bool = bool(fix.get("tlb", True))
@@ -348,6 +369,14 @@ class BUOConfig:
         self.validation_stress_scope: str = _stress_scope(
             validation.get("stress_scope", "both")
         )
+        # Durate della validazione post-unlock (design POSTUNLOCK_
+        # VALIDATION §5): 0 = skip esplicito; altrimenti clamp [10, 300].
+        self.validation_unlock_cpu_seconds: int = _unlock_seconds(
+            validation.get("unlock_cpu_seconds", 60), 60,
+            "validation.unlock_cpu_seconds")
+        self.validation_unlock_gpu_seconds: int = _unlock_seconds(
+            validation.get("unlock_gpu_seconds", 60), 60,
+            "validation.unlock_gpu_seconds")
 
         benchmark = data.get("benchmark", {})
         self.benchmark_enabled: bool = bool(benchmark.get("enabled", True))
@@ -434,6 +463,7 @@ class BUOConfig:
                     "gpu_unlock": self.probe_gpu_unlock,
                     "health_test": self.probe_health_test,
                     "health_reboot_max": self.probe_health_reboot_max,
+                    "unlock_validate": self.probe_unlock_validate,
                 },
                 "fix": {
                     "tlb": self.fix_tlb,
@@ -464,6 +494,8 @@ class BUOConfig:
                 "validation": {
                     "stress_duration": self.validation_stress_duration,
                     "stress_scope": self.validation_stress_scope,
+                    "unlock_cpu_seconds": self.validation_unlock_cpu_seconds,
+                    "unlock_gpu_seconds": self.validation_unlock_gpu_seconds,
                 },
             },
             "benchmark": {

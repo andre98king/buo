@@ -41,6 +41,10 @@ class TestHealthResultsCompleteness(unittest.TestCase):
         self.assertTrue(res["complete"])
         self.assertEqual(res["total"], HEALTH_WGP_TOTAL)
         self.assertEqual(res["defective"], [])
+        # present/rows (design POSTUNLOCK_VALIDATION D8): assente/parziale/
+        # completo distinguibili senza toccare la semantica complete
+        self.assertTrue(res["present"])
+        self.assertEqual(res["rows"], HEALTH_WGP_TOTAL)
 
     def test_partial_file_not_complete(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -50,12 +54,16 @@ class TestHealthResultsCompleteness(unittest.TestCase):
             res = BC250HealthWrapper().read_results(results_file=path)
         self.assertFalse(res["complete"])
         self.assertEqual(res["total"], 3)
+        self.assertTrue(res["present"])
+        self.assertEqual(res["rows"], 3)
 
     def test_missing_file_not_complete(self):
         res = BC250HealthWrapper().read_results(
             results_file="/nonexistent/results.tsv")
         self.assertFalse(res["complete"])
         self.assertIn("error", res)
+        self.assertFalse(res["present"])
+        self.assertEqual(res["rows"], 0)
 
 
 class _FakeHealth:

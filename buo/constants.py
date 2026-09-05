@@ -164,6 +164,7 @@ PHASES = [
     "init",
     "pre_audit",
     "unlock",
+    "unlock_validate",
     "fix",
     "optimize",
     "apply",

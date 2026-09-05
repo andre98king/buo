@@ -5,7 +5,8 @@
 import unittest
 
 from buo.constants import (CORE_MASK_STOCK, CORE_MASK_UNLOCKED, LIMITS,
-                           ROLLBACK_ORDER, SMU_MSG_WRITE_FF, CORE_MASK_REG)
+                           PHASES, ROLLBACK_ORDER, SMU_MSG_WRITE_FF,
+                           CORE_MASK_REG)
 
 
 class TestHardLimits(unittest.TestCase):
@@ -44,6 +45,26 @@ class TestHardLimits(unittest.TestCase):
                     "cpu_core_unlock", "acpi_fix", "tlb_fix", "ace_fix",
                     "iommu", "vram_config", "gtt_tuning", "fan_control"]
         self.assertEqual(ROLLBACK_ORDER, expected)
+
+
+class TestPhases(unittest.TestCase):
+    """PHASES con la validazione post-unlock (design
+    POSTUNLOCK_VALIDATION, D2): unlock_validate tra unlock e fix — il
+    segmento reboot-capable la include senza assunzioni su indici fissi
+    (usati da _next_phase / _run_can_schedule_reboot)."""
+
+    def test_unlock_validate_between_unlock_and_fix(self):
+        i_unlock = PHASES.index("unlock")
+        i_validate = PHASES.index("unlock_validate")
+        i_fix = PHASES.index("fix")
+        self.assertLess(i_unlock, i_validate)
+        self.assertLess(i_validate, i_fix)
+        self.assertIn("unlock_validate", PHASES)
+
+    def test_phases_contiguous_and_no_duplicates(self):
+        self.assertEqual(len(PHASES), len(set(PHASES)))
+        self.assertEqual(PHASES[0], "init")
+        self.assertEqual(PHASES[-1], "error")
 
 
 if __name__ == "__main__":

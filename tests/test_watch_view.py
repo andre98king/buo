@@ -145,9 +145,12 @@ class ViewerPureTest(unittest.TestCase):
         mod = self._module()
         self.assertEqual(
             mod.phase_line(self._state({"current_phase": "validate"})),
-            "Fase 7 di 7: Validazione — stress test e verifica fix")
+            "Fase 8 di 8: Validazione — stress test e verifica fix")
         self.assertEqual(mod.phase_line(self._state({"current_phase": "init"})),
-                         "Fase 1 di 7: Inizializzazione")
+                         "Fase 1 di 8: Inizializzazione")
+        self.assertEqual(
+            mod.phase_line(self._state({"current_phase": "unlock_validate"})),
+            "Fase 4 di 8: Validazione post-unlock — CPU 8-core")
         self.assertEqual(mod.phase_line(self._state({"current_phase": "complete"})),
                          "")
         self.assertEqual(mod.phase_line(self._state({"current_phase": "ignota"})),
@@ -161,10 +164,10 @@ class ViewerPureTest(unittest.TestCase):
         self.assertEqual(
             mod.status_lines(st, True),
             ["La run è RIPRESA dopo il reboot ed è in corso.",
-             "Fase 7 di 7: Validazione — stress test e verifica fix"])
+             "Fase 8 di 8: Validazione — stress test e verifica fix"])
         self.assertEqual(
             mod.status_lines(st, False), ["Ottimizzazione in corso.",
-                                          "Fase 7 di 7: Validazione — "
+                                          "Fase 8 di 8: Validazione — "
                                           "stress test e verifica fix"])
         # stato illeggibile o current_phase fuori tabella → fase OMESSA
         self.assertEqual(mod.status_lines(self._state({}) + ".missing", True),
@@ -266,7 +269,7 @@ class ViewerAnsiE2ETest(unittest.TestCase):
         plain = _strip_ansi(out)
         self.assertIn("BUO — BC-250 Ultimate Orchestrator", plain)
         self.assertIn("La run è RIPRESA dopo il reboot ed è in corso.", plain)
-        self.assertIn("Fase 7 di 7: Validazione — stress test e verifica fix",
+        self.assertIn("Fase 8 di 8: Validazione — stress test e verifica fix",
                       plain)
         self.assertIn("Fase: validate", plain)
         self.assertNotIn("Run COMPLETATA", plain)
@@ -276,7 +279,7 @@ class ViewerAnsiE2ETest(unittest.TestCase):
                       out)
         self.assertIn("\x1b[1;32mLa run è RIPRESA dopo il reboot ed è in "
                       "corso.\x1b[0m", out)
-        self.assertIn("\x1b[36mFase 7 di 7: Validazione — stress test e "
+        self.assertIn("\x1b[36mFase 8 di 8: Validazione — stress test e "
                       "verifica fix\x1b[0m", out)
         self.assertIn("\x1b[2mLog live della run:\x1b[0m", out)
         self.assertIn("\x1b[1;36mFase: validate\x1b[0m", out)
@@ -301,7 +304,7 @@ class ViewerAnsiE2ETest(unittest.TestCase):
                       plain)          # messaggio filtrato, prefisso via
         self.assertIn("  rollback: sudo buo rollback", plain)
         self.assertNotIn("buo.Orchestrator", plain)
-        self.assertNotIn("Fase 7 di 7", plain)   # current_phase=complete
+        self.assertNotIn("Fase 8 di 8", plain)   # current_phase=complete
         # veste ANSI: completamento verde, riepilogo dim, rollback giallo
         self.assertIn("\x1b[1;32mOTTIMIZZAZIONE COMPLETATA\x1b[0m", r.stdout)
         self.assertIn("\x1b[1;37mRiepilogo finale\x1b[0m", r.stdout)
@@ -424,7 +427,7 @@ class ViewerCockpitSmokeTest(unittest.TestCase):
             self.assertFalse(app._done)
             self.assertIn("La run è RIPRESA dopo il reboot ed è in corso.",
                           app._stato_plain)
-            self.assertIn("Fase 7 di 7: Validazione — stress test e "
+            self.assertIn("Fase 8 di 8: Validazione — stress test e "
                           "verifica fix", app._stato_plain)
             self.assertIn("Fase: validate", app._log_plain)
 
