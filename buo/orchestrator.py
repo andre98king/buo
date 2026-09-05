@@ -1059,7 +1059,8 @@ class Orchestrator(LoggerMixin):
                         # già attiva da persistenza legacy: torna a stock
                         # e disattiva la persistenza (mai 40-CU su
                         # silicio condannato a ogni boot)
-                        self.gpu_unlock.rollback()
+                        with self._governor_paused():
+                            self.gpu_unlock.rollback()
                         self._disable_40cu_persistence()
                     results["gpu"] = {"applied": False,
                                       "verdict_blocked": True}
@@ -1067,7 +1068,10 @@ class Orchestrator(LoggerMixin):
                         "enable_all GPU saltato: silicio marcato instabile "
                         "(verdetto never_enable_all) — GPU a 24 CU")
                 else:
-                    gpu = self.gpu_unlock.apply()
+                    # enable_all (umr): governor FERMO durante l'accesso
+                    # (M4, bug 05/09 — stessa classe della regola SMU)
+                    with self._governor_paused():
+                        gpu = self.gpu_unlock.apply()
                     results["gpu"] = gpu
                     if not was_enabled and gpu.get("applied"):
                         self.results["applied_fixes"].append("gpu_40cu")
@@ -1806,9 +1810,11 @@ class Orchestrator(LoggerMixin):
             self.logger.info(
                 "unlock: vkmark installato al resume (attivo subito)")
         # vkmark disponibile: ri-enable (il volatile si è perso al reboot)
-        # + validazione (D8)
+        # + validazione (D8). enable_all (umr): governor FERMO durante
+        # l'accesso (M4, bug 05/09 — stessa classe della regola SMU).
         try:
-            gpu = self.gpu_unlock.apply()
+            with self._governor_paused():
+                gpu = self.gpu_unlock.apply()
         except Exception as e:
             self.logger.warning("GPU: ri-enable al resume non eseguito: %s",
                                 e)
@@ -1825,9 +1831,16 @@ class Orchestrator(LoggerMixin):
                 gpu.get("error") or "esito apply non riuscito")
 
     def _gpu_stock_dispatch(self, results: Dict[str, Any]) -> None:
-        """Revert GPU a stock (stock_dispatch, UMR volatile): best-effort."""
+        """Revert GPU a stock (stock_dispatch, UMR volatile): best-effort.
+
+        M4 (bug 05/09): stock_dispatch usa lo stesso percorso umr di
+        write-service-table → governor FERMO durante l'accesso (stessa
+        classe della regola assoluta SMU/GPU); su stop non confermato →
+        RuntimeError → best-effort: warning + nota, la run non si blocca.
+        """
         try:
-            ok = bool(self.gpu_unlock.rollback())
+            with self._governor_paused():
+                ok = bool(self.gpu_unlock.rollback())
         except Exception as e:
             self.logger.warning("Stock dispatch GPU fallito: %s", e)
             ok = False
@@ -1874,6 +1887,13 @@ class Orchestrator(LoggerMixin):
           fallimento resta un warning, la run NON si blocca;
         • interattivo: BUO chiede conferma;
         • mock/dry-run: nessuna chiamata reale, solo la nota.
+
+        M4 (bug 05/09, verificato sul campo): write-service-table LEGGE
+        la tabella WGP corrente via umr → a governor ATTIVO la persistenza
+        fallisce (rc=1, contesa sul percorso GPU) → gira dentro
+        `_governor_paused` (stop confermato o abort, restart a fine
+        accesso). Governor non confermato FERMO → persistenza ANNULLATA
+        con warning: le 40-CU restano volatili, la run NON si blocca.
         """
         if gpu.get("method") != "runtime_umr":
             return  # kernel patch: la persistenza è nel modulo, non serve
@@ -1928,7 +1948,26 @@ class Orchestrator(LoggerMixin):
                 results["gpu"]["persistence"] = {"suggested": True,
                                                  "applied": False}
                 return
-        p = self.gpu_unlock.persist()
+        try:
+            with self._governor_paused():
+                p = self.gpu_unlock.persist()
+        except RuntimeError as e:
+            # M4: governor non CONFERMATO fermo (stato indeterminabile o
+            # stop fallito) → persistenza ANNULLATA: mai accesso umr a
+            # governor attivo (bug 05/09). Le 40-CU restano volatili;
+            # warning, MAI blocco della run.
+            self.logger.warning(
+                "Persistenza 40-CU SALTATA: %s — le 40 CU restano attive "
+                "solo volatili (al prossimo reboot tornano a 24)", e)
+            self.results["notes"].append(
+                "Persistenza 40-CU non eseguita: governor non confermato "
+                "fermo — 40 CU volatili (persistenza manuale: "
+                "install-service + write-service-table)")
+            results["gpu"]["persistence"] = {
+                "persisted": False,
+                "error": str(e),
+            }
+            return
         results["gpu"]["persistence"] = p
         if p.get("persisted"):
             self.logger.info(

@@ -364,6 +364,10 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         fake = mock.Mock()
         fake.persist.return_value = {"persisted": True, "note": "ok"}
         orch.gpu_unlock = fake
+        # Governor stub: test ermetico (nessun systemctl reale, lo stato
+        # del governor della macchina non deve influenzare l'esito).
+        orch.governor = mock.Mock()
+        orch.governor.is_running.return_value = False
         with mock.patch.object(orch, "_gpu_validation_needed",
                                return_value="certified"), \
              self.assertLogs("buo.Orchestrator", level="INFO") as logs:
@@ -434,6 +438,8 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         fake = mock.Mock()
         fake.persist.return_value = {"persisted": False, "error": "boom"}
         orch.gpu_unlock = fake
+        orch.governor = mock.Mock()
+        orch.governor.is_running.return_value = False  # test ermetico
         with mock.patch.object(orch, "_gpu_validation_needed",
                                return_value="certified"), \
              self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
@@ -441,6 +447,62 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         self.assertFalse(results["gpu"]["persistence"]["persisted"])
         self.assertTrue(any("Persistenza non riuscita" in m and "boom" in m
                             for m in logs.output))
+
+    def test_persist_runs_with_governor_paused(self):
+        """BUG 05/09: persist() (write-service-table legge la tabella WGP
+        corrente via umr) a governor ATTIVO fallisce sul campo (rc=1). La
+        persistenza deve girare col governor FERMO: stop chiamato PRIMA di
+        persist, start DOPO."""
+        from unittest import mock
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        gpu, results = self._gpu()
+        mgr = mock.Mock()
+        mgr.gov.is_running.return_value = True
+        mgr.gov.stop.return_value = True
+        mgr.gov.start.return_value = True
+        mgr.gpu.persist.return_value = {"persisted": True, "note": "ok"}
+        orch.governor = mgr.gov
+        orch.gpu_unlock = mgr.gpu
+        with mock.patch.object(orch, "_gpu_validation_needed",
+                               return_value="certified"):
+            orch._suggest_40cu_persistence(results, gpu)
+        calls = mgr.mock_calls
+        mgr.gov.stop.assert_called_once_with()
+        mgr.gpu.persist.assert_called_once_with()
+        mgr.gov.start.assert_called_once_with()
+        self.assertLess(calls.index(mock.call.gov.stop()),
+                        calls.index(mock.call.gpu.persist()),
+                        "governor fermato PRIMA di persist")
+        self.assertLess(calls.index(mock.call.gpu.persist()),
+                        calls.index(mock.call.gov.start()),
+                        "governor riavviato DOPO persist")
+        self.assertTrue(results["gpu"]["persistence"]["persisted"])
+
+    def test_persist_aborted_when_governor_stop_fails(self):
+        """Governor attivo ma stop NON confermato → persist MAI chiamata
+        (mai umr a governor attivo, stessa classe della regola SMU):
+        abort con warning, persistenza volatile, run non bloccata."""
+        from unittest import mock
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        gpu, results = self._gpu()
+        gov = mock.Mock()
+        gov.is_running.return_value = True
+        gov.stop.return_value = False  # stop non confermato
+        orch.governor = gov
+        fake = mock.Mock()
+        fake.persist.side_effect = AssertionError(
+            "persist non deve partire a governor non confermato fermo")
+        orch.gpu_unlock = fake
+        with mock.patch.object(orch, "_gpu_validation_needed",
+                               return_value="certified"), \
+             self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
+            orch._suggest_40cu_persistence(results, gpu)  # non deve sollevare
+        fake.persist.assert_not_called()
+        gov.start.assert_not_called()
+        self.assertFalse(results["gpu"]["persistence"]["persisted"])
+        self.assertTrue(any("governor" in m.lower() for m in logs.output))
 
 
 class TestAbortTerminal(unittest.TestCase):
