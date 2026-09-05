@@ -889,6 +889,14 @@ class Orchestrator(LoggerMixin):
             return
         if not self.config.deps_auto_install or not self.config.probe_gpu_unlock:
             return
+        # UX (bug campo 05/09 "sembra fermo"): la txn rpm-ostree blocca per
+        # MINUTI senza output — il CLI mostrava l'ultima riga pre-init ferma.
+        # Log PRIMA della chiamata bloccante quando vkmark manca.
+        import shutil as _shutil
+        if _shutil.which("vkmark") is None:
+            self.logger.info(
+                "deps: vkmark non presente — installazione automatica in "
+                "corso (rpm-ostree, 1-3 minuti; la run continua da sola)")
         res = self._provision_vkmark()
         if res.get("status") == "ok":
             if res.get("needs_reboot"):
