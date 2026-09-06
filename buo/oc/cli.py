@@ -21,6 +21,7 @@ from typing import Optional
 
 import click
 
+from ..constants import GPU_FREQ_STEPS
 from ..utils.paths import SYSTEM_STATE_DIR, state_dir
 from .constants import OC_DIR_DEFAULT
 
@@ -363,6 +364,154 @@ def oc_heal(mock, dry_run, oc_dir) -> None:
     """Sanifica un apply interrotto (governor fermo → backup + riavvio)."""
     outcome = _mk_apply(oc_dir, mock, dry_run).heal()
     _print_outcome(outcome)
+
+
+# --------------------------------------------------------------------------- #
+# sweep-gpu (T4: sweep per-silicio delegato da unleash, design
+# research/DESIGN_T4_SWEEP_OC.md)
+# --------------------------------------------------------------------------- #
+
+
+def _oc_sweep_config():
+    """Config per i default delle opzioni sweep via BUOConfig.load()
+    (legge /etc/buo/buo.yaml quando presente; assente/non leggibile →
+    default di codice)."""
+    try:
+        from ..config import BUOConfig
+        return BUOConfig.load()
+    except Exception:  # pragma: no cover — config non leggibile
+        return None
+
+
+def _parse_freqs(value, default):
+    """Frequenze CSV → lista ordinata, deduplicata, sottoinsieme di
+    GPU_FREQ_STEPS (regola di coerenza esistente in config._sweep_freqs);
+    liste non ordinate/valori fuori scala mai passate al probe in silenzio."""
+    if value is None:
+        return default
+    try:
+        freqs = [int(x.strip()) for x in value.split(",") if x.strip()]
+    except ValueError:
+        raise click.BadParameter("formato atteso: '1200,1500,2000'")
+    freqs = sorted(set(freqs))
+    if not freqs:
+        raise click.BadParameter("almeno una frequenza richiesta")
+    invalid = [f for f in freqs if f not in GPU_FREQ_STEPS]
+    if invalid:
+        raise click.BadParameter(
+            "frequenze non valide (attese in GPU_FREQ_STEPS %s): %s"
+            % (GPU_FREQ_STEPS, invalid))
+    return freqs
+
+
+def _print_sweep_report(esito, sim, path) -> None:
+    if console is None:
+        click.echo("sweep-gpu: source=%s winner=%s esito_scritto=%s"
+                   % (esito.get("source"), esito.get("winner"),
+                      esito.get("written")))
+        return
+    if sim:
+        console.print("[dim]Simulato (--mock/--dry-run): nessuna scrittura "
+                      "su gpu-sweep.json[/]")
+    source = esito.get("source")
+    if not sim and source == "community_defaults":
+        console.print("[yellow]⚠️ Sweep non eseguito (tool di stress o "
+                      "governor non disponibili): tabella community "
+                      "applicata (non è un errore)[/]")
+    if esito.get("governor_stopped"):
+        console.print("[yellow]Governor FERMO a fine sweep (curva precedente "
+                      "non riapplicata): avvialo con `systemctl start "
+                      "cyan-skillfish-governor-smu` (o `buo oc heal`)[/]")
+    crashes = [t for t in esito.get("tested") or []
+               if t.get("status") == "crash"]
+    if crashes:
+        for t in crashes:
+            v = "?" if t.get("v") is None else t["v"]
+            console.print(f"[red]✗ Punto crashato (boot precedente) "
+                          f"saltato: {t['f']} MHz @ {v} mV[/]")
+    winner = esito.get("winner")
+    if winner:
+        console.print(f"[bold green]✓ Vincitore: {winner['freq']} MHz @ "
+                      f"{winner['voltage']} mV[/]")
+    else:
+        console.print("[yellow]Nessun vincitore (nessun punto stabile)[/]")
+    points = esito.get("safe_points") or []
+    if points:
+        console.print("Safe points: " + ", ".join(
+            f"{p['freq']}@{p['voltage']}" for p in points))
+    best = esito.get("best_efficiency") or {}
+    if best:
+        console.print(f"Best efficiency: {best['freq']} MHz @ "
+                      f"{best['voltage']} mV")
+    console.print(f"Fonte: {source}")
+    notes = []
+    smeta = esito.get("sweep") or {}
+    if smeta.get("smu_floor_mv") is not None:
+        notes.append(f"floor SMU rilevato: {smeta['smu_floor_mv']} mV")
+    if esito.get("clamped_to_floor"):
+        notes.append("safe_points clampati al floor")
+    if smeta.get("duration_s") is not None:
+        notes.append(f"durata: {smeta['duration_s']} s")
+    if notes:
+        console.print("[dim]note: " + " · ".join(notes) + "[/]")
+    if esito.get("written"):
+        console.print(f"[dim]Esito scritto: {path}[/]")
+
+
+@oc_group.command("sweep-gpu")
+@_oc_opts
+@click.option("--freqs", default=None,
+              help="Frequenze (MHz) CSV, es. '1200,1500,2000' — "
+                   "default dalla config (1200,1500,2000)")
+@click.option("--step-mv", type=int, default=None,
+              help="Passo di discesa (mV) — default dalla config (25)")
+@click.option("--floor-mv", type=int, default=None,
+              help="Floor minimo dei safe_points (mV) — default dalla "
+                   "config (800)")
+def oc_sweep_gpu(mock, dry_run, oc_dir, freqs, step_mv, floor_mv) -> None:
+    """Sweep GPU per-silicio (ricerca undervolt; design T4).
+
+    Esito: oc_dir/gpu-sweep.json (scrittura atomica). Fallback community
+    con avviso se lo sweep non è possibile (fail-closed di gpu.py): NON è
+    un errore. Con --mock/--dry-run: flusso simulato, nessuna scrittura
+    (C1).
+    """
+    from . import gpu_sweep
+    _warn_if_not_system(oc_dir)
+    cfg = _oc_sweep_config()
+
+    def _cfg(name, dflt):
+        return getattr(cfg, name, dflt) if cfg is not None else dflt
+
+    freqs_l = _parse_freqs(freqs, list(_cfg("undervolt_gpu_sweep_freqs",
+                                            gpu_sweep.DEFAULT_FREQS)))
+    step = (step_mv if step_mv is not None
+            else _cfg("undervolt_gpu_sweep_step_mv", gpu_sweep.DEFAULT_STEP_MV))
+    floor = (floor_mv if floor_mv is not None
+             else _cfg("undervolt_gpu_sweep_floor_mv",
+                       gpu_sweep.DEFAULT_FLOOR_MV))
+    sweep_opts = {k: _cfg("undervolt_gpu_sweep_" + k, v)
+                  for k, v in gpu_sweep.DEFAULT_SWEEP_OPTS.items()}
+    path = _path(oc_dir) / gpu_sweep.ESITO_FILE
+    sim = mock or dry_run
+    try:
+        esito = gpu_sweep.run(
+            oc_dir=_path(oc_dir), freqs=freqs_l, step_mv=step,
+            floor_mv=floor, sweep_opts=sweep_opts, mock=mock,
+            dry_run=dry_run)
+    except RuntimeError as e:
+        if console:
+            console.print(f"[red]✗ {e}[/]")
+        else:
+            click.echo(f"ERRORE: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:  # sweep fallito (mai esito parziale)
+        if console:
+            console.print(f"[red]✗ sweep fallito: {e}[/]")
+        else:
+            click.echo(f"ERRORE: sweep fallito: {e}", err=True)
+        sys.exit(1)
+    _print_sweep_report(esito, sim, path)
 
 
 # --------------------------------------------------------------------------- #

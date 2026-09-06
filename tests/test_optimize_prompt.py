@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""T3 — menu interattivo a 3 opzioni della fase optimize (design
-research/DESIGN_UNLEASH_OC_BOUNDARY.md §5):
+"""T3+T4 — selezione della modalità di ottimizzazione della fase optimize
+(design research/DESIGN_UNLEASH_OC_BOUNDARY.md §5 + T4 D1/D2 in
+research/DESIGN_T4_SWEEP_OC.md):
 
-- interactive (run reale) → prompt a 3 opzioni: [1] riuso (default),
-  [2] base sicura senza sweep, [3] ottimizzazione completa; input
-  invalido/vuoto → [1]; [3] con profilo certificato → conferma esplicita
-  di sovrascrittura, rifiutata → [1];
-- non interactive o dry-run → NESSUN prompt: decisione di stato INVARIATA
-  (T1): profilo certificato → riuso, altrimenti percorso completo.
+- interactive (run reale) → menu a 2 voci (T4 D2, [3] "full" RIMOSSO):
+  [1] riuso (default), [2] base sicura; input invalido/vuoto → [1];
+- non interactive o dry-run → NESSUN prompt: decisione di stato (T4 D1):
+  profilo certificato → riuso, altrimenti BASE SICURA (mai full — lo
+  sweep GPU per-silicio è delegato a `buo oc sweep-gpu`).
 
 Sempre mock (mai hardware reale) e nessuna attesa da terminale: input
 patchato. I rami chiamano il codice ESISTENTE — i test osservano la
-decisione del selettore (mode reuse/safe_base/full), non l'hardware.
+decisione del selettore (mode reuse/safe_base), non l'hardware.
 """
 
 import json
@@ -81,8 +81,8 @@ class OptimizePromptBase(unittest.TestCase):
         return orch
 
     def _run_full_patched(self, orch):
-        """Esegue il percorso sweep+ricerca (mode full/safe_base) con le
-        ricerche simulate: ritorna (data, spy_gpu, spy_oc_cpu)."""
+        """Esegue il percorso base-sicura (mode safe_base) con le ricerche
+        simulate: ritorna (data, spy_gpu, spy_oc_cpu)."""
         p_cpu = mock.patch.object(orch.uv_cpu, "optimize",
                                   return_value=_uv_cpu_result())
         p_gpu = mock.patch.object(orch.uv_gpu, "optimize",
@@ -95,9 +95,22 @@ class OptimizePromptBase(unittest.TestCase):
             data = orch._phase_optimize()
         return data, spy_gpu, spy_oc_cpu
 
+    def _assert_safe_base(self, data, spy_gpu, spy_oc_cpu, orch):
+        """Base sicura: UV CPU stock, NESSUN parametro sweep passato
+        all'ottimizzatore (community GPU), niente OC."""
+        self.assertNotIn("reuse_oc", data)
+        self.assertIn("undervolt_cpu", data)
+        self.assertNotIn("sweep", spy_gpu.call_args.kwargs,
+                         "lo sweep è delegato: unleash non lo passa mai")
+        spy_oc_cpu.assert_not_called()  # niente OC
+        self.assertNotIn("overclock_cpu", data)
+        self.assertTrue(
+            any("buo oc sweep-gpu" in n for n in orch.results["notes"]),
+            "nota di delega dello sweep attesa in results.notes")
+
 
 class TestInteractiveMenu(OptimizePromptBase):
-    """Prompt a 3 opzioni nei run interattivi (mock, input patchato)."""
+    """Menu a 2 voci nei run interattivi (mock, input patchato)."""
 
     def test_choice_1_reuses_certified_profile(self):
         self._write_certified()
@@ -110,9 +123,25 @@ class TestInteractiveMenu(OptimizePromptBase):
         self.assertNotIn("undervolt_gpu", data)
         spy.assert_called_once()  # solo il menu, nessuna conferma
 
+    def test_menu_has_two_choices_and_delegation_note(self):
+        # T4 D2: [3] "full" rimosso; il menu reca la delega dello sweep.
+        self._write_certified()
+        orch = self._orch()
+        menu_text = []
+        def fake_input(prompt=""):
+            menu_text.append(prompt)
+            return "1"
+        with mock.patch("builtins.input", side_effect=fake_input):
+            orch._phase_optimize()
+        text = menu_text[0] if menu_text else ""
+        self.assertNotIn("[3]", text)
+        self.assertIn("[1]", text)
+        self.assertIn("[2]", text)
+        self.assertIn("buo oc sweep-gpu", text)
+
     def test_invalid_or_empty_input_defaults_to_choice_1(self):
         self._write_certified()
-        for bad in ("", "x", "0", "4", "si", "\n"):
+        for bad in ("", "x", "0", "4", "si", "\n", "3"):
             orch = self._orch()
             with mock.patch("builtins.input", return_value=bad):
                 data = orch._phase_optimize()
@@ -120,65 +149,35 @@ class TestInteractiveMenu(OptimizePromptBase):
                           "input %r deve cadere sul default [1]" % bad)
             self.assertNotIn("undervolt_cpu", data)
 
+    def test_choice_1_without_certificate_uses_safe_base(self):
+        # [1] = "applica profilo certificato SE PRESENTE": senza stato
+        # certificato coincide con la decisione di stato (T4 D1: base
+        # sicura, MAI full/sweep), mai hang.
+        orch = self._orch()
+        orch.config.overclock_enable = True
+        with mock.patch("builtins.input", return_value="1"):
+            data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
+        self._assert_safe_base(data, spy_gpu, spy_oc_cpu, orch)
+
+    def test_choice_1_with_invalid_certified_state_uses_safe_base(self):
+        # Stato presente ma NON applicabile (fingerprint diversa dalla
+        # macchina) → candidate None → [1] = decisione di stato (base
+        # sicura), mai errore né riuso di uno stato non valido.
+        self._write_certified(fp="f" * 64)
+        orch = self._orch()
+        orch.config.overclock_enable = True
+        with mock.patch("builtins.input", return_value="1"):
+            data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
+        self._assert_safe_base(data, spy_gpu, spy_oc_cpu, orch)
+
     def test_choice_2_safe_base_skips_sweep_and_oc(self):
         orch = self._orch()
-        orch.config.undervolt_gpu_sweep_enabled = True
         orch.config.overclock_enable = True
         with mock.patch("builtins.input", return_value="2"):
             data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)  # UV CPU stock resta
-        sweep = spy_gpu.call_args.kwargs["sweep"]
-        self.assertFalse(sweep["enabled"], "base sicura = sweep disabilitato")
-        spy_oc_cpu.assert_not_called()  # niente OC
-        self.assertNotIn("overclock_cpu", data)
+        self._assert_safe_base(data, spy_gpu, spy_oc_cpu, orch)
 
-    def test_choice_3_full_without_certificate(self):
-        orch = self._orch()  # oc_dir vuoto: nessun profilo certificato
-        orch.config.undervolt_gpu_sweep_enabled = True
-        orch.config.overclock_enable = True
-        with mock.patch("builtins.input", return_value="3"):
-            data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)
-        sweep = spy_gpu.call_args.kwargs["sweep"]
-        self.assertTrue(sweep["enabled"])
-        spy_oc_cpu.assert_called_once()
-
-    def test_choice_3_with_certified_asks_confirm_and_refusal_reuses(self):
-        self._write_certified()
-        orch = self._orch()
-        with mock.patch("builtins.input", side_effect=["3", "n"]) as spy:
-            data = orch._phase_optimize()
-        self.assertIn("reuse_oc", data)
-        self.assertNotIn("undervolt_cpu", data)
-        self.assertEqual(spy.call_count, 2)  # menu + conferma sovrascrittura
-
-    def test_choice_3_with_certified_confirm_accepted_runs_full(self):
-        self._write_certified()
-        orch = self._orch()
-        orch.config.undervolt_gpu_sweep_enabled = True
-        orch.config.overclock_enable = True
-        with mock.patch("builtins.input", side_effect=["3", "y"]):
-            data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)
-        self.assertTrue(spy_gpu.call_args.kwargs["sweep"]["enabled"])
-        spy_oc_cpu.assert_called_once()
-
-    def test_choice_1_without_certificate_falls_back_to_state_decision(self):
-        # [1] = "applica profilo certificato SE PRESENTE": senza stato
-        # certificato coincide con la decisione di stato (full), mai hang.
-        orch = self._orch()
-        orch.config.undervolt_gpu_sweep_enabled = True
-        orch.config.overclock_enable = True
-        with mock.patch("builtins.input", return_value="1"):
-            data, spy_gpu, _ = self._run_full_patched(orch)
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)
-        self.assertTrue(spy_gpu.call_args.kwargs["sweep"]["enabled"])
-
-    def test_menu_eof_defaults_to_choice_1(self):
+    def test_menu_eof_defaults_to_choice_1_reuse(self):
         # Terminale chiuso sul menu (EOFError, pattern _confirm_phase):
         # nessuna attesa, default [1] → riuso del profilo certificato.
         self._write_certified()
@@ -188,32 +187,16 @@ class TestInteractiveMenu(OptimizePromptBase):
         self.assertIn("reuse_oc", data)
         self.assertNotIn("undervolt_cpu", data)
 
-    def test_choice_3_confirm_eof_refuses_and_reuses(self):
-        # EOFError sulla conferma di sovrascrittura → rifiuto → [1] riuso.
-        self._write_certified()
-        orch = self._orch()
-        with mock.patch("builtins.input", side_effect=["3", EOFError]):
-            data = orch._phase_optimize()
-        self.assertIn("reuse_oc", data)
-        self.assertNotIn("undervolt_cpu", data)
-
-    def test_choice_1_with_invalid_certified_state_falls_back_full(self):
-        # Stato presente ma NON applicabile (fingerprint diversa dalla
-        # macchina) → candidate None → [1] = decisione di stato (full),
-        # mai errore né riuso di uno stato non valido.
-        self._write_certified(fp="f" * 64)
-        orch = self._orch()
-        orch.config.undervolt_gpu_sweep_enabled = True
+    def test_menu_eof_without_certificate_uses_safe_base(self):
+        orch = self._orch()  # oc_dir vuoto: nessun profilo certificato
         orch.config.overclock_enable = True
-        with mock.patch("builtins.input", return_value="1"):
-            data, spy_gpu, _ = self._run_full_patched(orch)
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)
-        self.assertTrue(spy_gpu.call_args.kwargs["sweep"]["enabled"])
+        with mock.patch("builtins.input", side_effect=EOFError):
+            data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
+        self._assert_safe_base(data, spy_gpu, spy_oc_cpu, orch)
 
 
 class TestNonInteractive(OptimizePromptBase):
-    """Nessun prompt: mode = decisione di stato (identica a prima di T3)."""
+    """Nessun prompt: mode = decisione di stato (T4 D1: mai full)."""
 
     def test_with_certified_profile_reuses_without_prompt(self):
         self._write_certified()
@@ -223,30 +206,24 @@ class TestNonInteractive(OptimizePromptBase):
         spy.assert_not_called()
         self.assertIn("reuse_oc", data)
 
-    def test_without_state_runs_full_without_prompt(self):
+    def test_without_state_uses_safe_base_without_prompt(self):
         orch = self._orch(interactive=False)
-        orch.config.undervolt_gpu_sweep_enabled = True
         orch.config.overclock_enable = True
         with mock.patch("builtins.input") as spy:
             data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
         spy.assert_not_called()
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)
-        self.assertTrue(spy_gpu.call_args.kwargs["sweep"]["enabled"])
-        spy_oc_cpu.assert_called_once()
+        self._assert_safe_base(data, spy_gpu, spy_oc_cpu, orch)
 
     def test_dry_run_never_prompts_even_if_interactive(self):
         # Il menu richiede una run REALE: dry-run/interactive resta sulla
-        # decisione di stato (dry-run: mai riuso → percorso completo).
+        # decisione di stato (dry-run: mai riuso → base sicura, mai full).
         self._write_certified()
         orch = self._orch(interactive=True, dry_run=True)
-        orch.config.undervolt_gpu_sweep_enabled = True
         orch.config.overclock_enable = True
         with mock.patch("builtins.input") as spy:
-            data, _, _ = self._run_full_patched(orch)
+            data, spy_gpu, spy_oc_cpu = self._run_full_patched(orch)
         spy.assert_not_called()
-        self.assertNotIn("reuse_oc", data)
-        self.assertIn("undervolt_cpu", data)
+        self._assert_safe_base(data, spy_gpu, spy_oc_cpu, orch)
 
 
 if __name__ == "__main__":

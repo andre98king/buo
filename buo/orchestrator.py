@@ -2127,22 +2127,6 @@ class Orchestrator(LoggerMixin):
                 return str(value)
         return ""
 
-    def _gpu_sweep_params(self) -> Dict[str, Any]:
-        """Opzioni della ricerca per-silicio GPU (design GPU_UV §6) da
-        passare a uv_gpu.optimize(sweep=...)."""
-        return {
-            "enabled": self.config.undervolt_gpu_sweep_enabled,
-            "freqs": list(self.config.undervolt_gpu_sweep_freqs),
-            "step_mv": self.config.undervolt_gpu_sweep_step_mv,
-            "floor_mv": self.config.undervolt_gpu_sweep_floor_mv,
-            "max_steps": self.config.undervolt_gpu_sweep_max_steps,
-            "test_seconds": self.config.undervolt_gpu_sweep_test_seconds,
-            "confirm_seconds": self.config.undervolt_gpu_sweep_confirm_seconds,
-            "max_minutes": self.config.undervolt_gpu_sweep_max_minutes,
-        }
-        # N.B. nessun "temp_gate": il gate termico dei probe È l'HARD
-        # (politica a due livelli 03/09, LIMITS.gpu.temp_max in gpu.py).
-
     def _read_stock_vid(self) -> Optional[int]:
         """Misura del VID stock (mV) per cpu_target_vid=auto.
 
@@ -2226,50 +2210,39 @@ class Orchestrator(LoggerMixin):
             return None, f"riuso OC non valutato: {e}"
 
     def _select_optimize_mode(self, reuse_available: bool) -> str:
-        """Modalità di ottimizzazione della fase optimize (T3, design
-        UNLEASH_OC_BOUNDARY §5): 'reuse' | 'safe_base' | 'full'.
+        """Modalità di ottimizzazione della fase optimize (T3+T4, design
+        UNLEASH_OC_BOUNDARY §5 / DESIGN_T4_SWEEP_OC §4): 'reuse' |
+        'safe_base'.
 
         I rami di _phase_optimize chiamano SOLO codice esistente (riuso T1
-        / sweep+ricerca / tabella community): qui si decide il mode.
+        / tabella community): qui si decide il mode.
 
-        - Non interattivo: decisione di STATO invariata (T1) — profilo
-          certificato → 'reuse', altrimenti 'full'. Dry-run: nessun
-          prompt e mai riuso (candidate sempre None) → 'full'.
-        - Interattivo (run reale): menu a 3 opzioni (pattern input di
-          _confirm_phase, EOFError → default); default [1]; input
-          invalido/vuoto → [1]; [1] senza profilo certificato coincide
-          con la decisione di stato ('full', mai hang); [3] con profilo
-          certificato → conferma esplicita di sovrascrittura, rifiutata
-          (o EOF) → [1] (riuso).
+        - Non interattivo: decisione di STATO (T1 + T4 D1) — profilo
+          certificato → 'reuse', altrimenti 'safe_base' (MAI 'full': lo
+          sweep GPU per-silicio non vive più in unleash, è delegato a
+          `buo oc sweep-gpu`). Dry-run: nessun prompt e mai riuso
+          (candidate sempre None) → 'safe_base'.
+        - Interattivo (run reale): menu a 2 voci (T4 D2, [3] rimosso —
+          pattern input di _confirm_phase, EOFError → default); default
+          [1]; input invalido/vuoto → [1]; [1] senza profilo certificato
+          coincide con la decisione di stato ('safe_base', mai hang).
         """
         if not (self.interactive and not self.dry_run):
-            return "reuse" if reuse_available else "full"
+            return "reuse" if reuse_available else "safe_base"
         menu = (
             "Ottimizzazione CPU/GPU:\n"
             "  [1] Riusa lo stato ottimizzato esistente (default) — "
             "applica profilo certificato se presente\n"
-            "  [2] Base sicura senza sweep (UV CPU stock + tabella "
-            "community GPU)\n"
-            "  [3] Ottimizzazione completa: sweep GPU per-silicio + "
-            "ricerca (~10-25 min)\n"
-            "Scegli [1/2/3, default 1]: ")
+            "  [2] Base sicura (UV CPU stock + tabella community GPU — "
+            "sweep GPU delegato: buo oc sweep-gpu)\n"
+            "Scegli [1/2, default 1]: ")
         try:
             resp = input(menu).strip()
         except EOFError:
             resp = ""
         if resp == "2":
             return "safe_base"
-        if resp == "3":
-            if reuse_available:
-                try:
-                    ok = input("  Sovrascriverai il profilo certificato — "
-                               "confermi? [y/N] ").strip().lower()
-                except EOFError:
-                    ok = "n"
-                if ok not in ("y", "yes"):
-                    return "reuse"
-            return "full"
-        return "reuse" if reuse_available else "full"
+        return "reuse" if reuse_available else "safe_base"
 
     def _phase_optimize(self) -> Dict[str, Any]:
         """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited.
@@ -2282,12 +2255,19 @@ class Orchestrator(LoggerMixin):
         (smoke 30s + auto-rollback). Il governor NON si ferma qui (nessuna
         ricerca SMU): ApplyManager lo ferma/riavvia attorno all'apply.
 
-        T3 (design UNLEASH_OC_BOUNDARY §5): il mode (reuse/safe_base/full)
-        arriva da _select_optimize_mode — decisione di stato nei run non
-        interattivi (INVARIATA), menu a 3 opzioni nei run interattivi.
-        'safe_base' disabilita solo sweep e OC per QUESTO run (override
-        run-scoped dei flag di config, pattern di cli.py --skip-*): il
-        percorso resta quello esistente con tabella community GPU.
+        T3+T4 (design UNLEASH_OC_BOUNDARY §5 / DESIGN_T4_SWEEP_OC §4): il
+        mode (reuse/safe_base) arriva da _select_optimize_mode —
+        decisione di stato nei run non interattivi (T4 D1: senza profilo
+        certificato → base sicura, MAI full); menu a 2 voci nei run
+        interattivi (T4 D2: [3] rimosso). 'safe_base' disabilita solo
+        sweep e OC per QUESTO run (override run-scoped dei flag di
+        config, pattern di cli.py --skip-*): il percorso resta quello
+        esistente con tabella community GPU (confermata: con lo sweep
+        disabilitato optimize() usa _community_result, mai una curva
+        vuota). Lo sweep GPU per-silicio NON è più raggiungibile da
+        unleash: delegato a `buo oc sweep-gpu` ('full' non esiste più
+        come mode → il flag sweep sotto è SEMPRE disabilitato nei run
+        non-reuse).
         """
         self.logger.info("Ottimizzazione — undervolt e overclock")
         results: Dict[str, Any] = {}
@@ -2327,6 +2307,9 @@ class Orchestrator(LoggerMixin):
                 "GPU (sweep per-silicio e OC saltati)")
             self.config.overclock_enable = False
             self.config.undervolt_gpu_sweep_enabled = False
+            self.results["notes"].append(
+                "Sweep GPU delegato: buo oc sweep-gpu (base sicura: "
+                "tabella community GPU)")
 
         # Il governor va fermato durante i test
         self._capture_pre_validate_config()
@@ -2341,29 +2324,14 @@ class Orchestrator(LoggerMixin):
         uv_cpu = self._optimize_cpu_uv()
         results["undervolt_cpu"] = uv_cpu
 
-        # GPU undervolt
-        sweep = self._gpu_sweep_params()
-        if sweep["enabled"] and not self.mock:
-            # Budget comunicato PRIMA dello sweep (design §8)
-            n_freq = len([f for f in sweep["freqs"]
-                          if f >= self.config.undervolt_gpu_start_freq
-                          and f <= self.config.gpu_freq_max])
-            if n_freq > 0:
-                est_s = (n_freq
-                         * (sweep["max_steps"]
-                            * (sweep["test_seconds"] + 5)
-                            + sweep["confirm_seconds"]))
-                self.logger.info(
-                    "Sweep GPU per-silicio: %d freq × fino a %d candidati × "
-                    "%ds (+ conferma %ds per freq) + ciclo governor ~5s/"
-                    "candidato → stimato ~%d min (tetto wall-clock %d min)",
-                    n_freq, sweep["max_steps"], sweep["test_seconds"],
-                    sweep["confirm_seconds"], (est_s + 59) // 60,
-                    sweep["max_minutes"])
+        # GPU undervolt — ramo base-sicura (T4, design §4): lo sweep
+        # per-silicio NON vive più in unleash ('full' rimosso in
+        # _select_optimize_mode), è delegato a `buo oc sweep-gpu`. Qui
+        # l'ottimizzatore gira SENZA sweep → tabella community (gpu.py:
+        # mai una curva vuota).
         uv_gpu = self.uv_gpu.optimize(
             start_freq=self.config.undervolt_gpu_start_freq,
             max_voltage=self.config.gpu_voltage_recommended_max,
-            sweep=sweep,
             power_budget=self.config.power_budget,
             monitor=self.safety_monitor,
         )
