@@ -58,6 +58,12 @@ F_SEARCH_MAX = 3850              # tetto di ricerca del motore
 WALL_FREQ = 3860                 # muro: MAI freq >= 3860
 HANG_ZONE_MIN_FREQ = 3725        # anti-zona utente (dati campo 31/08)
 HANG_ZONE_MIN_VID = 1050         # mai VID < 1050 su clock >= 3725 (02/09: 3725@1000 HANG)
+# Mirror tier-2 dell'engine (02/09, incidente profilo avvelenato): la banda
+# 3800-3870@<=1050 è zona di hang/wedge ALLA SCRITTURA — mai VID < 1125 su
+# clock >= 3800 (regola statica TIERED, vale in tutti i punti dove vale la
+# base 3725/1050: probe/claim/apply/BKG). Engine: HANG_ZONE2_MIN_FREQ/VID.
+HANG_ZONE2_MIN_FREQ = 3800
+HANG_ZONE2_MIN_VID = 1125
 FREQ_MIN_OC = 3500               # sotto = downclock (profilo "cool", ammesso)
 
 # ---------------------------------------------------------------------------

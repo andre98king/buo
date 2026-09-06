@@ -44,6 +44,7 @@ from .optimize.cpu import (CPUUndervoltOptimizer,
 from .optimize.governor import GovernorWrapper
 from .optimize.gpu import GPUUndervoltOptimizer
 from .optimize.overclock import OverclockOptimizer
+from .oc.constants import OC_DIR_DEFAULT
 from .report.generator import ReportGenerator
 from .safety.monitor import SafetyMonitor
 from .state.checkpoint import CheckpointManager
@@ -100,7 +101,8 @@ class Orchestrator(LoggerMixin):
                  mock_hardware: Optional[MockHardware] = None,
                  log_level: str = "INFO",
                  offline_bundle: Optional[str] = None,
-                 ostree: Optional[OstreeDeploymentManager] = None):
+                 ostree: Optional[OstreeDeploymentManager] = None,
+                 oc_dir: Optional[Path] = None):
         setup_logging(level=log_level)
 
         self.config = config or BUOConfig.load()
@@ -126,6 +128,14 @@ class Orchestrator(LoggerMixin):
         # mock/dry-run → i run simulati NON cambiano comportamento.
         self.ostree = ostree or OstreeDeploymentManager(mock=mock,
                                                         dry_run=dry_run)
+
+        # Stato OC (`buo oc`): dir di motore/profili/silicio. Il RIUSO dello
+        # stato OC certificato in optimize (design UNLEASH_OC_BOUNDARY T1)
+        # legge QUI. Nei run simulati serve un oc_dir ESPLICITO: i test
+        # isolano lo stato su tmp e il default /var/lib/buo/oc non va mai
+        # letto da una run mock (determinismo).
+        self.oc_dir = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
+        self._oc_dir_explicit = oc_dir is not None
 
         # Safety
         self.safety_monitor: Optional[SafetyMonitor] = None
@@ -2180,10 +2190,61 @@ class Orchestrator(LoggerMixin):
         return {"v_f_points": [], "best_efficiency": None,
                 "source": "no-uv", "reason": last_error[:300]}
 
+    def _oc_reuse_candidate(self):
+        """Candidato al RIUSO dello stato OC certificato (design T1).
+
+        (profile|None, nota|motivo). Solo nei run NON dry-run (il dry-run
+        non legge hardware né applica stati OC: simula la base sicura); in
+        mock serve un oc_dir ESPLICITO (i test isolano lo stato su tmp, il
+        default /var/lib/buo/oc non va letto da una run simulata).
+        Fail-soft: ogni errore → (None, motivo), mai eccezioni di fase.
+        """
+        if self.dry_run or (self.mock and not self._oc_dir_explicit):
+            return None, "riuso OC non valutato (dry-run, o mock senza " \
+                         "oc_dir esplicito)"
+        try:
+            from .oc.profiles import (OCReuseGate,
+                                      machine_silicon_fingerprint)
+            fp = machine_silicon_fingerprint(sim=self.mock)
+            gate = OCReuseGate(oc_dir=self.oc_dir, current_fingerprint=fp)
+            return gate.candidate()
+        except Exception as e:  # pragma: no cover — fail-soft
+            self.logger.warning("Riuso stato OC non valutato: %s", e)
+            return None, f"riuso OC non valutato: {e}"
+
     def _phase_optimize(self) -> Dict[str, Any]:
-        """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited."""
+        """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited.
+
+        RIUSO dello stato OC (design UNLEASH_OC_BOUNDARY T1, decisioni
+        06/09): se esiste uno stato OC certificato valido (silicon-profile
+        con fingerprint coerente + evidenza L2/apply + fuori zona) la
+        ricerca NON si rifà: skip UV CPU e sweep GPU e il profilo
+        certificato viene riapplicato in _phase_apply via ApplyManager
+        (smoke 30s + auto-rollback). Il governor NON si ferma qui (nessuna
+        ricerca SMU): ApplyManager lo ferma/riavvia attorno all'apply.
+        """
         self.logger.info("Ottimizzazione — undervolt e overclock")
         results: Dict[str, Any] = {}
+
+        profile, note = self._oc_reuse_candidate()
+        if profile is not None:
+            self.logger.info("Riuso stato OC certificato: %s — %s",
+                             profile.name, note)
+            reuse = {
+                "profile": "certified",
+                "freq": profile.freq,
+                "scale": profile.scale,
+                "vid_cap": profile.vid_cap,
+                "note": note,
+            }
+            results["reuse_oc"] = reuse
+            self.results["reuse_oc"] = dict(reuse)
+            self.results["notes"].append(
+                "Ottimizzazione RIUSATA: stato OC certificato da buo oc "
+                "(%s) — skip UV CPU e sweep GPU" % note)
+            return results
+        if note:
+            self.logger.info("Riuso stato OC non disponibile: %s", note)
 
         # Il governor va fermato durante i test
         if not self.mock:
@@ -2263,6 +2324,60 @@ class Orchestrator(LoggerMixin):
         except Exception as e:
             self.logger.warning("Scrittura undervolt log fallita: %s", e)
 
+    def _apply_reused_oc(self, reuse: Dict[str, Any]) -> Dict[str, Any]:
+        """Applica il profilo OC certificato (riuso, design T1) via
+        ApplyManager: sequenza completa del tool OC (backup → marcatore →
+        stop governor VERIFICATO → apply → smoke 30s → auto-rollback su
+        fail → persist se undervolt.persist). In mock/dry-run nessuna
+        scrittura reale (M2). Fail-soft: mai abort di fase.
+        """
+        from .oc.apply import ApplyManager
+        from .oc.controller import OcController
+        from .oc.profiles import Profile, ProfileStore, ProfileValidator
+        from .oc.smoke import CpuSmoke
+        sim = self.mock or self.dry_run
+        try:
+            ctl = OcController(oc_dir=self.oc_dir, mock=sim,
+                               dry_run=self.dry_run)
+            store = ProfileStore(self.oc_dir)
+            smoke = CpuSmoke(reader=None, mock=sim, dry_run=self.dry_run,
+                             oc_dir=self.oc_dir)
+            mgr = ApplyManager(ctl, store=store,
+                               validator=ProfileValidator(), smoke=smoke,
+                               reader=None, mock=sim, dry_run=self.dry_run,
+                               oc_dir=self.oc_dir)
+            profile = Profile(
+                id="certified", name="Certificato",
+                freq=int(reuse["freq"]),
+                scale=int(reuse.get("scale") or 0),
+                vid_cap=reuse.get("vid_cap"),
+                source="silicon", validated=True)
+            outcome = mgr.apply(profile,
+                                persist=self.config.undervolt_persist,
+                                yes=True)
+        except Exception as e:
+            self.logger.warning("Riuso OC non applicato: %s", e)
+            return {"outcome": "aborted", "cause": str(e)[:200]}
+        out: Dict[str, Any] = {
+            "outcome": outcome.result,
+            "profile": outcome.profile,
+            "persisted": outcome.persisted,
+            "cause": outcome.cause,
+            "freq": profile.freq,
+            "scale": profile.scale,
+            "vid_cap": profile.vid_cap,
+        }
+        if outcome.result == "ok":
+            # Ledger: config CPU applicata (volatile) → stessa marcatura
+            # del path base (rollback handler cpu_overclock).
+            self._mark_step("cpu_overclock")
+            self.logger.info("Riuso OC applicato: %d MHz, scale %d",
+                             profile.freq, profile.scale)
+        else:
+            self.logger.warning("Riuso OC non applicato (%s): %s",
+                                outcome.result, outcome.cause)
+        return out
+
     def _phase_apply(self) -> Dict[str, Any]:
         """Applica la configurazione finale (governor + overclock)."""
         self.logger.info("Applicazione della configurazione finale")
@@ -2272,6 +2387,31 @@ class Orchestrator(LoggerMixin):
         safe_points = (optimize_data.get("undervolt_gpu", {})
                        .get("safe_points", []))
         oc_cpu = optimize_data.get("overclock_cpu", {})
+
+        # RIUSO stato OC (design T1): il certificato è stato scelto in
+        # optimize → apply via ApplyManager (smoke + auto-rollback), MAI
+        # il path UV/overclock della base sicura.
+        if optimize_data.get("reuse_oc"):
+            ra = self._apply_reused_oc(optimize_data["reuse_oc"])
+            results["reuse_apply"] = ra
+            if ra.get("outcome") == "ok":
+                results["cpu_final"] = {
+                    "applied": True,
+                    "freq": ra["freq"],
+                    "scale": ra.get("scale"),
+                    "vid": ra.get("vid_cap"),
+                    # In simulazione nulla è persistito davvero (M2).
+                    "persistent": bool(ra.get("persisted")) and not (
+                        self.mock or self.dry_run),
+                    "method": "riuso stato OC (ApplyManager: smoke 30s + "
+                              "auto-rollback)",
+                }
+            else:
+                self.results["notes"].append(
+                    "Riuso stato OC NON applicato (%s): %s — config "
+                    "precedente lasciata invariata"
+                    % (ra.get("outcome"), (ra.get("cause") or "")[:200]))
+            return results
 
         # Configura il governor con i safe-points trovati
         if safe_points:
@@ -2906,6 +3046,15 @@ class Orchestrator(LoggerMixin):
                       + [f"{n} (fallito)" for n in _names(failed)])
             lines.append("  attenzione manuale: %d — %s — dettagli nel "
                          "report" % (len(pieces), ", ".join(pieces)))
+
+        # Riuso stato OC (design T1): la riga spiega perché manca la ricerca
+        # UV/sweep nel riepilogo (skip con nota nel report).
+        if ((self.checkpoint.get_phase("optimize").get("data", {}) or {})
+                .get("reuse_oc")):
+            lines.append("  ottimizzazione: RIUSATA — stato OC certificato "
+                         "da buo oc (skip UV CPU e sweep GPU)")
+            lines.append("  GPU: curva governor attiva riusata (nessuna "
+                         "modifica)")
 
         apply_data = (self.checkpoint.get_phase("apply")
                       .get("data", {}) or {})

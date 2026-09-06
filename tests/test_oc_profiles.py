@@ -172,9 +172,17 @@ class TestProfileValidator(Base):
         ok, _ = self.v.zone_ok(self.p(3775, -7, 1206))
         self.assertTrue(ok)
 
-    def test_3850_1050_ok(self):
-        ok, _ = self.v.zone_ok(self.p(3850, -7, 1050))
+    def test_3850_1125_ok(self):
+        ok, _ = self.v.zone_ok(self.p(3850, -7, 1125))
         self.assertTrue(ok)
+
+    def test_3850_1050_block(self):
+        # Mirror tier-2 dell'engine (02/09): la banda 3800-3870@<=1050 è
+        # zona di hang/wedge ALLA SCRITTURA (incidente profilo avvelenato) —
+        # mai VID < 1125 a f >= 3800 (regola statica TIERED, engine
+        # HANG_ZONE2 3800/1125 in tutti i punti dove vale la base 3725/1050).
+        self.assert_block(self.p(3850, -7, 1050), "zona di hang")
+        self.assert_block(self.p(3800, -7, 1100), "zona di hang")
 
     def test_3850_1000_block(self):
         # 02/09 campo: VID 1000 a >=3725 è zona di hang

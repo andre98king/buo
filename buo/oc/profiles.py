@@ -11,15 +11,20 @@ Scrittura di profiles.json ATOMICA (tmp+fsync+mv, stesso pattern del motore);
 file corrotto → WARN + backup .bak + default (fail-soft, mai eccezione).
 """
 
+import hashlib
 import json
 import logging
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .constants import (
+    HANG_ZONE2_MIN_FREQ,
+    HANG_ZONE2_MIN_VID,
     HANG_ZONE_MIN_FREQ,
     HANG_ZONE_MIN_VID,
     OC_DIR_DEFAULT,
@@ -265,20 +270,7 @@ class ProfileStore:
         data = self._silicon.load()
         if not data:
             return 0
-        curve = data.get("curve") or {}
-        rec = curve.get(str(freq))
-        if isinstance(rec, dict):
-            try:
-                return int(rec["scale"])
-            except (KeyError, TypeError, ValueError):
-                pass
-        w = data.get("winner")
-        if isinstance(w, dict):
-            try:
-                return int(w["scale"])
-            except (KeyError, TypeError, ValueError):
-                pass
-        return 0
+        return _silicon_scale(data, freq)
 
     @staticmethod
     def _from_dict(d: Dict) -> Profile:
@@ -351,6 +343,12 @@ class ProfileValidator:
                                "profilo con VID esplicito o il certificato")
             if p.vid_cap < HANG_ZONE_MIN_VID:
                 return False, "zona di hang"
+            # Mirror tier-2 dell'engine (02/09, incidente profilo
+            # avvelenato): la banda 3800-3870@<=1050 è zona di hang/wedge
+            # ALLA SCRITTURA — mai VID < 1125 a f >= 3800.
+            if (p.freq >= HANG_ZONE2_MIN_FREQ
+                    and p.vid_cap < HANG_ZONE2_MIN_VID):
+                return False, "zona di hang (tier-2)"
         return True, ""
 
     def suggest_vid(self, freq: int,
@@ -360,3 +358,214 @@ class ProfileValidator:
         if silicon is None:
             return None
         return silicon.expected_vid(freq)
+
+
+def _silicon_scale(sil: Dict, freq: int) -> int:
+    """Scale della config certificata per freq: curve[f].scale →
+    winner.scale → 0 (curva stock) — mai inventare valori."""
+    curve = sil.get("curve") or {}
+    rec = curve.get(str(freq))
+    if isinstance(rec, dict):
+        try:
+            return int(rec["scale"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    w = sil.get("winner")
+    if isinstance(w, dict):
+        try:
+            return int(w["scale"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Fingerprint silicio (mirror fp_capture/fp_hash del motore oc3600.sh)
+# ---------------------------------------------------------------------------
+# sha256 del JSON canonico dei SOLI campi di silicio non vuoti (cpu model,
+# gpu pci id, bios se leggibile) + smu_support SEMPRE. Kernel/driver/distro
+# NON entrano (cambiano a ogni update Bazzite → invaliderebbero il riuso).
+
+
+def silicon_fingerprint(cpu_model: str = "", gpu_pci_id: str = "",
+                        bios: str = "", smu_support: bool = False) -> str:
+    """Fingerprint SILICON-ONLY dai campi dati (mirror fp_hash del motore)."""
+    fields: Dict[str, object] = {}
+    if cpu_model:
+        fields["cpu_model"] = cpu_model
+    if gpu_pci_id:
+        fields["gpu_pci_id"] = gpu_pci_id
+    if bios:
+        fields["bios"] = bios
+    fields["smu_support"] = 1 if smu_support else 0
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# Campi mock deterministici (stessi default FP_MOCK_* del motore): in
+# modalità simulata nessuna lettura reale di /proc/sys (C1).
+_MOCK_CPU_MODEL = "AMD BC-250 (Cyan Skillfish)"
+_MOCK_GPU_PCI_ID = "1002:1640"
+_MOCK_BIOS = "1.90"
+
+
+def _cpu_model_text() -> str:
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _hex_id(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip().removeprefix("0x")
+    except OSError:
+        return ""
+
+
+def _gpu_pci_id() -> str:
+    """vendor:device della prima GPU amdgpu; fallback sul PCI 0000:01:00.0
+    (la BC-250 ha la GPU su card1, /sys/class/drm/card1/device)."""
+    try:
+        for dev in sorted(Path("/sys/class/drm").glob("card*/device")):
+            try:
+                if "DRIVER=amdgpu" not in (dev / "uevent").read_text(
+                        encoding="utf-8", errors="ignore"):
+                    continue
+            except OSError:
+                continue
+            vid, did = _hex_id(dev / "vendor"), _hex_id(dev / "device")
+            if vid and did:
+                return f"{vid}:{did}"
+    except OSError:
+        pass
+    alt = Path("/sys/bus/pci/devices/0000:01:00.0")
+    vid, did = _hex_id(alt / "vendor"), _hex_id(alt / "device")
+    return f"{vid}:{did}" if vid and did else ""
+
+
+def _bios_version() -> str:
+    try:
+        r = subprocess.run(["dmidecode", "-s", "bios-version"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (r.stdout.strip().splitlines() or [""])[0] if r.returncode == 0 \
+        else ""
+
+
+def _smu_tools_present() -> bool:
+    return bool(shutil.which("bc250-detect")
+                and shutil.which("bc250-apply"))
+
+
+def machine_silicon_fingerprint(sim: bool = False) -> str:
+    """Fingerprint SILICON-ONLY della macchina corrente.
+
+    sim=True (mock/dry-run) → campi mock deterministici (nessuna lettura
+    reale). Reale: /proc/cpuinfo + sysfs drm/pci + dmidecode (bios) +
+    presenza tool SMU nel PATH. Fail-soft: campi non leggibili → esclusi
+    (mai eccezioni; il JSON risultante può avere il solo smu_support).
+    """
+    if sim:
+        return silicon_fingerprint(cpu_model=_MOCK_CPU_MODEL,
+                                   gpu_pci_id=_MOCK_GPU_PCI_ID,
+                                   bios=_MOCK_BIOS, smu_support=True)
+    try:
+        return silicon_fingerprint(cpu_model=_cpu_model_text(),
+                                   gpu_pci_id=_gpu_pci_id(),
+                                   bios=_bios_version(),
+                                   smu_support=_smu_tools_present())
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Gate del RIUSO dello stato OC (design UNLEASH_OC_BOUNDARY T1)
+# ---------------------------------------------------------------------------
+
+
+class OCReuseGate:
+    """Valutazione del riuso dello stato OC certificato da `buo unleash`.
+
+    Criteri (accordati 06/09): (1) silicon-profile.json valido con
+    hardware_fingerprint COERENTE con la macchina corrente; (2) winner
+    presente con EVIDENZA di certificazione — ibrida: L2/multiphase nel
+    silicon (curve[f].l2_validated) O profilo `certified` di profiles.json
+    validato da un apply ok allineato allo stesso winner (mai profili
+    avvelenati: lezione 02/09); (3) fuori zona: zone_ok con le regole
+    anti-hang statiche incluse il mirror tier-2 3800/1125.
+
+    Solo LETTURA, mai eccezioni (fail-closed: stato ambiguo → niente riuso).
+    """
+
+    def __init__(self, oc_dir: Optional[Path] = None,
+                 current_fingerprint: Optional[str] = None,
+                 silicon: Optional[SiliconView] = None,
+                 store: Optional[ProfileStore] = None,
+                 validator: Optional[ProfileValidator] = None):
+        self.oc_dir = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
+        self.current_fingerprint = current_fingerprint
+        self.silicon = silicon or SiliconView(self.oc_dir)
+        self.store = store or ProfileStore(self.oc_dir,
+                                           silicon=self.silicon)
+        self.validator = validator or ProfileValidator()
+
+    def candidate(self) -> Tuple[Optional[Profile], str]:
+        """(profilo certificato riusabile, nota) — (None, motivo) = il riuso
+        NON è consentito (il chiamante esegue la base sicura)."""
+        sil = self.silicon.load()
+        if not sil:
+            return None, "stato OC assente (silicon-profile.json non leggibile)"
+        fp = sil.get("hardware_fingerprint")
+        if not isinstance(fp, str) or not fp:
+            return None, "silicon-profile senza hardware_fingerprint"
+        if not self.current_fingerprint:
+            return None, "fingerprint corrente non disponibile (fail-closed)"
+        if fp != self.current_fingerprint:
+            return None, "hardware_fingerprint diversa dalla macchina corrente"
+        win = sil.get("winner")
+        if not isinstance(win, dict):
+            return None, "nessun winner nel silicon-profile"
+        try:
+            freq = int(win["freq"])
+        except (KeyError, TypeError, ValueError):
+            return None, "winner senza frequenza valida"
+        vid: Optional[int] = None
+        try:
+            vid = int(win["vid_cap"])
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        # Evidenza di certificazione (ibrido): L2 nel silicon, altrimenti
+        # profilo `certified` validato da un apply ok SULLO STESSO winner.
+        curve = sil.get("curve") or {}
+        rec = curve.get(str(freq))
+        evidence = "l2"
+        if not (isinstance(rec, dict) and rec.get("l2_validated") is True):
+            cert = self.store.get("certified")
+            if cert is None or not cert.validated:
+                return None, ("winner non certificato: nessuna evidenza L2 "
+                              "nel silicon e profilo certified non validated")
+            if cert.freq != freq:
+                return None, ("profilo certified non allineato al winner "
+                              "silicio (%d vs %d)" % (cert.freq, freq))
+            evidence = "apply"
+
+        profile = Profile(
+            id="certified",
+            name="Certificato %d@%s" % (freq, vid if vid is not None else "?"),
+            freq=freq,
+            scale=_silicon_scale(sil, freq),
+            vid_cap=vid,
+            source="silicon",
+            validated=True,
+        )
+        ok, reason = self.validator.zone_ok(profile)
+        if not ok:
+            return None, "winner in zona di hang: %s" % reason
+        return profile, "riuso stato OC certificato (evidenza %s)" % evidence
