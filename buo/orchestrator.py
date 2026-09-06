@@ -2225,6 +2225,52 @@ class Orchestrator(LoggerMixin):
             self.logger.warning("Riuso stato OC non valutato: %s", e)
             return None, f"riuso OC non valutato: {e}"
 
+    def _select_optimize_mode(self, reuse_available: bool) -> str:
+        """Modalità di ottimizzazione della fase optimize (T3, design
+        UNLEASH_OC_BOUNDARY §5): 'reuse' | 'safe_base' | 'full'.
+
+        I rami di _phase_optimize chiamano SOLO codice esistente (riuso T1
+        / sweep+ricerca / tabella community): qui si decide il mode.
+
+        - Non interattivo: decisione di STATO invariata (T1) — profilo
+          certificato → 'reuse', altrimenti 'full'. Dry-run: nessun
+          prompt e mai riuso (candidate sempre None) → 'full'.
+        - Interattivo (run reale): menu a 3 opzioni (pattern input di
+          _confirm_phase, EOFError → default); default [1]; input
+          invalido/vuoto → [1]; [1] senza profilo certificato coincide
+          con la decisione di stato ('full', mai hang); [3] con profilo
+          certificato → conferma esplicita di sovrascrittura, rifiutata
+          (o EOF) → [1] (riuso).
+        """
+        if not (self.interactive and not self.dry_run):
+            return "reuse" if reuse_available else "full"
+        menu = (
+            "Ottimizzazione CPU/GPU:\n"
+            "  [1] Riusa lo stato ottimizzato esistente (default) — "
+            "applica profilo certificato se presente\n"
+            "  [2] Base sicura senza sweep (UV CPU stock + tabella "
+            "community GPU)\n"
+            "  [3] Ottimizzazione completa: sweep GPU per-silicio + "
+            "ricerca (~10-25 min)\n"
+            "Scegli [1/2/3, default 1]: ")
+        try:
+            resp = input(menu).strip()
+        except EOFError:
+            resp = ""
+        if resp == "2":
+            return "safe_base"
+        if resp == "3":
+            if reuse_available:
+                try:
+                    ok = input("  Sovrascriverai il profilo certificato — "
+                               "confermi? [y/N] ").strip().lower()
+                except EOFError:
+                    ok = "n"
+                if ok not in ("y", "yes"):
+                    return "reuse"
+            return "full"
+        return "reuse" if reuse_available else "full"
+
     def _phase_optimize(self) -> Dict[str, Any]:
         """FASE 2 — OTTIMIZZAZIONE: undervolt + overclock power-limited.
 
@@ -2235,12 +2281,20 @@ class Orchestrator(LoggerMixin):
         certificato viene riapplicato in _phase_apply via ApplyManager
         (smoke 30s + auto-rollback). Il governor NON si ferma qui (nessuna
         ricerca SMU): ApplyManager lo ferma/riavvia attorno all'apply.
+
+        T3 (design UNLEASH_OC_BOUNDARY §5): il mode (reuse/safe_base/full)
+        arriva da _select_optimize_mode — decisione di stato nei run non
+        interattivi (INVARIATA), menu a 3 opzioni nei run interattivi.
+        'safe_base' disabilita solo sweep e OC per QUESTO run (override
+        run-scoped dei flag di config, pattern di cli.py --skip-*): il
+        percorso resta quello esistente con tabella community GPU.
         """
         self.logger.info("Ottimizzazione — undervolt e overclock")
         results: Dict[str, Any] = {}
 
         profile, note = self._oc_reuse_candidate()
-        if profile is not None:
+        mode = self._select_optimize_mode(reuse_available=profile is not None)
+        if mode == "reuse":
             self.logger.info("Riuso stato OC certificato: %s — %s",
                              profile.name, note)
             reuse = {
@@ -2258,6 +2312,21 @@ class Orchestrator(LoggerMixin):
             return results
         if note:
             self.logger.info("Riuso stato OC non disponibile: %s", note)
+        if mode == "safe_base":
+            # T3 [2]: base sicura — UV CPU stock (ricerca a frequenza
+            # stock) + tabella community GPU, niente sweep né OC. Override
+            # run-scoped dei flag (mai persistiti), stesso pattern di
+            # cli.py --skip-*: i rami esistenti non si duplicano.
+            if profile is not None:
+                self.logger.warning(
+                    "BASE SICURA con profilo certificato applicabile (%s): "
+                    "la config certificata sarà SOSTITUITA (riuso T1 non "
+                    "scatta)", profile.name)
+            self.logger.info(
+                "Modalità BASE SICURA: UV CPU stock + tabella community "
+                "GPU (sweep per-silicio e OC saltati)")
+            self.config.overclock_enable = False
+            self.config.undervolt_gpu_sweep_enabled = False
 
         # Il governor va fermato durante i test
         self._capture_pre_validate_config()
