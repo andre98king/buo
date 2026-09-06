@@ -29,8 +29,8 @@ from .audit.problems import ProblemDetector
 from .benchmark.runner import BenchmarkRunner
 from .config import BUOConfig
 from .constants import (CORE_MASK_STOCK, EXIT_ERROR, EXIT_REBOOT,
-                        EXIT_SAFETY_VIOLATION, EXIT_SUCCESS, LIMITS, PHASES,
-                        SMU_OC_SERVICE)
+                        EXIT_SAFETY_VIOLATION, EXIT_SUCCESS, GOVERNOR_CONFIG,
+                        LIMITS, PHASES, SMU_OC_SERVICE)
 from .exceptions import ConfigurationError, SafetyViolation
 from .fix.ace import ACEComputeFix
 from .fix.acpi import ACPIFix
@@ -102,7 +102,8 @@ class Orchestrator(LoggerMixin):
                  log_level: str = "INFO",
                  offline_bundle: Optional[str] = None,
                  ostree: Optional[OstreeDeploymentManager] = None,
-                 oc_dir: Optional[Path] = None):
+                 oc_dir: Optional[Path] = None,
+                 governor_config_path: Optional[Path] = None):
         setup_logging(level=log_level)
 
         self.config = config or BUOConfig.load()
@@ -136,6 +137,16 @@ class Orchestrator(LoggerMixin):
         # letto da una run mock (determinismo).
         self.oc_dir = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
         self._oc_dir_explicit = oc_dir is not None
+
+        # Snapshot pre-run della config governor GPU (rollback automatico
+        # su validate-fail, design T2): path iniettabile nei test (il
+        # default /etc non va mai letto da una run simulata senza override).
+        self._governor_config_path = (Path(governor_config_path)
+                                      if governor_config_path
+                                      else Path(GOVERNOR_CONFIG))
+        self._gov_config_path_injected = governor_config_path is not None
+        self._pre_validate_gpu: Optional[bytes] = None
+        self._pre_validate_gpu_existed = False
 
         # Safety
         self.safety_monitor: Optional[SafetyMonitor] = None
@@ -212,7 +223,9 @@ class Orchestrator(LoggerMixin):
             mock=eff_mock, mock_hardware=hw,
             provisioner=self._provision_vkmark if not eff_mock else None)
         self.oc = OverclockOptimizer(mock=eff_mock, mock_hardware=hw)
-        self.governor = GovernorWrapper(mock=eff_mock, mock_hardware=hw)
+        self.governor = GovernorWrapper(mock=eff_mock, mock_hardware=hw,
+                                        config_path=str(
+                                            self._governor_config_path))
 
         self.benchmark = BenchmarkRunner(mock=eff_mock, mock_hardware=hw)
         self.stress = StressTest(mock=eff_mock, mock_hardware=hw)
@@ -2247,6 +2260,7 @@ class Orchestrator(LoggerMixin):
             self.logger.info("Riuso stato OC non disponibile: %s", note)
 
         # Il governor va fermato durante i test
+        self._capture_pre_validate_config()
         if not self.mock:
             self.governor.stop()
 
@@ -2569,6 +2583,102 @@ class Orchestrator(LoggerMixin):
             s = max(-50, min(0, round((1206 - int(vid)) / 8)))
         return f, s
 
+    def _capture_pre_validate_config(self) -> None:
+        """Snapshot dei bytes della config governor GPU pre-run (T2).
+
+        Preso all'ingresso della ricerca in optimize, PRIMA di ogni
+        scrittura (stesso principio 'ripristino bytes' di gpu.py). In
+        dry-run MAI (nessuna lettura); in mock SOLO con
+        governor_config_path esplicito (i test puntano a tmp — il default
+        /etc non va mai letto da una run simulata). File assente →
+        registrato: il ripristino su validate-fail lo RIMUOVE.
+        """
+        self._pre_validate_gpu = None
+        self._pre_validate_gpu_existed = False
+        if self.dry_run or (self.mock and not self._gov_config_path_injected):
+            return
+        path = self._governor_config_path
+        try:
+            if path.exists():
+                self._pre_validate_gpu = path.read_bytes()
+                self._pre_validate_gpu_existed = True
+        except OSError:
+            pass
+
+    def _drop_step(self, name: str) -> None:
+        """Rimuove un livello dal ledger (dopo rollback riuscito)."""
+        steps = self._applied_steps()
+        steps.discard(name)
+        if not self.dry_run:
+            self.checkpoint.set("applied_steps", sorted(steps))
+
+    def _rollback_validate_config(self,
+                                  results: Dict[str, Any]) -> bool:
+        """Ripristina la config pre-run dopo stress di validate FALLITO
+        (design UNLEASH_OC_BOUNDARY §6b / backlog T2, decisione utente
+        #5): un punto instabile (WHEA/stretch — NON termico, quello
+        abortisce già con rollback a cascata) non deve restare applicato.
+
+        CPU → uninstall (config applicata in questa run, ledger
+        cpu_overclock); GPU governor → bytes config.toml pre-run (o delete
+        se prima non esisteva) + restart. Solo config applicate IN QUESTA
+        run; escluso in restore (nessuna config applicata qui) e dry-run.
+        True se qualcosa è stato ripristinato (results['config_rollback']
+        popolato).
+        """
+        apply_data = (self.checkpoint.get_phase("apply")
+                      .get("data", {}) or {})
+        capture_ok = (not self.dry_run and (not self.mock
+                                            or self._gov_config_path_injected))
+        cpu = "cpu_overclock" in self._applied_steps()
+        gpu = bool(apply_data.get("governor_config")) and capture_ok
+        if not cpu and not gpu:
+            return False
+        rb: Dict[str, Any] = {"cpu": False, "gpu": False}
+        if cpu:
+            try:
+                if self._rollback_cpu_overclock():
+                    rb["cpu"] = True
+                    self._drop_step("cpu_overclock")
+            except Exception as e:
+                self.logger.warning("Rollback CPU (validate-fail) in "
+                                    "errore: %s", e)
+        if gpu:
+            try:
+                path = self._governor_config_path
+                if (self._pre_validate_gpu_existed
+                        and self._pre_validate_gpu is not None):
+                    path.write_bytes(self._pre_validate_gpu)
+                elif path.exists():
+                    path.unlink()
+                if not self.mock:
+                    self.governor.restart()
+                rb["gpu"] = True
+            except Exception as e:
+                self.logger.warning("Rollback GPU (validate-fail) in "
+                                    "errore: %s", e)
+        if rb["cpu"] or rb["gpu"]:
+            parts = []
+            if rb["cpu"]:
+                parts.append("config CPU ripristinata (uninstall)")
+            if rb["gpu"]:
+                parts.append("config GPU ripristinata (bytes pre-run)")
+            if gpu and not rb["gpu"]:
+                parts.append("config GPU ripristino FALLITO (vedi log)")
+            if cpu and not rb["cpu"]:
+                parts.append("config CPU ripristino FALLITO (vedi log)")
+            results["config_rollback"] = rb
+            self.results["notes"].append(
+                "Config applicata NON validata (stress: fallito) — "
+                + "; ".join(parts))
+            self.logger.warning("Rollback automatico validate-fail: %s",
+                                "; ".join(parts))
+            return True
+        self.results["notes"].append(
+            "Config applicata NON validata (stress: fallito) — rollback "
+            "automatico non riuscito; eseguire: sudo buo rollback")
+        return False
+
     def _phase_validate(self) -> Dict[str, Any]:
         """FASE 3 — VALIDAZIONE: stress test, verifica fix, benchmark after."""
         self.logger.info("Validazione — stress test e verifica fix")
@@ -2601,20 +2711,40 @@ class Orchestrator(LoggerMixin):
             )
         results["stress"] = stress
 
+        # T2 (design UNLEASH_OC_BOUNDARY §6b, decisione utente #5):
+        # stress di validate FALLITO (WHEA/stretch — NON termico, quello
+        # solleva SafetyViolation e abortisce già con rollback a cascata)
+        # con config applicata in questa run → ripristino automatico della
+        # config pre-run. Escluso in restore (nessuna config applicata
+        # qui) e dry-run.
+        rolled_back = False
+        if (not stress.get("skipped") and not stress.get("passed")
+                and not self.dry_run
+                and not self.checkpoint.get("restore_active")
+                and not getattr(self, "_restore_mode", False)):
+            rolled_back = self._rollback_validate_config(results)
+
         # Verifica dei fix applicati
         verification = self.verifier.verify_all(self.results["applied_fixes"])
         results["fix_verification"] = verification
         self.results["fixes"] = verification
 
         # Benchmark after (in dry-run il runner è in modalità mock,
-        # quindi viene simulato come il benchmark BEFORE e lo stress test)
+        # quindi viene simulato come il benchmark BEFORE e lo stress test).
+        # Con rollback automatico il benchmark è SALTATO: la config
+        # applicata non esiste più (sarebbe un benchmark dell'aria).
         if self.config.benchmark_enabled:
-            self.logger.info("Benchmark dopo (config applicata)…")
-            self.results["benchmarks"]["after"] = self.benchmark.run_all(
-                gpu_duration=self.config.benchmark_gpu_duration,
-                cpu_duration=self.config.benchmark_cpu_duration,
-                compute_duration=self.config.benchmark_compute_duration,
-            )
+            if rolled_back:
+                self.logger.info(
+                    "Benchmark after saltato: config ripristinata dopo "
+                    "validate-fail")
+            else:
+                self.logger.info("Benchmark dopo (config applicata)…")
+                self.results["benchmarks"]["after"] = self.benchmark.run_all(
+                    gpu_duration=self.config.benchmark_gpu_duration,
+                    cpu_duration=self.config.benchmark_cpu_duration,
+                    compute_duration=self.config.benchmark_compute_duration,
+                )
 
         # Aggiorna l'audit "after"
         self.results["after"] = self.audit.run()
@@ -3154,7 +3284,15 @@ class Orchestrator(LoggerMixin):
                                 _metric(gpu_pk, "°C"),
                                 _metric(pow_pk, " W")))
             else:
-                lines.append("  stress: fallito")
+                rb = validate_data.get("config_rollback") or {}
+                if rb.get("cpu") and rb.get("gpu"):
+                    lines.append("  stress: fallito — config precedente "
+                                 "RIPRISTINATA (CPU + GPU)")
+                elif rb.get("cpu") or rb.get("gpu"):
+                    lines.append("  stress: fallito — config precedente "
+                                 "ripristinata")
+                else:
+                    lines.append("  stress: fallito")
 
         lines.append("  report: %s" % self.report.output_md)
         lines.append("  rollback: sudo buo rollback")
