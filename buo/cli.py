@@ -1013,6 +1013,9 @@ def profile_export(output_path) -> None:
     console.print(f"[dim]  fix: {len(prof.get('applied_fixes', []) or [])} — "
                   f"ottimizzazione: "
                   f"{'presente' if prof.get('optimize') else 'ASSENTE'}[/]")
+    if "oc_state" not in prof:
+        console.print("[dim]  stato OC: non incluso (stato assente o non "
+                      "leggibile — serve root)[/]")
 
 
 @profile.command("import")

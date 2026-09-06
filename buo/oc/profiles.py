@@ -11,6 +11,7 @@ Scrittura di profiles.json ATOMICA (tmp+fsync+mv, stesso pattern del motore);
 file corrotto → WARN + backup .bak + default (fail-soft, mai eccezione).
 """
 
+import base64
 import hashlib
 import json
 import logging
@@ -20,8 +21,9 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from ..constants import GOVERNOR_CONFIG
 from .constants import (
     HANG_ZONE2_MIN_FREQ,
     HANG_ZONE2_MIN_VID,
@@ -32,6 +34,7 @@ from .constants import (
     SCALE_MAX,
     SCALE_MIN,
     SILICON_PROFILE,
+    SMU_OC_CONF,
     VID_CAP_HARD,
     WALL_FREQ,
 )
@@ -160,6 +163,17 @@ class SiliconView:
 # ---------------------------------------------------------------------------
 # Store profili (proprietà del tool)
 # ---------------------------------------------------------------------------
+
+
+def _write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Scrittura JSON ATOMICA (tmp+fsync+mv, pattern del motore)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 class ProfileStore:
@@ -299,13 +313,7 @@ class ProfileStore:
             "last_apply": last_apply if last_apply is not None
             else self._last_apply,
         }
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self._path)
+        _write_json_atomic(self._path, data)
 
     # ------------------------------- get ------------------------------ #
 
@@ -463,23 +471,31 @@ def _smu_tools_present() -> bool:
                 and shutil.which("bc250-apply"))
 
 
-def machine_silicon_fingerprint(sim: bool = False) -> str:
+def machine_silicon_fingerprint(sim: bool = False,
+                                smu_support: Optional[bool] = None) -> str:
     """Fingerprint SILICON-ONLY della macchina corrente.
 
     sim=True (mock/dry-run) → campi mock deterministici (nessuna lettura
     reale). Reale: /proc/cpuinfo + sysfs drm/pci + dmidecode (bios) +
     presenza tool SMU nel PATH. Fail-soft: campi non leggibili → esclusi
     (mai eccezioni; il JSON risultante può avere il solo smu_support).
+
+    smu_support: override esplicito (None = rilevato dalla presenza dei
+    tool nel PATH). Il gate del restore T5 lo forza True: la presenza dei
+    tool è stato SOFTWARE (su post-format la toolchain manca ancora: la
+    installa _phase_init), non silicio — il confronto deve restare sul
+    silicio (il tool assente fallisce fail-closed nell'apply stesso).
     """
     if sim:
         return silicon_fingerprint(cpu_model=_MOCK_CPU_MODEL,
                                    gpu_pci_id=_MOCK_GPU_PCI_ID,
                                    bios=_MOCK_BIOS, smu_support=True)
     try:
+        smu = _smu_tools_present() if smu_support is None else smu_support
         return silicon_fingerprint(cpu_model=_cpu_model_text(),
                                    gpu_pci_id=_gpu_pci_id(),
                                    bios=_bios_version(),
-                                   smu_support=_smu_tools_present())
+                                   smu_support=smu)
     except Exception:
         return ""
 
@@ -569,3 +585,72 @@ class OCReuseGate:
         if not ok:
             return None, "winner in zona di hang: %s" % reason
         return profile, "riuso stato OC certificato (evidenza %s)" % evidence
+
+
+# ---------------------------------------------------------------------------
+# Export/ripristino dello stato OC nel profilo macchina (G2, design T5)
+# ---------------------------------------------------------------------------
+# Blocco `oc_state` dell'export del profilo (schema §1 DESIGN_T5_EXPORT_G2):
+# silicon-profile.json + profiles.json GREZZI (i loro formati nativi) e i
+# due conf persistiti come base64 (round-trip byte-identico). Il restore
+# riapplica il blocco pre-fasi (gate fingerprint → materialize → GPU → CPU).
+
+OC_STATE_SCHEMA = 1
+
+
+def export_oc_state(oc_dir: Optional[Path] = None,
+                    smu_conf: Optional[str] = None,
+                    governor_config: Optional[str] = None
+                    ) -> Optional[Dict[str, Any]]:
+    """Blocco `oc_state` per l'export del profilo (design T5/G2).
+
+    Path iniettabili (test); default: OC_DIR_DEFAULT, SMU_OC_CONF,
+    GOVERNOR_CONFIG. Fail-soft: QUALSIASI sorgente assente/illeggibile →
+    None (il chiamante omette il blocco con nota — mai crash dell'export).
+    """
+    oc = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
+    cpu = Path(smu_conf) if smu_conf else Path(SMU_OC_CONF)
+    gpu = Path(governor_config) if governor_config else Path(GOVERNOR_CONFIG)
+    try:
+        silicon = json.loads((oc / SILICON_PROFILE).read_text(
+            encoding="utf-8"))
+        profiles = json.loads((oc / PROFILES_FILE).read_text(
+            encoding="utf-8"))
+        if not isinstance(silicon, dict) or not isinstance(profiles, dict) \
+                or not isinstance(profiles.get("profiles"), list):
+            return None
+        cpu_bytes = cpu.read_bytes()
+        gpu_bytes = gpu.read_bytes()
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return {
+        "schema_version": OC_STATE_SCHEMA,
+        "exported_at": _now(),
+        "hardware_fingerprint": silicon.get("hardware_fingerprint"),
+        "silicon_profile": silicon,
+        "profiles": profiles,
+        "cpu_conf_b64": base64.b64encode(cpu_bytes).decode("ascii"),
+        "gpu_conf_b64": base64.b64encode(gpu_bytes).decode("ascii"),
+    }
+
+
+def materialize_oc_state(silicon_profile: Dict[str, Any],
+                         profiles: Dict[str, Any],
+                         oc_dir: Optional[Path] = None) -> None:
+    """Ricrea OC_DIR dai raw del blocco oc_state (design T5/G2 §3.2).
+
+    silicon-profile.json riscritto com'è (SiliconView lo rilegge senza
+    adattatori); profiles.json via la scrittura ATOMICA esistente di
+    ProfileStore (i profili raw → oggetti, stesso percorso del load).
+    """
+    oc = Path(oc_dir) if oc_dir else Path(OC_DIR_DEFAULT)
+    raw = profiles.get("profiles")
+    if not isinstance(raw, list):
+        raise ValueError("profiles del blocco senza lista 'profiles'")
+    oc.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(oc / SILICON_PROFILE, silicon_profile)
+    store = ProfileStore(oc)
+    profs = [ProfileStore._from_dict(d) for d in raw
+             if isinstance(d, dict)]
+    store.save(profs, active=profiles.get("active"),
+               last_apply=profiles.get("last_apply"))

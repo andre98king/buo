@@ -17,6 +17,7 @@ nei moduli: audit, unlock, fix, optimize, validate, safety, state,
 benchmark, report, models.
 """
 
+import base64
 import sys
 import time
 from contextlib import contextmanager
@@ -297,6 +298,17 @@ class Orchestrator(LoggerMixin):
         self._restore_mode = restore is not None
         if restore is not None:
             optimize_data = restore.get("optimize", {})
+            # T5 (G2): stato OC del profilo (blocco oc_state) riapplicato
+            # PRIMA delle fasi — così servizi/config sopravvivono ai reboot
+            # di mezzo. Solo run reali (il dry-run non tocca hardware).
+            # D3: se il blocco è valido, il certified sovrascrive il punto
+            # optimize seedato — stessa voce di results["reuse_oc"] di T1
+            # (la fase apply la consuma e NON riapplica: marcatore).
+            reuse_oc = None
+            if not self.dry_run:
+                reuse_oc = self._restore_oc_state(restore.get("oc_state"))
+                if reuse_oc is not None:
+                    optimize_data = {"reuse_oc": reuse_oc}
             self.checkpoint.seed_phase("optimize", optimize_data)
             # F-A: marcatore PERSISTENTE — la modalità restore deve
             # sopravvivere al reboot (buo-resume/recovery riparte con un
@@ -382,6 +394,11 @@ class Orchestrator(LoggerMixin):
             self.checkpoint.set("unlock_gpu_validate_pending", None)
             if restore is None:
                 self.checkpoint.set("restore_active", False)
+                # T5 (G2): stesso pattern — un run nuovo senza restore
+                # pulisce anche il marcatore dello stato OC già ripristinato
+                # (altrimenti la fase apply di un unleash successivo
+                # saltarebbe l'applicazione della config nuova).
+                self.checkpoint.set("oc_state_restored", False)
                 # FIX (30/08): stesso pattern — un run nuovo SENZA restore
                 # pulisce anche il marcatore di stress saltato residuo (se
                 # un restore è abortito e l'utente rilancia `buo unleash`,
@@ -2209,6 +2226,192 @@ class Orchestrator(LoggerMixin):
             self.logger.warning("Riuso stato OC non valutato: %s", e)
             return None, f"riuso OC non valutato: {e}"
 
+    def _restore_oc_state(self, oc_block: Any) -> Optional[Dict[str, Any]]:
+        """T5 (G2): riapplica PRIMA delle fasi lo stato OC del profilo.
+
+        Design DESIGN_T5_EXPORT_G2 §3: gate fingerprint → materialize
+        OC_DIR → GPU (bytes su config.toml, governor fermo) → CPU profilo
+        `certified` via ApplyManager (riuso della sequenza A+R di T1).
+        Fail-soft: blocco assente/corrotto/fingerprint diversa → skip con
+        nota (log + report) e restore base non-OC — MAI applicare stato
+        non verificato (lezione profilo avvelenato). Niente re-smoke GPU
+        (D1): il fail-closed a valle è il servizio che non parte.
+
+        Returns: dict reuse (stesso formato di results["reuse_oc"] di T1)
+        se il blocco è valido e applicato, None altrimenti.
+        """
+        notes = self.results["notes"]
+        if oc_block is None:
+            return None
+        if self.mock and not self._oc_dir_explicit:
+            self.logger.info(
+                "Restore OC saltato (mock senza oc_dir esplicito)")
+            return None
+
+        # --- gate fail-closed: struttura + fingerprint della macchina
+        try:
+            if not isinstance(oc_block, dict):
+                raise ValueError("blocco non valido (non è un oggetto)")
+            if oc_block.get("schema_version") != 1:
+                raise ValueError("schema_version non supportata: %r"
+                                 % oc_block.get("schema_version"))
+            from .oc.profiles import (Profile, ProfileValidator,
+                                      machine_silicon_fingerprint)
+            block_fp = oc_block.get("hardware_fingerprint")
+            if not isinstance(block_fp, str) or not block_fp:
+                raise ValueError("oc_state senza hardware_fingerprint")
+            # smu_support forzato True: la presenza dei tool è stato
+            # SOFTWARE (post-format la toolchain manca ancora — la
+            # installa _phase_init), non silicio; il confronto resta sul
+            # silicio (il tool assente fallisce fail-closed nell'apply).
+            fp = machine_silicon_fingerprint(sim=self.mock,
+                                             smu_support=True)
+            if block_fp != fp:
+                raise ValueError(
+                    "hardware_fingerprint diversa dalla macchina corrente")
+            silicon = oc_block.get("silicon_profile")
+            profiles = oc_block.get("profiles")
+            if not isinstance(silicon, dict) \
+                    or not isinstance(profiles, dict):
+                raise ValueError("silicon_profile/profiles corrotti")
+            profs_raw = profiles.get("profiles")
+            if not isinstance(profs_raw, list):
+                raise ValueError("profiles senza lista 'profiles'")
+            cert_raw = next(
+                (p for p in profs_raw
+                 if isinstance(p, dict) and p.get("id") == "certified"),
+                None)
+            if cert_raw is None:
+                raise ValueError("nessun profilo 'certified' nel blocco")
+            try:
+                reuse_freq = int(cert_raw["freq"])
+            except (KeyError, TypeError, ValueError) as e:
+                raise ValueError(
+                    f"profilo 'certified' senza frequenza valida ({e})")
+            reuse_scale = int(cert_raw.get("scale") or 0)
+            reuse_vid = cert_raw.get("vid_cap")
+            # Zona del certified verificata AL GATE (fail-closed: mai
+            # materializzare/stato non verificabile, stesse regole
+            # anti-zona dell'apply).
+            ok_zone, zone_reason = ProfileValidator().zone_ok(Profile(
+                id="certified", name="Certificato", freq=reuse_freq,
+                scale=reuse_scale, vid_cap=reuse_vid,
+                source="silicon", validated=True))
+            if not ok_zone:
+                raise ValueError(
+                    "profilo 'certified' fuori zona: %s" % zone_reason)
+            gpu_bytes = base64.b64decode(oc_block["gpu_conf_b64"],
+                                         validate=True)
+            cpu_bytes = base64.b64decode(oc_block["cpu_conf_b64"],
+                                         validate=True)
+        except Exception as e:
+            notes.append(
+                "Stato OC del profilo NON riapplicato (skip fail-closed): "
+                f"{e}")
+            self.logger.warning("Restore OC saltato: %s", e)
+            return None
+
+        # --- materialize OC_DIR (silicon-profile.json + profiles.json)
+        try:
+            from .oc.profiles import materialize_oc_state
+            materialize_oc_state(silicon, profiles, oc_dir=self.oc_dir)
+            self.logger.info("OC_DIR materializzato dall'oc_state: %s",
+                             self.oc_dir)
+        except Exception as e:
+            notes.append(
+                f"Stato OC del profilo NON riapplicato: materialize "
+                f"fallito su {self.oc_dir} ({e})")
+            self.logger.warning("Restore OC: materialize fallito: %s", e)
+            return None
+
+        # --- GPU: bytes salvati su config.toml + governor (D1)
+        self._restore_oc_gpu(gpu_bytes)
+
+        # --- CPU: profilo certified (sequenza A+R di T1, smoke 30s +
+        #     rollback + persist) — il certified è lo stato daily (D3)
+        reuse = {
+            "profile": "certified",
+            "freq": reuse_freq,
+            "scale": reuse_scale,
+            "vid_cap": reuse_vid,
+            "note": "stato OC del profilo (G2, restore pre-fasi)",
+        }
+        try:
+            outcome = self._apply_reused_oc(reuse)
+        except Exception as e:  # pragma: no cover — fail-soft
+            self.logger.warning("Riuso OC (restore) non applicato: %s", e)
+            outcome = {"outcome": "aborted", "cause": str(e)[:200]}
+        if outcome.get("outcome") == "ok":
+            # Marcatore PERSISTENTE: il certified è già applicato qui —
+            # la fase apply NON deve riapplicarlo (né col punto optimize
+            # seedato: D3). Vale anche al resume dopo reboot.
+            if not self.dry_run:
+                self.checkpoint.set("oc_state_restored", True)
+            self._warn_oc_cpu_conf_divergence(cpu_bytes)
+        else:
+            notes.append(
+                "Stato OC CPU NON riapplicato pre-fasi (%s): %s — ritentato "
+                "nella fase apply dal punto seedato (certified)"
+                % (outcome.get("outcome"), (outcome.get("cause") or "")[:200]))
+        return reuse
+
+    def _restore_oc_gpu(self, gpu_bytes: bytes) -> None:
+        """GPU (T5/G2): scrittura dei BYTES salvati su config.toml con il
+        governor FERMO, poi start + verifica is-active (D1: nessun
+        re-smoke). Se il servizio non parte (config invalida) → default
+        dal template community con nota — MAI curva non verificata."""
+        gov = self.governor
+        path = self._governor_config_path
+        notes = self.results["notes"]
+        if self.mock and not self._gov_config_path_injected:
+            notes.append("GPU: bytes config.toml non scritti (mock senza "
+                         "governor_config_path iniettato)")
+            return
+        gov.stop()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(gpu_bytes)
+        except OSError as e:
+            notes.append(
+                f"GPU: scrittura config.toml fallita ({e}) — stato OC GPU "
+                "non ripristinato")
+            return
+        self.logger.info("GPU: config.toml riscritto dai bytes del profilo")
+        gov.start()
+        if gov.is_running():
+            self.logger.info(
+                "GPU: governor attivo (is-active) sulla config ripristinata")
+            return
+        notes.append(
+            "GPU: config ripristinata NON attiva — riscritto il default "
+            "community dal template (la curva salvata non è ripartita)")
+        gov.stop()
+        if gov.write_default_config():
+            gov.start()
+        else:
+            notes.append(
+                "GPU: anche il fallback template è fallito — avviare a "
+                "mano: systemctl start cyan-skillfish-governor-smu")
+
+    def _warn_oc_cpu_conf_divergence(self, saved: bytes) -> None:
+        """D2 (T5/G2): WARN non bloccante se la conf GENERATA da
+        ApplyManager (oc_dir/apply-certified.conf, quella passata a
+        bc250-apply --install) diverge dai bytes salvati nel profilo —
+        vale quella generata (identità col motore). Solo run reali: in
+        mock il conf non viene scritto (M2)."""
+        if self.mock or self.dry_run:
+            return
+        gen = self.oc_dir / "apply-certified.conf"
+        try:
+            generated = gen.read_bytes()
+        except OSError:
+            return
+        if generated != saved:
+            msg = ("CPU: la conf generata da ApplyManager diverge dai "
+                   "bytes salvati nel profilo — vale quella generata (D2)")
+            self.results["notes"].append(msg)
+            self.logger.warning(msg)
+
     def _select_optimize_mode(self, reuse_available: bool) -> str:
         """Modalità di ottimizzazione della fase optimize (T3+T4, design
         UNLEASH_OC_BOUNDARY §5 / DESIGN_T4_SWEEP_OC §4): 'reuse' |
@@ -2433,6 +2636,20 @@ class Orchestrator(LoggerMixin):
         """Applica la configurazione finale (governor + overclock)."""
         self.logger.info("Applicazione della configurazione finale")
         results: Dict[str, Any] = {"applied": True}
+
+        # T5 (G2): il restore ha GIÀ riapplicato pre-fasi lo stato OC del
+        # profilo (certified + GPU, marcatore PERSISTENTE: vale anche al
+        # resume dopo reboot) → l'apply è un no-op con nota. MAI doppio
+        # apply col punto optimize seedato (D3).
+        if self.checkpoint.get("oc_state_restored"):
+            self.logger.info(
+                "Stato OC già ripristinato pre-fasi dal profilo "
+                "(oc_state) — apply saltato")
+            self.results["notes"].append(
+                "Stato OC ripristinato pre-fasi dall'oc_state del profilo "
+                "(CPU certified + GPU) — fase apply saltata")
+            results["oc_state_restored"] = True
+            return results
 
         optimize_data = self.checkpoint.get_phase("optimize").get("data", {})
         safe_points = (optimize_data.get("undervolt_gpu", {})
@@ -2875,6 +3092,9 @@ class Orchestrator(LoggerMixin):
             # saltato va rimosso, altrimenti un unleash successivo
             # erediterebbe lo skip della validate.
             self.checkpoint.set("validation_stress_skip", False)
+            # T5 (G2): a ciclo completato anche il marcatore dello stato OC
+            # ripristinato va rimosso (stesso pattern dei marcatori sopra).
+            self.checkpoint.set("oc_state_restored", False)
             # F-C: a ciclo completato anche il marcatore di retry unlock va
             # pulito: l'unlock è stato ritentato (o saltato definitivamente)
             # e un run successivo non deve ereditare il retry.
@@ -2909,6 +3129,7 @@ class Orchestrator(LoggerMixin):
             # saltata ai run successivi.
             self.checkpoint.set("restore_active", False)
             self.checkpoint.set("validation_stress_skip", False)
+            self.checkpoint.set("oc_state_restored", False)
             self.rollback.rollback(reason=self.safety_reason,
                                    applied=self._applied_steps())
             from .state.reboot import RebootManager
@@ -2941,6 +3162,7 @@ class Orchestrator(LoggerMixin):
             # lo skip della validate.
             self.checkpoint.set("restore_active", False)
             self.checkpoint.set("validation_stress_skip", False)
+            self.checkpoint.set("oc_state_restored", False)
             self.rollback.rollback(from_phase=None,
                                    reason=f"errore in {phase}: {error}",
                                    applied=self._applied_steps())
@@ -3226,7 +3448,13 @@ class Orchestrator(LoggerMixin):
         apply_data = (self.checkpoint.get_phase("apply")
                       .get("data", {}) or {})
         cpu_final = apply_data.get("cpu_final") or {}
-        if cpu_final.get("freq"):
+        if apply_data.get("oc_state_restored"):
+            # T5 (G2): il restore ha riapplicato il certified pre-fasi —
+            # nessun cpu_final (fase apply saltata): riga di riepilogo
+            # coerente con lo stato reale.
+            lines.append("  CPU: ripristinata dallo stato OC del profilo "
+                         "(blocco oc_state)")
+        elif cpu_final.get("freq"):
             cpu = "  CPU: %d MHz" % cpu_final["freq"]
             if cpu_final.get("scale") is not None:
                 cpu += " · scale %d" % cpu_final["scale"]
