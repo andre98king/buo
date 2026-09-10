@@ -40,7 +40,7 @@ from ..constants import LIMITS
 from ..oc.smoke import _whea_delta
 from ..utils.logging import LoggerMixin
 from ..utils.paths import state_dir
-from ..utils.shell import run_command
+from ..utils.shell import run_command, stress_cwd
 
 logger = logging.getLogger("buo.unlock.validation")
 
@@ -267,7 +267,8 @@ class CpuUnlockValidation(LoggerMixin):
                 procs.append(subprocess.Popen(
                     self._stress_cmd(t, duration_s),
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL))
+                    stderr=subprocess.DEVNULL,
+                    cwd=stress_cwd()))
         except FileNotFoundError:
             # m3: stress-ng/taskset assenti = problema AMBIENTALE, non
             # evidenza di unità difettose → inconcluso (revert senza
@@ -426,7 +427,8 @@ class GpuUnlockValidation(LoggerMixin):
         try:
             proc = subprocess.Popen(cmd, env=env,
                                     stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+                                    stderr=subprocess.DEVNULL,
+                                    cwd=stress_cwd())
         except OSError:
             return {"outcome": "fail", "cause": "stress", "tool": "vkmark",
                     "temp_max": None}

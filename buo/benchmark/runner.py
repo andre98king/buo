@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 from ..utils.gpu_stress import gpu_stress_cmd
 from ..utils.logging import LoggerMixin
-from ..utils.shell import run_command, which
+from ..utils.shell import run_command, stress_cwd, which
 
 
 class BenchmarkRunner(LoggerMixin):
@@ -73,7 +73,8 @@ class BenchmarkRunner(LoggerMixin):
             return {"available": False,
                     "note": "nessun tool GPU con durata controllata "
                             "(vkmark/furmark)"}
-        rc, out, _ = run_command(cmd, timeout=duration + 30)
+        rc, out, _ = run_command(cmd, timeout=duration + 30,
+                                 cwd=stress_cwd())
         fps = self._parse_float(r"FPS:\s*([\d.]+)", out) \
             or self._parse_float(r"([\d.]+)\s*FPS", out) \
             or self._parse_float(r"([\d.]+)\s*fps", out)
@@ -89,14 +90,15 @@ class BenchmarkRunner(LoggerMixin):
         if which("stress-ng"):
             rc, out, _ = run_command(
                 ["stress-ng", "--cpu", "0", "--timeout", str(duration),
-                 "--metrics-brief"], timeout=duration + 30)
+                 "--metrics-brief"], timeout=duration + 30,
+                cwd=stress_cwd())
             errors = 0 if rc == 0 else 1
             return {"available": True, "errors": errors, "tool": "stress-ng",
                     "bogo_ops": self._parse_float(r"Bogo ops/s\s+([\d.]+)", out)}
         if which("stress"):
             rc, _, _ = run_command(
                 ["stress", "--cpu", "0", "--timeout", str(duration)],
-                timeout=duration + 30)
+                timeout=duration + 30, cwd=stress_cwd())
             return {"available": True, "errors": 0 if rc == 0 else 1, "tool": "stress"}
         return {"available": False}
 
@@ -124,7 +126,7 @@ class BenchmarkRunner(LoggerMixin):
             rc, out, _ = run_command(
                 ["vkmark", "--size", "1920x1080",
                  "-b", f"desktop:duration={duration}"],
-                timeout=duration + 30)
+                timeout=duration + 30, cwd=stress_cwd())
             score = self._parse_float(r"Score:\s*([\d.]+)", out)
             fps = self._parse_float(r"([\d.]+)\s*fps", out)
             return {"available": rc == 0, "score": score, "fps": fps}

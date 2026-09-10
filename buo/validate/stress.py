@@ -26,7 +26,7 @@ from ..constants import LIMITS
 from ..exceptions import SafetyViolation
 from ..utils.gpu_stress import gpu_stress_cmd
 from ..utils.logging import LoggerMixin
-from ..utils.shell import which
+from ..utils.shell import stress_cwd, which
 
 
 class StressTest(LoggerMixin):
@@ -184,8 +184,12 @@ class StressTest(LoggerMixin):
         min) erano SILENZIOSE: chi osserva il log live (watch-log KDE) non
         vedeva avanzamento per minuti.
         """
+        # CWD SCRIVIBILE obbligatoria: stress-ng usa la cwd come temp-path e
+        # in un'unità systemd la cwd è `/` (READ-ONLY su ostree) → aborta
+        # subito con rc=1 (bug di campo 10/09, vedi utils.shell.stress_cwd).
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            cwd=stress_cwd())
         cpu_temp_max = gpu_temp_max = power_max = 0.0
         started = time.monotonic()
         last_progress = started

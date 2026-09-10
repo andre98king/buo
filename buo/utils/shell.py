@@ -70,3 +70,20 @@ def which(tool: str) -> Optional[str]:
     """Cerca un eseguibile nel PATH; None se assente."""
     import shutil
     return shutil.which(tool)
+
+
+def stress_cwd() -> str:
+    """Directory di lavoro SCRIVIBILE per i tool di stress.
+
+    Bug di campo 10/09 (BC-250): `stress-ng` usa la CWD come temp-path e
+    aborta all'istante con «temp-path '.' must be readable and writeable» se
+    non è scrivibile. Dentro un'unità systemd la CWD è `/`, che su ostree è
+    READ-ONLY → `stress-ng` esce rc=1 in meno di un secondo, la validate
+    fallisce SEMPRE e il rollback automatico (T2) disinstalla una config
+    buona. Le run lunghe sul campo si lanciano PROPRIO come unità transiente
+    (`systemd-run`), quindi il caso non è teorico.
+
+    `/tmp` (tempfile.gettempdir()) è sempre scrivibile anche su ostree.
+    """
+    import tempfile
+    return tempfile.gettempdir()
