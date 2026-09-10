@@ -485,7 +485,10 @@ class DependencyManager(LoggerMixin):
                 if err_verify is not None:
                     return {"status": "failed",
                             "detail": f"checkout esistente non valido: "
-                                      f"{err_verify}"}
+                                      f"{err_verify} — se il catalogo ha "
+                                      f"cambiato pin, rimuovi {checkout} e "
+                                      f"riprova (BUO ri-clona al commit "
+                                      f"pinnato)"}
                 self.logger.info("checkout %s riusato e verificato su %s",
                                  dep["name"], dep["commit"])
         except Exception as e:
