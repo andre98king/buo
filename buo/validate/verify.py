@@ -126,18 +126,23 @@ class FixVerifier(LoggerMixin):
         return False, "nessuna maschera installata"
 
     def _check_gtt(self):
-        """GTT tuning attivo: file modprobe presente o ttm.pages_limit nel
-        cmdline (o mock risolto)."""
+        """GTT tuning EFFETTIVO: `ttm.pages_limit` a runtime ≥ richiesto.
+
+        Non basta il conf in /etc/modprobe.d: su ostree senza
+        rigenerazione dell'initramfs il parametro resta il default (bug
+        campo 10/09) → il checker legge il VALORE REALE e, se sotto
+        soglia, lo dice esplicitamente.
+        """
         if self.mock and self.mock_hw is not None:
             return True, "gtt tuning (mock)"
         try:
-            with open("/proc/cmdline") as f:
-                if "ttm.pages_limit" in f.read():
-                    return True, "ttm.pages_limit nel cmdline"
-            conf = Path("/etc/modprobe.d/buo-gtt.conf")
-            if conf.exists():
-                return True, f"{conf.name} presente"
-            return False, "gtt tuning non attivo"
+            from ..fix import gtt as gtt_mod
+            value = int(Path(gtt_mod.GTT_PARAM_PATH).read_text().strip())
+            if value >= gtt_mod.GTT_LIMIT_DEFAULT:
+                return True, f"ttm.pages_limit={value}"
+            return False, (f"ttm.pages_limit={value} (atteso "
+                           f"≥{gtt_mod.GTT_LIMIT_DEFAULT}: fix inerte — "
+                           "initramfs non rigenerato?)")
         except Exception as e:
             return False, str(e)
 

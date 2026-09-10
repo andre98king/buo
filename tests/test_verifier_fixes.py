@@ -37,14 +37,28 @@ class TestVerifierNewCheckers(unittest.TestCase):
         ok, _ = v._check_fan()
         self.assertFalse(ok)
 
-    def test_gtt_checks_conf(self):
+    def test_gtt_checks_runtime_param(self):
+        """Il verifier deve leggere l'EFFETTO (parametro runtime), non la
+        presenza del conf: campo 10/09, conf presente ma parametro al
+        default (initramfs non rigenerato) → fix INERTE, ok=False."""
+        import tempfile
+        from pathlib import Path
+        from buo.fix import gtt as gtt_mod
+        from buo.fix.gtt import GTT_LIMIT_DEFAULT
+
         v = FixVerifier(mock=False)
-        with mock.patch("pathlib.Path.exists", return_value=True), \
-             mock.patch("builtins.open",
-                        mock.mock_open(read_data="root=UUID=x rw")):
-            ok, detail = v._check_gtt()
-            self.assertTrue(ok)
-            self.assertIn("buo-gtt.conf", detail)
+        with tempfile.TemporaryDirectory() as tmp:
+            params = Path(tmp) / "pages_limit"
+            with mock.patch.object(gtt_mod, "GTT_PARAM_PATH", str(params)):
+                params.write_text("1944679\n", encoding="utf-8")
+                ok, detail = v._check_gtt()
+                self.assertFalse(ok)
+                self.assertIn("1944679", detail)
+
+                params.write_text(f"{GTT_LIMIT_DEFAULT}\n", encoding="utf-8")
+                ok, detail = v._check_gtt()
+                self.assertTrue(ok)
+                self.assertIn(str(GTT_LIMIT_DEFAULT), detail)
 
     def test_vram_not_verifiable_returns_none(self):
         v = FixVerifier(mock=False)

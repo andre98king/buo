@@ -17,36 +17,68 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
+from ..state.ostree import _run_ostree_txn
+from ..utils.distro import detect_distro
 from ..utils.logging import LoggerMixin
 from ..utils.shell import run_command
 
 GTT_LIMIT_DEFAULT = 3959290
 GTT_CONF = "/etc/modprobe.d/buo-gtt.conf"
+# Parametro EFFETTIVO a runtime: il conf in /etc entra nell'initramfs SOLO
+# se la rigenerazione è abilitata (su ostree è OFF di default) → senza
+# questo controllo il fix risulterebbe "applicato" ma inerte (bug campo
+# 10/09/2026: runtime 1944679 vs 3959290 configurato).
+GTT_PARAM_PATH = "/sys/module/ttm/parameters/pages_limit"
+
+CmdRunner = Callable[..., Tuple[int, str, str]]
 
 
 class GTTTuning(LoggerMixin):
     """Aumenta il limite GTT della GPU."""
 
     def __init__(self, mock: bool = False, mock_hardware=None,
-                 pages_limit: int = GTT_LIMIT_DEFAULT):
+                 pages_limit: int = GTT_LIMIT_DEFAULT,
+                 param_path: Optional[str] = None,
+                 ostree_runner: Optional[CmdRunner] = None):
         self.mock = mock
         self.mock_hw = mock_hardware
         self.pages_limit = pages_limit
+        self.param_path = (Path(param_path) if param_path
+                           else Path(GTT_PARAM_PATH))
+        self._ostree_txn = ostree_runner or _run_ostree_txn
 
     def verify(self) -> bool:
-        """True se la configurazione GTT risulta presente."""
+        """True se il limite GTT è EFFETTIVO a runtime.
+
+        Non basta il file di conf: su ostree senza rigenerazione
+        dell'initramfs il parametro resta quello di default. Parametro
+        non leggibile → False (fail-closed: non si dichiara ciò che non
+        si è verificato).
+        """
         if self.mock and self.mock_hw is not None:
             return True  # mock: assumiamo applicato se richiesto
         try:
-            with open("/proc/cmdline") as f:
-                return "ttm.pages_limit" in f.read()
+            return int(self.param_path.read_text().strip()) >= self.pages_limit
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _is_ostree() -> bool:
+        try:
+            return detect_distro().initramfs_tool == "ostree"
         except Exception:
-            return os.path.exists(GTT_CONF)
+            return False
 
     def apply(self) -> Dict[str, Any]:
-        """Scrive /etc/modprobe.d/buo-gtt.conf con il nuovo limite."""
+        """Scrive /etc/modprobe.d/buo-gtt.conf e, su ostree, ABILITA la
+        rigenerazione dell'initramfs (senza la quale il conf è inerte).
+
+        Se la rigenerazione non riesce il fix NON è applicato: si ritorna
+        `applied: False` con warning (fail-honest, mai "applicato" per un
+        file scritto ma inefficace). Mai eccezioni.
+        """
         if self.mock and self.mock_hw is not None:
             return {"applied": True, "pages_limit": self.pages_limit,
                     "needs_reboot": True}
@@ -74,10 +106,27 @@ class GTTTuning(LoggerMixin):
                         return {"applied": False, "error": err}
                 finally:
                     shutil.rmtree(tmpdir, ignore_errors=True)
-            return {"applied": True, "pages_limit": self.pages_limit,
-                    "needs_reboot": True}
         except Exception as e:
             return {"applied": False, "error": str(e)}
+
+        # ostree: /etc/modprobe.d non è nell'initramfs pre-generato →
+        # abilita la rigenerazione (txn rpm-ostree staccata: mai uccisa a
+        # metà commit) e riporta l'esito REALE.
+        if self._is_ostree():
+            rc, _o, err = self._ostree_txn(
+                ["rpm-ostree", "initramfs", "--enable"],
+                "buo-gtt-initramfs")
+            if rc != 0:
+                return {
+                    "applied": False, "needs_reboot": True,
+                    "initramfs": "error",
+                    "warning": ("conf scritto ma initramfs NON rigenerato "
+                                f"(rpm-ostree initramfs --enable rc={rc}): "
+                                "il parametro resta inerte — "
+                                + (err or "").strip()[:120]),
+                }
+        return {"applied": True, "pages_limit": self.pages_limit,
+                "needs_reboot": True}
 
     def rollback(self) -> bool:
         """Rimuove il file modprobe.
