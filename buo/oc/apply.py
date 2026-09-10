@@ -283,14 +283,22 @@ class ApplyManager:
             return ApplyOutcome("aborted", profile.id, False,
                                 f"bc250-apply non presente: {self.bc250_apply}",
                                 details)
-        if (not self.mock and not self.dry_run
-                and not os.path.exists(self.smu_conf)):
-            return ApplyOutcome("aborted", profile.id, False,
-                                f"conf assente: {self.smu_conf}", details)
+        # Conf PERSISTITA assente (campo 10/09): il rollback validate-fail (T2)
+        # esegue `bc250-apply --uninstall`, quindi il conf può mancare — ed è
+        # proprio il caso in cui il RIUSO dello stato OC certificato deve
+        # poterlo ricreare. Prima si abortiva ("conf assente") e la macchina
+        # restava a stock senza che nessun path potesse ripristinarla.
+        # Senza conf precedente non esiste un backup da ripristinare: in caso
+        # di fallimento si torna alla config STOCK (`_restore_stock`).
+        conf_present = (self.mock or self.dry_run
+                        or os.path.exists(self.smu_conf))
+        if not conf_present:
+            details.append("conf persistita assente (nessun backup): in caso "
+                           "di fallimento → config stock")
 
         # 2. Backup (prima di QUALSIASI modifica)
-        backup = self._backup(details)
-        if backup is None:
+        backup = self._backup(details) if conf_present else None
+        if conf_present and backup is None:
             return ApplyOutcome("aborted", profile.id, False,
                                 "backup fallito", details)
 
@@ -364,17 +372,47 @@ class ApplyManager:
             on_progress(f"apply {profile.name}: OK")
         return ApplyOutcome("ok", profile.id, persisted, None, details)
 
-    def _rollback(self, profile: Profile, backup: Path, details: List[str],
+    def _rollback(self, profile: Profile, backup: Optional[Path],
+                  details: List[str],
                   cause: str) -> ApplyOutcome:
         """Sequenza R — governor GIÀ fermo: ripristino → re-apply → governor
-        su → marcatore rolled_back. MAI persistire un punto fallito."""
+        su → marcatore rolled_back. MAI persistire un punto fallito.
+
+        `backup=None` (conf persistita assente: es. dopo un `--uninstall` di
+        T2) → si riporta lo SMU alla config STOCK invece del backup.
+        """
         self._log(details, f"⚠️ ROLLBACK ({cause})")
-        self._restore_backup(backup, details)
+        if backup is None:
+            self._restore_stock(details)
+        else:
+            self._restore_backup(backup, details)
         self._governor_start_verified(details)
         self._write_marker("rolled_back", profile.id, cause=cause)
         self._append_apply_log(details, "rolled_back", profile.id, False,
                                cause)
         return ApplyOutcome("rolled_back", profile.id, False, cause, details)
+
+    def _restore_stock(self, details: List[str]) -> None:
+        """Fallback senza backup: SMU alla config stock (governor fermo).
+
+        Il profilo `stock` del store è la fonte (builtin); se manca si ripiega
+        su `bc250-apply --uninstall`. Mai lasciare lo SMU con un punto
+        fallito dopo un rollback.
+        """
+        try:
+            stock = self.store.get("stock")
+        except Exception:  # pragma: no cover - difesa store
+            stock = None
+        if stock is not None:
+            conf = self._write_conf(stock)
+            rc, _o, err = self._cmd([self.bc250_apply, "--apply", str(conf)],
+                                    timeout=90)
+            self._log(details, "config stock riapplicata" if rc == 0 else
+                      f"stock apply FALLITO ({err.strip()})")
+            return
+        rc, _o, err = self._cmd([self.bc250_apply, "--uninstall"], timeout=60)
+        self._log(details, f"profilo stock assente: --uninstall (rc={rc}"
+                           f"{'' if rc == 0 else ', ' + err.strip()})")
 
     def _restart_after_abort(self, details: List[str]) -> None:
         self._write_marker("aborted", None)

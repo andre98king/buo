@@ -111,6 +111,47 @@ class Base(unittest.TestCase):
                        source="builtin", validated=True)
 
 
+class TestConfMissingAfterRollback(Base):
+    """Campo 10/09: dopo un rollback validate-fail (T2 → `--uninstall`) la
+    conf persistita NON esiste più. Il riuso dello stato OC certificato deve
+    poterla RICREARE — prima abortiva con "conf assente" e la macchina
+    restava a stock senza alcun path di ripristino."""
+
+    def _remove_conf(self):
+        self.smu_conf.unlink()
+
+    def test_apply_proceeds_without_previous_conf(self):
+        self._remove_conf()
+        mgr = self.mk()
+        out = mgr.apply(self.stock(), persist=True, yes=True)
+        self.assertEqual(out.result, "ok", out.cause)
+        self.assertTrue(out.persisted)
+        self.assertTrue(any("nessun backup" in d for d in out.details))
+
+    def test_failure_without_backup_restores_stock(self):
+        self._remove_conf()
+        # store con un profilo stock: è la fonte del fallback
+        mgr = self.mk(smoke_ok=False, smoke_cause="stretch")
+        mgr.store.save([self.stock()])
+        out = mgr.apply(self.stock(), persist=False)
+        self.assertEqual(out.result, "rolled_back")
+        self.assertTrue(any("stock" in d for d in out.details), out.details)
+        # nessun `cp` di backup: la conf persistita non esisteva
+        self.assertFalse(any(c and c[0] == "cp" for c in self.rec.calls))
+
+    def test_failure_without_backup_and_without_stock_uninstalls(self):
+        self._remove_conf()
+        mgr = self.mk(smoke_ok=False, smoke_cause="stretch")
+        # store senza profilo stock (caso limite): fallback su --uninstall
+        with mock.patch.object(mgr.store, "get", return_value=None):
+            out = mgr.apply(self.stock(), persist=False)
+        self.assertEqual(out.result, "rolled_back")
+        self.assertTrue(any("stock assente" in d for d in out.details),
+                        out.details)
+        self.assertTrue(any("--uninstall" in " ".join(c)
+                            for c in self.rec.calls), self.rec.calls)
+
+
 class TestApplySequence(Base):
     def test_success_volatile_sequence(self):
         mgr = self.mk()
