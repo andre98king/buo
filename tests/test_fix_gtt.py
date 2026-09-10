@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Test del fixer GTTTuning (ttm.pages_limit via modprobe.d).
+Test del fixer GTTTuning — tetto VRAM dinamica via KARG.
 
-Bug di campo 10/09/2026 (BC-250 dopo cambio SSD): il fix scriveva
-/etc/modprobe.d/buo-gtt.conf e si dichiarava "applicato", ma su ostree la
-rigenerazione dell'initramfs è DISABILITATA → il conf non entra
-nell'initramfs → `ttm.pages_limit` restava il default (1944679 vs 3959290
-configurato). Verifica e apply devono basarsi sull'EFFETTO (parametro
-runtime / rigenerazione initramfs), mai sulla presenza del file.
+Fonte: doc ufficiale BC-250 (elektricM/amd-bc250-docs, bios/vram.md):
+con split 512MB il max VRAM dinamica e' 8.25 GB e i giochi configurati per
+>=8 GB "tip over" -> crash del display driver (indicata come *the primary
+reason for games crashing*). Il fix documentato su Bazzite e' il KARG:
+
+    rpm-ostree kargs --delete=ttm.pages_limit --append=ttm.pages_limit=3014656
+
+Bug di campo 10/09/2026: il fixer scriveva /etc/modprobe.d/buo-gtt.conf
+(meccanismo sbagliato E inerte su ostree: initramfs non rigenerato) e si
+dichiarava "applicato". Ora: kargs + verifica sull'effetto.
 """
 
 import tempfile
@@ -25,14 +29,15 @@ class Base(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.params = self.root / "pages_limit"
-        self.conf_dir = self.root / "modprobe.d"
-        self.conf_dir.mkdir()
+        self.cmdline = self.root / "cmdline"
+        self.cmdline.write_text("rhgb quiet root=/dev/x rw\n", encoding="utf-8")
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def _fix(self, **kw):
         kw.setdefault("param_path", str(self.params))
+        kw.setdefault("cmdline_path", str(self.cmdline))
         return GTTTuning(mock=False, **kw)
 
     def _write_param(self, value):
@@ -41,70 +46,108 @@ class Base(unittest.TestCase):
 
 class TestGTTVerify(Base):
     def test_verify_false_when_runtime_is_default(self):
-        """Il file di conf NON basta: se il parametro runtime è il default,
-        il fix è INERTE → verify() False."""
         self._write_param(1944679)
-        conf = self.conf_dir / "buo-gtt.conf"
-        conf.write_text("options ttm pages_limit=3959290\n")
-        with mock.patch.object(gtt_mod, "GTT_CONF", str(conf)):
-            self.assertFalse(self._fix().verify())
+        self.assertFalse(self._fix().verify())
 
     def test_verify_true_when_runtime_matches(self):
         self._write_param(GTT_LIMIT_DEFAULT)
         self.assertTrue(self._fix().verify())
 
     def test_verify_true_when_runtime_higher(self):
-        """Un valore più alto del richiesto soddisfa comunque l'obiettivo."""
-        self._write_param(GTT_LIMIT_DEFAULT + 1000)
+        self._write_param(GTT_LIMIT_DEFAULT + 1024)
         self.assertTrue(self._fix().verify())
 
-    def test_verify_false_when_param_unreadable(self):
+    def test_verify_fallback_to_cmdline_when_param_unreadable(self):
+        """Parametro non leggibile (modulo non caricato): vale la presenza
+        del karg nel cmdline (unica evidenza disponibile)."""
+        self.cmdline.write_text(
+            f"rhgb quiet ttm.pages_limit={GTT_LIMIT_DEFAULT} rw\n",
+            encoding="utf-8")
+        self.assertTrue(self._fix().verify())
+
+    def test_verify_false_when_nothing(self):
         self.assertFalse(self._fix().verify())
 
 
-class TestGTTApplyInitramfs(Base):
-    def test_apply_enables_initramfs_regeneration_on_ostree(self):
-        """Su ostree il conf non entra nell'initramfs senza rigenerazione:
-        apply() deve abilitarla (txn staccata) e riportare l'esito."""
+class TestGTTApplyKargs(Base):
+    def _kargs(self, current="rhgb quiet root=/dev/x rw"):
+        return lambda cmd, unit, timeout=600: (
+            (0, current, "") if cmd[:2] == ["rpm-ostree", "kargs"]
+            and "--append" not in " ".join(cmd) else (0, "", ""))
+
+    def test_apply_appends_karg(self):
         calls = []
 
-        def fake_txn(cmd, unit, timeout=600):
-            calls.append((cmd, unit))
+        def runner(cmd, unit, timeout=600):
+            calls.append(cmd)
+            if "kargs" in cmd and len(cmd) == 2:
+                return 0, "rhgb quiet root=/dev/x rw", ""
             return 0, "", ""
 
-        fix = self._fix(ostree_runner=fake_txn)
-        with mock.patch.object(gtt_mod, "GTT_CONF",
-                               str(self.conf_dir / "buo-gtt.conf")), \
-             mock.patch.object(gtt_mod, "detect_distro") as dd:
+        fix = self._fix(ostree_runner=runner)
+        with mock.patch.object(gtt_mod, "detect_distro") as dd:
             dd.return_value.initramfs_tool = "ostree"
             res = fix.apply()
         self.assertTrue(res["applied"], res)
         self.assertTrue(res["needs_reboot"])
-        self.assertEqual(calls[0][0], ["rpm-ostree", "initramfs", "--enable"])
+        txn = calls[-1]
+        self.assertEqual(txn[:2], ["rpm-ostree", "kargs"])
+        self.assertIn(f"--append=ttm.pages_limit={GTT_LIMIT_DEFAULT}", txn)
 
-    def test_apply_fail_closed_when_initramfs_not_regenerated(self):
-        """Se la rigenerazione fallisce il fix resta inerte: MAI
-        'applicato' (fail-honest, non fail-silent)."""
-        fix = self._fix(ostree_runner=lambda cmd, unit, timeout=600:
-                        (1, "", "errore txn"))
-        with mock.patch.object(gtt_mod, "GTT_CONF",
-                               str(self.conf_dir / "buo-gtt.conf")), \
-             mock.patch.object(gtt_mod, "detect_distro") as dd:
+    def test_apply_replaces_wrong_value(self):
+        calls = []
+
+        def runner(cmd, unit, timeout=600):
+            calls.append(cmd)
+            if len(cmd) == 2:
+                return 0, "rhgb quiet ttm.pages_limit=3959290 rw", ""
+            return 0, "", ""
+
+        fix = self._fix(ostree_runner=runner)
+        with mock.patch.object(gtt_mod, "detect_distro") as dd:
+            dd.return_value.initramfs_tool = "ostree"
+            res = fix.apply()
+        self.assertTrue(res["applied"], res)
+        txn = calls[-1]
+        self.assertIn("--delete=ttm.pages_limit", txn)
+        self.assertIn(f"--append=ttm.pages_limit={GTT_LIMIT_DEFAULT}", txn)
+
+    def test_apply_idempotent_when_already_configured(self):
+        calls = []
+
+        def runner(cmd, unit, timeout=600):
+            calls.append(cmd)
+            return 0, f"rhgb quiet ttm.pages_limit={GTT_LIMIT_DEFAULT} rw", ""
+
+        fix = self._fix(ostree_runner=runner)
+        with mock.patch.object(gtt_mod, "detect_distro") as dd:
+            dd.return_value.initramfs_tool = "ostree"
+            res = fix.apply()
+        self.assertTrue(res["applied"], res)
+        # nessuna transazione: il karg c'e' gia'
+        self.assertEqual(len(calls), 1)
+
+    def test_apply_fail_closed_when_txn_fails(self):
+        def runner(cmd, unit, timeout=600):
+            if len(cmd) == 2:
+                return 0, "rhgb quiet", ""
+            return 1, "", "errore txn"
+
+        fix = self._fix(ostree_runner=runner)
+        with mock.patch.object(gtt_mod, "detect_distro") as dd:
             dd.return_value.initramfs_tool = "ostree"
             res = fix.apply()
         self.assertFalse(res["applied"])
-        self.assertIn("initramfs", res.get("warning", ""))
+        self.assertIn("kargs", res.get("warning", "").lower())
 
-    def test_apply_no_initramfs_on_non_ostree(self):
+    def test_apply_non_ostree_is_manual(self):
         calls = []
-        fix = self._fix(ostree_runner=lambda cmd, unit, timeout=600:
-                        calls.append(cmd) or (0, "", ""))
-        with mock.patch.object(gtt_mod, "GTT_CONF",
-                               str(self.conf_dir / "buo-gtt.conf")), \
-             mock.patch.object(gtt_mod, "detect_distro") as dd:
+        fix = self._fix(ostree_runner=lambda *a, **k: calls.append(a) or (0, "", ""))
+        with mock.patch.object(gtt_mod, "detect_distro") as dd:
             dd.return_value.initramfs_tool = "dracut"
             res = fix.apply()
-        self.assertTrue(res["applied"], res)
+        self.assertFalse(res["applied"])
+        self.assertIn("ttm.pages_limit", res.get("warning", ""))
         self.assertEqual(calls, [])
 
 

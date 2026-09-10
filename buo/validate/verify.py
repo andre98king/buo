@@ -126,12 +126,11 @@ class FixVerifier(LoggerMixin):
         return False, "nessuna maschera installata"
 
     def _check_gtt(self):
-        """GTT tuning EFFETTIVO: `ttm.pages_limit` a runtime ≥ richiesto.
+        """Tetto VRAM dinamica EFFETTIVO: `ttm.pages_limit` ≥ richiesto.
 
-        Non basta il conf in /etc/modprobe.d: su ostree senza
-        rigenerazione dell'initramfs il parametro resta il default (bug
-        campo 10/09) → il checker legge il VALORE REALE e, se sotto
-        soglia, lo dice esplicitamente.
+        Il meccanismo documentato BC-250 è il karg (non modprobe.d): si
+        verifica il valore REALE a runtime e, se il parametro non è
+        leggibile, la presenza del karg nel cmdline.
         """
         if self.mock and self.mock_hw is not None:
             return True, "gtt tuning (mock)"
@@ -139,12 +138,20 @@ class FixVerifier(LoggerMixin):
             from ..fix import gtt as gtt_mod
             value = int(Path(gtt_mod.GTT_PARAM_PATH).read_text().strip())
             if value >= gtt_mod.GTT_LIMIT_DEFAULT:
-                return True, f"ttm.pages_limit={value}"
+                return True, f"ttm.pages_limit={value} (runtime)"
             return False, (f"ttm.pages_limit={value} (atteso "
-                           f"≥{gtt_mod.GTT_LIMIT_DEFAULT}: fix inerte — "
-                           "initramfs non rigenerato?)")
-        except Exception as e:
-            return False, str(e)
+                           f"≥{gtt_mod.GTT_LIMIT_DEFAULT}: tetto dinamico "
+                           "non alzato)")
+        except Exception:
+            pass
+        try:
+            cmdline = Path(gtt_mod.CMDLINE_PATH).read_text()
+            if f"{gtt_mod.GTT_KARG}={gtt_mod.GTT_LIMIT_DEFAULT}" in cmdline:
+                return False, ("karg configurato ma NON attivo "
+                               "(runtime non leggibile: reboot?)")
+        except OSError:
+            pass
+        return False, "gtt tuning non attivo"
 
     def _check_fan(self):
         """Sensori SuperIO attivi: modulo nct6683 caricato (mock risolto)."""
