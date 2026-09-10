@@ -26,9 +26,13 @@ class TestVRAMConfig(unittest.TestCase):
         self.assertEqual(Orchestrator._classify_fix(result), "manual")
 
     def test_real_apply_formats_gpu_memory_value(self):
+        """L'hint usa la CLI VERA di bc250_memcfg: `UMA_SIZE <MB>`
+        (campo 10/09: `--set-vram 8G` non esiste nel tool, l'utente lo
+        eseguiva senza effetto — UMA_SIZE restava 512)."""
         fix = VRAMConfig(mock=False)
         result = fix.apply()
-        self.assertIn("bc250_memcfg --set-vram 8G", result["warning"])
+        self.assertIn("UMA_SIZE 8192", result["warning"])
+        self.assertNotIn("--set-vram", result["warning"])
         self.assertNotIn("{gpu_memory_gb}", result["warning"])
 
     def test_out_of_range_returns_error(self):

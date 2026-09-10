@@ -51,6 +51,8 @@ class VRAMConfig(LoggerMixin):
             return {"applied": True, "gpu_memory_gb": gpu_memory_gb,
                     "needs_reboot": True}
 
+        mb = gpu_memory_gb * 1024
+
         if not self.memcfg_path:
             return {
                 "applied": False,
@@ -59,15 +61,18 @@ class VRAMConfig(LoggerMixin):
                     "bc250_memcfg non trovato: esegui `sudo buo install-deps` "
                     f"(lo compila da {MEMCFG_REPO}), oppure passa "
                     f"--memcfg <percorso>. "
-                    f"Esempio reale: bc250_memcfg --set-vram {gpu_memory_gb}G"
+                    # CLI reale del tool: parametro posizionale UMA_SIZE in
+                    # MB (campo 10/09: `--set-vram 8G` non esiste → comando
+                    # eseguito senza effetto).
+                    f"Esempio reale: bc250_memcfg UMA_SIZE {mb}"
                 ),
             }
 
         self.logger.warning(
             "Applicazione reale di bc250_memcfg non eseguita — "
-            "usare: %s --set-vram %dG", self.memcfg_path, gpu_memory_gb)
+            "usare: %s UMA_SIZE %d", self.memcfg_path, mb)
         return {"applied": False, "needs_reboot": True,
-                "warning": f"Eseguire: {self.memcfg_path} --set-vram {gpu_memory_gb}G"}
+                "warning": f"Eseguire: {self.memcfg_path} UMA_SIZE {mb}"}
 
     def rollback(self) -> bool:
         """Ripristina lo split default (16GB UMA stock)."""
