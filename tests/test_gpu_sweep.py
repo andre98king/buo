@@ -127,7 +127,7 @@ class FakeStress:
 
 
 class _SweepBase(unittest.TestCase):
-    """Base condivisa: config temporanea + FakeGov + which(furmark) finto."""
+    """Base condivisa: config temporanea + FakeGov + which(vkmark) finto."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -136,9 +136,10 @@ class _SweepBase(unittest.TestCase):
                          b"[[safe-points]]\nfrequency = 1500\nvoltage = 900\n")
         self.cfg_path.write_bytes(self.original)
         self.gov = FakeGov(config_path=self.cfg_path)
-        # Per default il tool di stress "esiste" (furmark finto)
+        # Per default il tool di stress "esiste" (vkmark = primario: carico
+        # realistico). La selezione vive in `buo/utils/gpu_stress`.
         self._which_patch = mock.patch(
-            "buo.optimize.gpu.which", return_value="/usr/bin/furmark")
+            "buo.utils.gpu_stress.which", return_value="/usr/bin/vkmark")
         self._which_patch.start()
         self.addCleanup(self._which_patch.stop)
 
@@ -491,7 +492,7 @@ class TestPrereqsAndFallbacks(_SweepBase):
         """#10: nessun tool di stress → nessuna scrittura, community."""
         probe = FakeProbe()
         opt = self.make_opt(probe=probe)
-        with mock.patch("buo.optimize.gpu.which", return_value=None):
+        with mock.patch("buo.utils.gpu_stress.which", return_value=None):
             res = opt.optimize(start_freq=1200, sweep=self.sweep())
         self.assertEqual(res["source"], "community_defaults")
         self.assertEqual(probe.calls, [])
@@ -559,11 +560,12 @@ class TestPrereqsAndFallbacks(_SweepBase):
         self.assertGreaterEqual(self.gov.stops, 1)
 
     def test_stress_cmd_uses_documented_furmark_syntax(self):
-        """Il comando stress usa la sintassi UFFICIALE FurMark 2
+        """Senza vkmark si usa furmark con la sintassi UFFICIALE FurMark 2
         (stress-and-quit con --max-time, geeks3d.com/furmark/command-line)
         — mai --duration/--seconds inventati."""
-        with mock.patch("buo.optimize.gpu.which",
-                        return_value="/usr/bin/furmark"):
+        def fake_which(tool):
+            return "/usr/bin/furmark" if tool == "furmark" else None
+        with mock.patch("buo.utils.gpu_stress.which", side_effect=fake_which):
             opt = self.make_opt(probe=FakeProbe())
             cmd = opt._gpu_stress_cmd(30)
         self.assertEqual(cmd[0], "furmark")
@@ -574,12 +576,23 @@ class TestPrereqsAndFallbacks(_SweepBase):
         self.assertNotIn("--seconds", cmd)
         self.assertNotIn("--duration", cmd)
 
-    def test_stress_cmd_vkmark_fallback(self):
-        """Senza furmark, fallback vkmark con durata per-scena (rc=0 dopo
-        N secondi) — l'unico fallback con controllo durata reale."""
+    def test_stress_cmd_vkmark_is_primary(self):
+        """vkmark è il tool PRIMARIO (carico realistico con durata
+        per-scena, rc=0 dopo N secondi): con entrambi presenti vince lui."""
+        def fake_which(tool):
+            return f"/usr/bin/{tool}" if tool in ("vkmark", "furmark") else None
+        with mock.patch("buo.utils.gpu_stress.which", side_effect=fake_which):
+            opt = self.make_opt(probe=FakeProbe())
+            cmd = opt._gpu_stress_cmd(30)
+        self.assertEqual(cmd[0], "vkmark")
+        self.assertIn("desktop:duration=30", cmd)
+        self.assertNotIn("furmark", cmd[0])
+
+    def test_stress_cmd_vkmark_alone(self):
+        """Solo vkmark installato → comando vkmark (caso macchina BC-250)."""
         def fake_which(tool):
             return "/usr/bin/vkmark" if tool == "vkmark" else None
-        with mock.patch("buo.optimize.gpu.which", side_effect=fake_which):
+        with mock.patch("buo.utils.gpu_stress.which", side_effect=fake_which):
             opt = self.make_opt(probe=FakeProbe())
             cmd = opt._gpu_stress_cmd(30)
         self.assertEqual(cmd[0], "vkmark")
@@ -590,7 +603,7 @@ class TestPrereqsAndFallbacks(_SweepBase):
         deve essere accettato come tool di stress (fail-closed community)."""
         def fake_which(tool):
             return "/usr/bin/glmark2" if tool == "glmark2" else None
-        with mock.patch("buo.optimize.gpu.which", side_effect=fake_which):
+        with mock.patch("buo.utils.gpu_stress.which", side_effect=fake_which):
             opt = self.make_opt(probe=FakeProbe())
             self.assertIsNone(opt._gpu_stress_tool())
             res = opt.optimize(start_freq=1200, sweep=self.sweep())
@@ -726,7 +739,7 @@ class TestSweepAutoprovision(_SweepBase):
 
         probe = FakeProbe(stable_map={1500: 750})
         opt = self.make_opt(probe=probe, provisioner=provisioner)
-        with mock.patch("buo.optimize.gpu.which",
+        with mock.patch("buo.utils.gpu_stress.which",
                         side_effect=self._which_with_state(state)):
             res = opt.optimize(start_freq=1200, sweep=self.sweep())
         self.assertEqual(res["source"], "per-silicon")
@@ -741,7 +754,7 @@ class TestSweepAutoprovision(_SweepBase):
         opt = self.make_opt(probe=FakeProbe(), provisioner=lambda: {
             "status": "ok", "installed": True, "needs_reboot": True,
             "detail": "staged (rpm-ostree)"})
-        with mock.patch("buo.optimize.gpu.which", return_value=None):
+        with mock.patch("buo.utils.gpu_stress.which", return_value=None):
             with self.assertLogs("buo.GPUUndervoltOptimizer", level="INFO") as cm:
                 res = opt.optimize(start_freq=1200, sweep=self.sweep())
         self.assertEqual(res["source"], "community_defaults")
@@ -756,7 +769,7 @@ class TestSweepAutoprovision(_SweepBase):
         opt = self.make_opt(probe=FakeProbe(), provisioner=lambda: {
             "status": "failed", "installed": False, "needs_reboot": False,
             "detail": "offline: repo non raggiungibile"})
-        with mock.patch("buo.optimize.gpu.which", return_value=None):
+        with mock.patch("buo.utils.gpu_stress.which", return_value=None):
             with self.assertLogs("buo.GPUUndervoltOptimizer", level="INFO") as cm:
                 res = opt.optimize(start_freq=1200, sweep=self.sweep())
         self.assertEqual(res["source"], "community_defaults")

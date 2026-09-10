@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..constants import GOVERNOR_CONFIG, GPU_FREQ_STEPS, LIMITS
 from ..exceptions import SafetyViolation
+from ..utils.gpu_stress import gpu_stress_cmd, gpu_stress_tool
 from ..utils.logging import LoggerMixin
 from ..utils.shell import which
 from .governor import GovernorWrapper
@@ -543,32 +544,30 @@ class GPUUndervoltOptimizer(LoggerMixin):
     # -------------------------- prerequisiti -------------------------- #
 
     def _gpu_stress_tool(self) -> Optional[str]:
-        """Tool di stress GPU con controllo durata REALE: furmark (CLI
-        FurMark 2 documentata) preferito, vkmark fallback. glmark2 NON ha
-        un'opzione di durata (--seconds inesistente: verificato sul campo
-        con glmark2 2023.01 di Fedora) → non può produrre un probe a
-        durata fissa con rc==0 → escluso (fail-closed verso community)."""
-        if which("furmark"):
-            return "furmark"
-        if which("vkmark"):
-            return "vkmark"
-        return None
+        """Tool di stress GPU con controllo durata REALE: **vkmark
+        primario** (carico realistico), furmark solo ultima risorsa.
+        glmark2 NON ha un'opzione di durata (--seconds inesistente:
+        verificato sul campo con glmark2 2023.01 di Fedora) → non può
+        produrre un probe a durata fissa con rc==0 → escluso (fail-closed
+        verso community).
+
+        Selezione CONDIVISA con la validate (`utils/gpu_stress`): la
+        divergenza fra i due percorsi è stata un bug di campo (10/09)."""
+        return gpu_stress_tool()
 
     def _gpu_stress_cmd(self, seconds: int) -> List[str]:
-        """Comando di stress per `seconds` secondi con rc==0 a fine run.
+        """Comando di stress per `seconds` secondi (sintassi ufficiale).
 
         Sintassi UFFICIALE FurMark 2 (geeks3d.com/furmark/command-line,
         esempio n.8: stress-and-quit con --max-time) e vkmark con durata
         per-scena (rc=0 dopo N secondi). NOTA: richiedono un display
         (finestra GL/Vulkan); senza display il tool fallisce → probe
-        instabile → fallback community (fail-closed)."""
-        if which("furmark"):
-            return ["furmark", "--demo", "furmark-gl",
-                    "--width", "1920", "--height", "1080",
-                    "--max-time", str(seconds),
-                    "--vsync", "0", "--no-gpumon"]
-        return ["vkmark", "--size", "1920x1080",
-                "-b", f"desktop:duration={seconds}"]
+        instabile → fallback community (fail-closed).
+        """
+        cmd = gpu_stress_cmd(seconds)
+        if cmd is None:  # pragma: no cover - il chiamante verifica prima
+            raise RuntimeError("nessun tool di stress GPU disponibile")
+        return cmd
 
     # ------------------------- curva e candidate ---------------------- #
 

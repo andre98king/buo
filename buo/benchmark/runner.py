@@ -8,7 +8,8 @@ Benchmark Runner — benchmark standard, leggeri e riproducibili.
 Scelta del design (messaggio 98): niente giochi come benchmark —
 strumenti standard, veloci e riproducibili:
 
-    • GPU stress:  furmark (fallback: glmark2)
+    • GPU stress:  vkmark (primario, carico realistico) → furmark solo se
+      vkmark manca (selezione condivisa: `utils/gpu_stress`)
     • CPU stress:  stress-ng (fallback: stress)
     • CPU bench:   sysbench
     • Compute:     vkmark (verifica anche il fix ACE)
@@ -22,6 +23,7 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from ..utils.gpu_stress import gpu_stress_cmd
 from ..utils.logging import LoggerMixin
 from ..utils.shell import run_command, which
 
@@ -61,21 +63,21 @@ class BenchmarkRunner(LoggerMixin):
             return {"available": True, "fps": 72.0, "temperature": 67.0,
                     "power": self.mock_hw.get_total_power()}
 
-        if which("glmark2"):
-            rc, out, _ = run_command(
-                ["glmark2", "--run-forever", "--seconds", str(duration)],
-                timeout=duration + 30)
-            fps = self._parse_float(r"FPS:\s*([\d.]+)", out)
-            return {"available": rc == 0, "fps": fps, "tool": "glmark2"}
-
-        if which("furmark"):
-            rc, out, _ = run_command(
-                ["furmark", "--benchmark", "--duration", str(duration)],
-                timeout=duration + 30)
-            return {"available": rc == 0, "fps": self._parse_float(r"([\d.]+)\s*FPS", out),
-                    "tool": "furmark"}
-
-        return {"available": False, "note": "glmark2/furmark non installati"}
+        # Tool con durata REALE, selezione CONDIVISA (`utils/gpu_stress`):
+        # vkmark primario (carico realistico), furmark solo se manca.
+        # Sintassi INVENTATE rimosse (bug 10/09): `glmark2 --run-forever
+        # --seconds N` (opzione inesistente) e `furmark --benchmark
+        # --duration N` (inesistente: la CLI FurMark 2 usa --max-time).
+        cmd = gpu_stress_cmd(duration)
+        if cmd is None:
+            return {"available": False,
+                    "note": "nessun tool GPU con durata controllata "
+                            "(vkmark/furmark)"}
+        rc, out, _ = run_command(cmd, timeout=duration + 30)
+        fps = self._parse_float(r"FPS:\s*([\d.]+)", out) \
+            or self._parse_float(r"([\d.]+)\s*FPS", out) \
+            or self._parse_float(r"([\d.]+)\s*fps", out)
+        return {"available": rc == 0, "fps": fps, "tool": cmd[0]}
 
     # --------------------------- CPU ---------------------------------- #
 
@@ -117,8 +119,11 @@ class BenchmarkRunner(LoggerMixin):
             return {"available": True, "fps": 158.0, "score": 580.0}
 
         if which("vkmark"):
+            # Sintassi vkmark REALE: la durata è per-scena
+            # (`-b <scena>:duration=N`), non esiste `--duration`.
             rc, out, _ = run_command(
-                ["vkmark", "--benchmark", "triangle", "--duration", str(duration)],
+                ["vkmark", "--size", "1920x1080",
+                 "-b", f"desktop:duration={duration}"],
                 timeout=duration + 30)
             score = self._parse_float(r"Score:\s*([\d.]+)", out)
             fps = self._parse_float(r"([\d.]+)\s*fps", out)

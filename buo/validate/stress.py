@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..constants import LIMITS
 from ..exceptions import SafetyViolation
+from ..utils.gpu_stress import gpu_stress_cmd
 from ..utils.logging import LoggerMixin
 from ..utils.shell import which
 
@@ -112,26 +113,41 @@ class StressTest(LoggerMixin):
                     duration_s, reader, power_budget)
                 cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
 
-        # Carico GPU (FurMark o glmark2) — saltato con scope="cpu"
+        # Carico GPU — saltato con scope="cpu".
+        # Tool con durata REALE, unica fonte: `utils/gpu_stress` (vkmark
+        # primario — carico realistico; furmark solo se vkmark manca;
+        # glmark2 escluso). BUG DI CAMPO 10/09: questo ramo provava
+        # solo glmark2/furmark con sintassi sbagliata → su una macchina con
+        # il solo vkmark `gpu_rc` restava 1 → validate SEMPRE fallita con
+        # scope="both" → rollback automatico che disinstallava una config
+        # CPU buona. Nessun tool = componente NON verificabile (rc=0 +
+        # avviso): non è un fallimento del test.
         gpu_rc = 0
+        gpu_skipped = False
+        gpu_cmd_used: Optional[List[str]] = None
         if scope != "cpu":
-            gpu_rc = 1
-            if which("glmark2"):
+            cmd = gpu_stress_cmd(duration_s)
+            if cmd is None:
+                gpu_skipped = True
+                self.logger.warning(
+                    "Stress GPU: nessun tool con controllo durata "
+                    "(furmark/vkmark) — componente NON verificato")
+            else:
+                gpu_cmd_used = cmd
                 gpu_rc, t1, t2, p = self._run_loaded(
-                    ["glmark2", "--run-forever", "--seconds", str(duration_s)],
-                    duration_s, reader, power_budget)
-                cpu_temp_max = max(cpu_temp_max, t1)
-                gpu_temp_max = max(gpu_temp_max, t2)
-                power_max = max(power_max, p)
-            elif which("furmark"):
-                gpu_rc, t1, t2, p = self._run_loaded(
-                    ["furmark", "--benchmark", "--duration", str(duration_s)],
-                    duration_s, reader, power_budget)
+                    cmd, duration_s, reader, power_budget)
                 cpu_temp_max = max(cpu_temp_max, t1)
                 gpu_temp_max = max(gpu_temp_max, t2)
                 power_max = max(power_max, p)
 
         passed = cpu_rc == 0 and gpu_rc == 0
+        if not passed:
+            # Diagnosi: senza i codici di ritorno il fallimento è opaco
+            # (bug di campo 10/09: "stress: fallito" senza dire QUALE
+            # componente né il comando).
+            self.logger.error(
+                "Stress FALLITO: cpu_rc=%d gpu_rc=%d (comando GPU: %s)",
+                cpu_rc, gpu_rc, gpu_cmd_used or "nessuno")
         return {
             "passed": passed,
             "duration_minutes": duration_minutes,
@@ -139,6 +155,10 @@ class StressTest(LoggerMixin):
             "cpu_temp_max": round(cpu_temp_max, 1),
             "gpu_temp_max": round(gpu_temp_max, 1),
             "power_max": round(power_max, 1),
+            "cpu_rc": cpu_rc,
+            "gpu_rc": gpu_rc,
+            "gpu_skipped": gpu_skipped,
+            "gpu_cmd": gpu_cmd_used,
             "errors": 0,
         }
 

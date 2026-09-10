@@ -151,7 +151,11 @@ class TestStressScope(unittest.TestCase):
     def _spawn_spy(self):
         """Patch which (tutti i tool presenti) e Popen (spia che registra
         i comandi ed esegue un processo innocuo): ritorna la lista dei
-        comandi spawnati."""
+        comandi spawnati.
+
+        Il tool GPU viene dalla selezione CONDIVISA (`utils.gpu_stress`):
+        anche lì `which` è finto (vkmark presente) — così il test è
+        indipendente dai tool installati sulla macchina di sviluppo."""
         import unittest.mock as mock
         spawned = []
         real_popen = subprocess.Popen
@@ -165,13 +169,17 @@ class TestStressScope(unittest.TestCase):
         patches = [
             mock.patch("buo.validate.stress.which",
                        side_effect=lambda name: f"/usr/bin/{name}"),
+            mock.patch("buo.utils.gpu_stress.which",
+                       side_effect=lambda name: (
+                           f"/usr/bin/{name}" if name in ("vkmark", "furmark")
+                           else None)),
             mock.patch("buo.validate.stress.subprocess.Popen",
                        side_effect=_fake_popen),
         ]
         for p in patches:
             p.start()
-        self.addCleanup(patches[0].stop)
-        self.addCleanup(patches[1].stop)
+        for p in patches:
+            self.addCleanup(p.stop)
         return spawned
 
     def test_scope_cpu_skips_gpu(self):
@@ -185,7 +193,7 @@ class TestStressScope(unittest.TestCase):
         cmds = [" ".join(c) for c in spawned]
         self.assertTrue(any("stress-ng" in c for c in cmds),
                         f"manca stress-ng in: {cmds}")
-        self.assertFalse(any(("glmark2" in c or "furmark" in c) for c in cmds),
+        self.assertFalse(any(("vkmark" in c or "furmark" in c) for c in cmds),
                          f"GPU stressata con scope cpu: {cmds}")
 
     def test_scope_gpu_skips_cpu(self):
@@ -197,7 +205,7 @@ class TestStressScope(unittest.TestCase):
         self.assertEqual(result["scope"], "gpu")
         self.assertTrue(result["passed"])
         cmds = [" ".join(c) for c in spawned]
-        self.assertTrue(any(("glmark2" in c or "furmark" in c) for c in cmds),
+        self.assertTrue(any(("vkmark" in c or "furmark" in c) for c in cmds),
                         f"manca tool GPU in: {cmds}")
         self.assertFalse(any(("stress-ng" in c or " stress " in c)
                              for c in cmds),
@@ -213,7 +221,7 @@ class TestStressScope(unittest.TestCase):
         self.assertTrue(result["passed"])
         cmds = [" ".join(c) for c in spawned]
         self.assertTrue(any("stress-ng" in c for c in cmds))
-        self.assertTrue(any(("glmark2" in c or "furmark" in c) for c in cmds))
+        self.assertTrue(any(("vkmark" in c or "furmark" in c) for c in cmds))
 
 
 class TestStressScopeConfig(unittest.TestCase):
