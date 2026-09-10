@@ -13,8 +13,9 @@ Regole:
 - il marker si scrive SOLO quando il blob viene davvero (ri)costruito;
 - il ramo "già applicato" NON scrive il marker (provenienza ignota: non si
   dichiarano applicate tabelle che non si sono costruite);
-- is_stale() = True quando c'è un marker E l'hash delle tabelle correnti
-  differisce (staleness CERTA; marker assente = ignoto, non stale).
+- is_stale() = True quando le tabelle applicate non sono certificabili come
+  correnti: marker presente con hash diversi (migrazione), oppure marker
+  ASSENTE con fix già presente (provenienza ignota → si ricostruisce).
 """
 
 import json
@@ -103,11 +104,19 @@ class TestAcpiTablesMarker(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_is_stale_semantics(self):
-        self.assertFalse(self.fix.is_stale())          # marker assente
+        self.assertFalse(self.fix.is_stale())          # nessun fix applicato
         self.fix.apply()
         self.assertFalse(self.fix.is_stale())          # tabelle identiche
         (self.aml / "SSDT-CST.aml").write_bytes(_aml(size=999))
         self.assertTrue(self.fix.is_stale())           # tabelle cambiate
+
+    def test_is_stale_when_provenance_unknown(self):
+        """Marker assente col fix PRESENTE = tabelle applicate non
+        certificabili → va ricostruito (altrimenti una migrazione delle
+        tabelle resta inerte per sempre: il gate guarda la boot entry)."""
+        self.fix.apply()
+        self.marker.unlink()
+        self.assertTrue(self.fix.is_stale())
 
     def test_force_rebuilds_blob_and_updates_marker(self):
         self.fix.apply()

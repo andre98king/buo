@@ -11,6 +11,7 @@ Copre i 3 bug trovati sulla scheda reale (Bazzite ostree, SSH):
 
 import io
 import struct
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -75,6 +76,8 @@ class TestCpuAudit(unittest.TestCase):
         audit = HardwareAudit()
         with mock.patch("os.path.exists", return_value=True), \
              mock.patch("os.geteuid", return_value=0), \
+             mock.patch.object(HardwareAudit, "_governor_confirmed_inactive",
+                               return_value=True), \
              mock.patch("os.open", return_value=3), \
              mock.patch("os.pwrite"), \
              mock.patch("os.pread", return_value=struct.pack("<I", 0xFF)), \
@@ -86,6 +89,8 @@ class TestCpuAudit(unittest.TestCase):
         audit = HardwareAudit()
         with mock.patch("os.path.exists", return_value=True), \
              mock.patch("os.geteuid", return_value=0), \
+             mock.patch.object(HardwareAudit, "_governor_confirmed_inactive",
+                               return_value=True), \
              mock.patch("os.open", return_value=3), \
              mock.patch("os.pwrite"), \
              mock.patch("os.pread", return_value=struct.pack("<I", 0x3C)), \
@@ -96,8 +101,47 @@ class TestCpuAudit(unittest.TestCase):
         audit = HardwareAudit()
         with mock.patch("os.path.exists", return_value=True), \
              mock.patch("os.geteuid", return_value=0), \
+             mock.patch.object(HardwareAudit, "_governor_confirmed_inactive",
+                               return_value=True), \
              mock.patch("os.open", side_effect=OSError("perm")):
             self.assertIsNone(audit._read_core_mask_smn())
+
+    def test_read_core_mask_smn_blocked_with_governor_active(self):
+        """REGOLA SMU (freeze 30/08): con governor attivo NON si tocca
+        l'SMN — niente maschera fabbricata e nessun accesso PCI."""
+        audit = HardwareAudit()
+        with mock.patch("os.path.exists", return_value=True), \
+             mock.patch("os.geteuid", return_value=0), \
+             mock.patch.object(HardwareAudit, "_governor_confirmed_inactive",
+                               return_value=False), \
+             mock.patch("os.open") as open_, \
+             mock.patch("os.pwrite") as pwrite_:
+            self.assertIsNone(audit._read_core_mask_smn())
+        open_.assert_not_called()
+        pwrite_.assert_not_called()
+
+    def test_read_core_mask_smn_blocked_when_governor_state_unknown(self):
+        """Fail-closed: stato governor sconosciuto = accesso NON autorizzato."""
+        audit = HardwareAudit()
+        with mock.patch("os.path.exists", return_value=True), \
+             mock.patch("os.geteuid", return_value=0), \
+             mock.patch.object(HardwareAudit, "_governor_confirmed_inactive",
+                               return_value=None), \
+             mock.patch("os.open") as open_:
+            self.assertIsNone(audit._read_core_mask_smn())
+        open_.assert_not_called()
+
+    def test_governor_confirmed_inactive_semantics(self):
+        """rc 3 (inactive) → True; rc 0 (active) → False; altro/errore → None."""
+        audit = HardwareAudit()
+        for rc, expected in ((3, True), (0, False), (1, None), (127, None)):
+            with mock.patch("subprocess.run",
+                            return_value=subprocess.CompletedProcess(
+                                [], rc, "", "")):
+                self.assertIs(audit._governor_confirmed_inactive(), expected,
+                              f"rc={rc}")
+        with mock.patch("subprocess.run", side_effect=OSError("no systemctl")):
+            self.assertIsNone(audit._governor_confirmed_inactive())
 
 
 class TestGpuCuCountUrm(unittest.TestCase):

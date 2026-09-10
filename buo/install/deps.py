@@ -11,7 +11,7 @@ nelle posizioni attese:
 
     • bc250_smu_oc          → bc250-detect, bc250-apply   (undervolt CPU)
     • bc250-40cu-unlock     → bc250-enable-40cu.sh, health, mask  (GPU)
-    • bc250-acpi-fix        → SSDT-CST.aml               (ACPI C-State)
+    • bc250-acpi-fix        → SSDT-CST/PST.aml           (ACPI C-State/P-State)
     • cyan-skillfish-governor → pacchetto distro (COPR/AUR) — installato
       automaticamente col package manager, nessun installer di terze parti
     • umr                   → pacchetto distro (runtime UMR su ostree)
@@ -157,10 +157,18 @@ def _build_deps() -> List[Dict[str, Any]]:
         },
         {
             "name": "bc250-acpi-fix",
-            "repo": "https://github.com/bc250-collective/bc250-acpi-fix",
+            # Pin MIGRATO (10/09/2026): il vecchio bc250-collective dormiva
+            # dal 23/11/2025 e le sue tabelle coprono solo P000–P00B (6 core)
+            # → sulla nostra macchina 8c/16T le CPU 12–15 restavano SENZA
+            # C-states e senza P-states (`cpuidle_states=0`, `pss_freqs=0`,
+            # nessuna `policy*` cpufreq: girano sempre al massimo). Questo
+            # fork attivo ha gli .aml IN-TREE con P00C–P00F (8 core).
+            # Verificato a mano: CST 990 B sha256 4ed0dfba…, PST 1146 B
+            # sha256 1fb4a2d0…, header AML validi, DSDT dichiara P00C–P00F.
+            "repo": "https://github.com/mendesrr/bc250-acpi-fix-updated-8c",
             "type": "aml",
-            "commit": "1594d72f11d674bd7e46f4e51eee4216155e52fb",
-            "required_for": "tabelle ACPI C-State (risparmio energetico idle)",
+            "commit": "83686c4670f29316bc4c396a9bda75281327a5e3",
+            "required_for": "tabelle ACPI C-State/P-State (6+8 core)",
             "files": [{"src": "SSDT-CST.aml", "dest": None, "exec": False}],
         },
         {

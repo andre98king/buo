@@ -1035,14 +1035,14 @@ class Orchestrator(LoggerMixin):
                 if not proceed:
                     self.logger.warning(
                         "CPU unlock SALTATO (fail-closed): applicare prima "
-                        "la fix ACPI (e-tho/bc250-acpi-fix), poi rieseguire")
+                        "la fix ACPI (mendesrr/bc250-acpi-fix-updated-8c), poi rieseguire")
                     results["cpu"] = {
                         "unlocked": False,
                         "acpi_gate_blocked": True,
                     }
                     self.results["notes"].append(
                         "CPU unlock bloccato dal gate ACPI: fix SSDT-CST/PST "
-                        "mancanti (e-tho/bc250-acpi-fix) — necessario prima "
+                        "mancanti (mendesrr/bc250-acpi-fix-updated-8c) — necessario prima "
                         "di sbloccare gli 8 core (boot loop)"
                     )
                     # F-C (bug sul campo 29/08): il blocco va RICORDATO nel

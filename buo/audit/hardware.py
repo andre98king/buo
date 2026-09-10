@@ -12,6 +12,7 @@ modulo amdgpu patchato. In modalità mock usa MockHardware.
 
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -149,6 +150,27 @@ class HardwareAudit(LoggerMixin):
             "unlocked": mask == CORE_MASK_UNLOCKED if mask is not None else None,
         }
 
+    def _governor_confirmed_inactive(self) -> Optional[bool]:
+        """True SOLO se cyan-skillfish-governor-smu è CONFERMATO inattivo.
+
+        Fail-closed: `systemctl` non eseguibile / rc inatteso → None
+        (stato sconosciuto = NON autorizzato). Serve a proteggere gli
+        accessi SMN: il trigger (PCI config 0xB8/0xBC) è lo STESSO paio
+        usato dal governor, quindi una lettura concorrente corrompe le
+        sue scritture (freeze del SoC osservato sul campo, 30/08).
+        """
+        from ..constants import GOVERNOR_SERVICE
+        try:
+            r = subprocess.run(["systemctl", "is-active", GOVERNOR_SERVICE],
+                               capture_output=True, text=True, timeout=10)
+        except Exception:
+            return None
+        if r.returncode == 3:      # inactive
+            return True
+        if r.returncode == 0:      # active
+            return False
+        return None
+
     def _read_core_mask_smn(self) -> Optional[int]:
         """Legge la core presence mask via SMN (PCI config space).
 
@@ -158,6 +180,16 @@ class HardwareAudit(LoggerMixin):
         """
         try:
             if not (os.path.exists(PCI_CONFIG_PATH) and os.geteuid() == 0):
+                return None
+            # REGOLA SMU (freeze 30/08): MAI leggere l'SMN con il governor
+            # attivo — l'audit gira anche a governor acceso (pre_audit,
+            # `buo doctor`, `buo status`) mentre il reader è già gateato:
+            # senza questo guard la lettura corrompe le scritture del
+            # governor → wedge silenzioso del SoC.
+            if self._governor_confirmed_inactive() is not True:
+                self.logger.info(
+                    "Maschera core non letta: governor SMU attivo o stato "
+                    "sconosciuto (accesso SMN non sicuro)")
                 return None
             import struct
             fd = os.open(PCI_CONFIG_PATH, os.O_RDWR)

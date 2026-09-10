@@ -33,18 +33,17 @@ AGGIORNAMENTO 3 (30/08/2026 — ricerca community, repo ATTIVO):
       del firmware: funziona su 6-core stock e 8-core sbloccati, ed è
       compatibile con i BIOS 1-5 (1.00/2.00/3.00/5.00 condividono lo
       stesso DSDT).
-    • PIN ACPI INVARIATO (fail-closed, supply-chain A7): BUO pinnna
-      ancora bc250-collective/bc250-acpi-fix @ 1594d72 (repo morto dal
-      23/11/2025, unico commit). Motivo: e-tho fornisce i .aml
-      PRECOMPILATI SOLO come asset di release (nel git tree ci sono
-      solo i sorgenti .dsl; .gitignore esclude *.aml), mentre il flusso
-      A7 di BUO clona il checkout pinnato e consuma i file DAL
-      CHECKOUT — non esiste alcun meccanismo di download di asset di
-      release. La migrazione richiederebbe un nuovo percorso
-      supply-chain + adattamento nomi (SSDT-CST.aml → SSDT-CPU.aml) +
-      una decisione funzionale su PST/STUBS: NON forzata finché non c'è
-      un meccanismo compatibile (mai migrare verso qualcosa di
-      incompatibile).
+    • PIN MIGRATO (10/09/2026) → mendesrr/bc250-acpi-fix-updated-8c
+      @ 83686c46. Motivo FUNZIONALE misurato sul campo: le tabelle del
+      vecchio pin coprono solo P000–P00B (6 core) e sulla macchina 8c/16T
+      le CPU 12–15 risultavano SENZA idle e SENZA scaling
+      (`cpuidle_states=0`, `pss_freqs=0`, nessuna `policy*` cpufreq:
+      girano sempre al massimo). Il fork attivo tiene gli .aml IN-TREE
+      (CST 990 B sha256 4ed0dfba…, PST 1146 B sha256 1fb4a2d0…, header
+      AML validi) e aggiunge P00C–P00F: compatibile col flusso A7
+      checkout-based E con la macchina (il DSDT dichiara P00C–P00F, quindi
+      gli External risolvono). Resta valido il fail-closed: il commit è
+      pinnato, i file sono consumati DAL CHECKOUT e validati (`_valid_aml`).
     ⚠️ WARNING BIOS MODDATI: le tabelle BUO possono CONFLIGGERE con
       tabelle già fornite dal firmware moddato (es. 8-core via BIOS con
       tabelle proprie). I duplicati falliscono il load (README e-tho:
@@ -67,12 +66,10 @@ from typing import Any, Dict, Optional
 from ..utils.distro import detect_distro
 from ..utils.logging import LoggerMixin
 
-ACPI_REPO = "https://github.com/bc250-collective/bc250-acpi-fix"
-# Pin A7 invariato (fail-closed): BUO consuma i .aml dal CHECKOUT del
-# repo pinnato (bc250-collective, morto dal 23/11/2025). Il repo ATTIVO
-# e-tho/bc250-acpi-fix (v1.1.0) vende i .aml precompilati solo come
-# asset di release (nel tree solo .dsl) — incompatibile col flusso
-# checkout-based: vedi docstring, AGGIORNAMENTO 3.
+ACPI_REPO = "https://github.com/mendesrr/bc250-acpi-fix-updated-8c"
+# Pin A7: commit esatto, .aml consumati DAL CHECKOUT e validati. Il pin è
+# migrato dal vecchio bc250-collective (dormiente, tabelle solo 6 core) a
+# questo fork attivo con P00C–P00F (8 core): vedi docstring, AGGIORNAMENTO 3.
 AML_CST = "SSDT-CST.aml"
 # Marker (in state_dir) con l'hash delle tabelle APPLICATE: il gate ostree
 # verifica che la entry punti a un blob, non QUALI tabelle contiene.
@@ -140,14 +137,22 @@ class ACPIFix(LoggerMixin):
         return value if isinstance(value, str) and value else None
 
     def is_stale(self) -> bool:
-        """True se le tabelle sul disco sono DIVERSE da quelle applicate.
+        """True se le tabelle APPLICATE non sono certificabili come correnti.
 
-        Marker assente → False (provenienza ignota: non si presume stale;
-        serve un apply esplicito con force).
+        Due casi:
+        - marker presente e hash diversi → tabelle superate (migrazione);
+        - marker ASSENTE ma fix già presente (la entry punta a un nostro
+          blob) → provenienza IGNOTA: non si può dichiarare quali tabelle
+          girano, quindi si ricostruisce. Senza questo caso una migrazione
+          delle tabelle resterebbe inerte per sempre (il gate guarda la
+          entry, non il contenuto del blob).
+        Nessun fix presente → False (ci pensa il normale `apply`).
         """
         applied = self.applied_tables_hash()
         current = self.tables_hash()
-        return bool(applied and current and applied != current)
+        if applied and current:
+            return applied != current
+        return applied is None and current is not None and self.verify()
 
     def _write_marker(self, blob: Optional[str]) -> None:
         """Registra le tabelle applicate (fail-soft: mai eccezioni)."""

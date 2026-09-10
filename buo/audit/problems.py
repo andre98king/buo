@@ -112,7 +112,7 @@ class ProblemDetector(LoggerMixin):
                 "title": "C-State ACPI mancanti",
                 "detail": "Installare SSDT-CST (risparmio energetico in idle). "
                           "Con 8 core sbloccati è richiesta la fix ACPI completa "
-                          "(e-tho/bc250-acpi-fix: SSDT-CPU/PST/STUBS), altrimenti "
+                          "(mendesrr/bc250-acpi-fix-updated-8c: SSDT-CST/PST), altrimenti "
                           "la scheda va in boot loop.",
                 "fix": "acpi",
             })
@@ -123,7 +123,7 @@ class ProblemDetector(LoggerMixin):
                 "title": "P-State ACPI mancanti",
                 "detail": "SSDT-PST assente: gli 8 core sbloccati non hanno "
                           "frequency scaling stabile (800-3200 MHz). Installare "
-                          "e-tho/bc250-acpi-fix (SSDT-CPU/PST/STUBS) PRIMA di "
+                          "mendesrr/bc250-acpi-fix-updated-8c (SSDT-CST/PST) PRIMA di "
                           "sbloccare la CPU, altrimenti boot loop.",
                 "fix": "acpi",
             })
