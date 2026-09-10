@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased
+
+### Aggiunto
+- **T1 — riuso dello stato OC certificato in `unleash`**: `OCReuseGate` + fingerprint
+  del silicio (`silicon_fingerprint`/`machine_silicon_fingerprint`) + mirror della
+  zona anti-hang tier-2 (f ≥3800 → VID ≥1125). Con uno stato OC certificato coerente
+  `unleash` riusa il winner (skip UV CPU e sweep GPU) invece di riesplorare.
+- **T2 — rollback automatico su validate-fail**: se lo stress di validate fallisce
+  la config applicata in QUESTA run viene ripristinata (CPU → `bc250-apply --uninstall`,
+  GPU → bytes pre-run di `config.toml`), il benchmark "after" viene saltato e il
+  ledger ripulito: mai un voltaggio non validato lasciato applicato.
+  ⚠️ Il ripristino CPU RIMUOVE il persist OC: il riepilogo lo dichiara e indica di
+  riapplicare con `buo unleash`.
+- **T3 — prompt a 3 opzioni in optimize** (solo con `--interactive`; senza, scelta
+  deterministica dallo stato).
+- **T4 — `buo oc sweep-gpu`**: lo sweep per-silicio esce da `unleash` (riuso di
+  `GPUUndervoltOptimizer`, esito `oc_dir/gpu-sweep.json`, crash-marker); `unleash`
+  resta la base sicura, non presidiata senza certificato.
+- **T5 — stato OC nell'export G2**: `profile.json` v2 con blocco `oc_state` e
+  riapplicazione in `buo restore` post-format (gate fingerprint → materialize →
+  GPU bytes + servizio attivo → CPU ApplyManager certified; marcatore
+  `oc_state_restored` anti doppio apply).
+- **Validazione post-unlock** CPU 8-core / GPU 40-CU su silici deboli (verdetto
+  `stable_short`, persistenza 40-CU automatica), auto-provvigionamento `vkmark`,
+  cockpit watch-log post-reboot (textual con fallback ANSI) e ticker di progresso
+  nello stress.
+
+### Corretto
+- **ACPI — "applicato" ≠ "verificato" (campo 10/09)**: il gate ostree verificava solo
+  che la boot entry puntasse a un blob, non QUALI tabelle contenesse → una migrazione
+  delle tabelle restava inerte. Ora `ACPIFix` scrive un marker con lo sha256 delle
+  tabelle realmente concatenate, `is_stale()` è fail-closed (marker assente COL fix
+  presente = provenienza ignota → ricostruzione forzata) e `apply(force=True)` ricostruisce
+  il blob dalla base originale (mai concatenare il blob su sé stesso). La fase fix
+  riapplica quando `is_stale()` è vero.
+- **Pin ACPI migrato a 8 core**: `mendesrr/bc250-acpi-fix-updated-8c` @ `83686c46`
+  (tabelle in-tree: CST 990 B / PST 1146 B) sostituisce il pin dormiente
+  `bc250-collective` (tabelle 6 core). Verificato sul campo: i core 12-15 del die
+  sbloccato passano da 0 idle states / 0 P-states a 4 + 8.
+- **Gate SMU nell'audit hardware**: `_read_core_mask_smn()` leggeva il PCI config
+  0xB8/0xBC SENZA verificare il governor — e l'audit gira a governor acceso
+  (pre_audit, `buo doctor`, `buo status`): ora la lettura avviene solo con governor
+  CONFERMATO inattivo (fail-closed), come già fa il reader.
+- **Stress GPU della validate**: il ramo GPU provava `glmark2 --run-forever --seconds N`
+  (opzione inesistente) e non provava mai `vkmark` → su una macchina col solo vkmark la
+  validate falliva SEMPRE e il rollback T2 disinstallava una config CPU buona. Selezione
+  del tool unificata in `buo/utils/gpu_stress.py` (**vkmark primario**, carico realistico;
+  furmark solo se vkmark manca; glmark2 mai), nessun tool = componente non verificabile
+  (non un fallimento). Corretta anche la sintassi vkmark del benchmark.
+- **CWD scrivibile per i tool di stress**: `stress-ng` usa la cwd come temp-path e in
+  un'unità systemd la cwd è `/` (read-only su ostree) → rc=1 in meno di un secondo,
+  validate sempre fallita. `utils.shell.stress_cwd()` (/tmp) è usata da validate, sweep,
+  benchmark e validazione post-unlock.
+- **Diagnosability della validate**: il fallimento ora logga `cpu_rc`/`gpu_rc`, il
+  comando usato e le ultime righe di stderr del tool (il pipe non veniva mai letto).
+- **Report onesto**: niente più falso positivo "C-State/P-State ACPI mancanti" su ostree
+  (le tabelle iniettate via initramfs compaiono come `SSDT1..N`: si usa il segnale della
+  boot entry) e niente più "persistito: sì" dopo che il rollback validate-fail ha
+  rimosso il persist OC.
+- **GTT/VRAM dinamica via kargs** (meccanismo documentato): `ttm.pages_limit=3014656`
+  con transazione `rpm-ostree kargs` staccata; il vecchio `modprobe.d` è inerte su ostree
+  (non entra nell'initramfs) ed è stato rimosso. `verify()` legge il parametro a runtime.
+- **Hint VRAM** allineato alla CLI reale di `bc250_memcfg` (`UMA_SIZE <MB>`), **entry ACPI**
+  scelta sul valore `ostree=` INTERO da `/proc/cmdline` (il regex hardcoded `boot.0`
+  patcha la entry sbagliata), `install-deps` spiega come recuperare un checkout fuori pin.
+- Persistenza 40-CU: il conf full-die viene scritto direttamente (mai regredire alla
+  tabella live) e le operazioni UMR girano solo a governor FERMO.
+
+
 ## v1.4.0 (2026-09-03)
 
 - Revamp output CLI (P0+P1): emoji di prefisso via dal log/console (marcatori preservati), riepilogo finale di run, errori rassicuranti, `buo status` a parole, report/doctor/profiles/sweep allineati.
