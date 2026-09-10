@@ -169,6 +169,32 @@ class TestAcpiOstreeConcat(unittest.TestCase):
             entry = self.fix._default_entry(self.entries)
         self.assertEqual(entry.name, "ostree-2.conf")
 
+    def test_default_entry_boot1_stesso_hash_indice_diverso(self):
+        """CASO CAMPO 10/09: cmdline `ostree=/ostree/boot.1/...` e due entry
+        con lo STESSO hash, indice diverso (ostree:1 = .../1, ostree:0 =
+        .../0). Il regex hardcoded su `boot.0` non matchava → fallback
+        alfabetico → patchava l'entry SBAGLIATA (fix inerte al boot).
+        Deve vincere l'entry del deployment bootato."""
+        (self.entries / "ostree-1.conf").write_text(
+            "title Bazzite (ostree:1)\n"
+            "options ostree=/ostree/boot.1/default/6bc1df/1 rhgb quiet\n"
+            "initrd /initramfs-acpi-old.img\n")
+        (self.entries / "ostree-2.conf").write_text(
+            "title Bazzite (ostree:0)\n"
+            "options ostree=/ostree/boot.1/default/6bc1df/0 rhgb quiet\n"
+            "initrd /initramfs-old.img\n")
+        real_read = Path.read_text
+
+        def fake_read(self_, *a, **k):
+            if str(self_) == "/proc/cmdline":
+                return ("BOOT_IMAGE=... "
+                        "ostree=/ostree/boot.1/default/6bc1df/0 rhgb quiet")
+            return real_read(self_, *a, **k)
+
+        with mock.patch("buo.fix.acpi.Path.read_text", fake_read):
+            entry = self.fix._default_entry(self.entries)
+        self.assertEqual(entry.name, "ostree-2.conf")
+
     def test_default_entry_alphabetical_fallback(self):
         """Senza loader.conf e cmdline ostree → prima *.conf."""
         (self.entries / "ostree-0.conf").write_text(

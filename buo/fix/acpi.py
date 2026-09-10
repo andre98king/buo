@@ -214,8 +214,9 @@ class ACPIFix(LoggerMixin):
 
         Priorità (come systemd-boot):
         1) `default` in loader.conf (es. "ostree-1.conf");
-        2) entry del deployment attualmente bootato (ostree= da
-           /proc/cmdline → hash del boot manifest);
+        2) entry del deployment attualmente bootato (valore `ostree=`
+           COMPLETO da /proc/cmdline: boot.N + hash + indice — il solo
+           hash NON basta: le due entry condividono la boot-dir key);
         3) prima *.conf in ordine alfabetico (fallback).
         """
         conf = loader.parent / "loader.conf"
@@ -235,11 +236,18 @@ class ACPIFix(LoggerMixin):
                 pass
         try:
             cmdline = Path("/proc/cmdline").read_text(errors="replace")
-            m = re.search(r"ostree=/ostree/boot\.0/default/([0-9a-f]+)",
-                          cmdline)
+            # CASO CAMPO 10/09: il match va fatto sul valore ostree= INTERO.
+            # Il vecchio regex era hardcoded su `boot.0` (sulla macchina è
+            # `boot.1`) e catturava solo l'hash: con due entry che
+            # condividono la boot-dir key (indice /0 e /1) sceglieva la
+            # prima alfabetica → fix applicato all'entry SBAGLIATA (inerte
+            # al boot).
+            m = re.search(r"(?:^|\s)ostree=(/ostree/\S+)", cmdline)
             if m:
+                pat = re.compile(r"(?:^|\s)ostree=" + re.escape(m.group(1))
+                                 + r"(?:\s|$)")
                 for entry in sorted(loader.glob("*.conf")):
-                    if m.group(1) in entry.read_text(errors="replace"):
+                    if pat.search(entry.read_text(errors="replace")):
                         return entry
         except Exception:
             pass
