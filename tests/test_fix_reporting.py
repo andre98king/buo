@@ -24,21 +24,27 @@ class _FakeFixer:
     """Fixer controllabile per una classificazione deterministica."""
 
     def __init__(self, verify=False, applied=True, error=None, warning=None,
-                 needs_reboot=False, raise_on_apply=None):
+                 needs_reboot=False, raise_on_apply=None, stale=False):
         self._verify = verify
         self._raise_on_apply = raise_on_apply
+        self._stale = stale
         self._result = {"applied": applied, "needs_reboot": needs_reboot}
         if error is not None:
             self._result["error"] = error
         if warning is not None:
             self._result["warning"] = warning
         self.verify_calls = 0
+        self.forced = None
 
     def verify(self):
         self.verify_calls += 1
         return self._verify
 
-    def apply(self):
+    def is_stale(self):
+        return self._stale
+
+    def apply(self, force=False):
+        self.forced = force
         if self._raise_on_apply is not None:
             raise self._raise_on_apply
         return dict(self._result)
@@ -105,6 +111,25 @@ class TestFixSummaryClassification(unittest.TestCase):
         # Il riepilogo viene loggato chiaramente
         joined = "\n".join(logs.output)
         self.assertIn("Fix NON applicati automaticamente", joined)
+
+    def test_stale_fix_reapplied_with_force(self):
+        """ACPI: tabelle SUPERATE (hash diversi) → riapplicate con force
+        anche se già nel ledger e con `verify()` True (il gate guarda la
+        boot entry, non quali tabelle contiene)."""
+        orch = self._make()
+        orch.checkpoint.set("applied_steps", ["acpi_fix"])
+        for attr in ("fix_iommu", "fix_tlb", "fix_ace", "fix_vram",
+                     "fix_gtt", "fix_fan"):
+            setattr(orch, attr, _FakeFixer(verify=True))
+        stale = _FakeFixer(verify=True, stale=True)
+        orch.fix_acpi = stale
+
+        orch._phase_fix()
+
+        self.assertTrue(stale.forced, "apply(force=True) non chiamato")
+        self.assertFalse(
+            orch.results["fix_results"]["acpi_fix"].get("skipped_checkpoint"))
+        self.assertIn("acpi_fix", orch._applied_steps())
 
     def test_classify_fix_static_rules(self):
         self.assertEqual(Orchestrator._classify_fix({"applied": True}), "applied")

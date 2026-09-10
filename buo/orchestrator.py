@@ -2029,6 +2029,16 @@ class Orchestrator(LoggerMixin):
             self.logger.warning("Persistenza non riuscita: %s",
                                 p.get("error") or "errore sconosciuto")
 
+    @staticmethod
+    def _fix_stale(fixer) -> bool:
+        """True se il fixer dichiara SUPERATE le proprie modifiche.
+
+        Hook opzionale (oggi solo ACPIFix: hash delle tabelle applicate
+        ≠ tabelle su disco). Fixer senza l'hook → mai stale.
+        """
+        probe = getattr(fixer, "is_stale", None)
+        return bool(probe and probe())
+
     def _phase_fix(self) -> Dict[str, Any]:
         """FASE 1b — FIX: TLB, ACE, IOMMU, ACPI, VRAM, GTT, ventole.
 
@@ -2060,16 +2070,25 @@ class Orchestrator(LoggerMixin):
         for name, fixer, enabled in fixers:
             if not enabled:
                 continue
-            if name in done:
+            # Un fixer può dichiarare le proprie modifiche SUPERATE (es. ACPI:
+            # hash delle tabelle applicate ≠ tabelle su disco): il gate
+            # (`verify`) guarda la boot entry, non QUALI tabelle contiene →
+            # senza questo una migrazione delle tabelle resta inerte.
+            # Protocollo: `is_stale()` ⇒ `apply(force=True)`.
+            stale = self._fix_stale(fixer)
+            if name in done and not stale:
                 self.logger.info("Fix %s: già eseguito (checkpoint) — salto",
                                  name)
                 results[name] = {"applied": True, "skipped_checkpoint": True}
                 continue
+            if stale:
+                self.logger.info(
+                    "Fix %s: modifiche superate (hash) — riapplico", name)
             try:
                 if self.dry_run:
                     results[name] = {"applied": True, "dry_run": True}
                     continue
-                if fixer.verify():
+                if fixer.verify() and not stale:
                     # F-B: fix già attivo → NON nel ledger (non è una
                     # modifica di QUESTO run): il rollback non deve
                     # annullarlo. Al resume viene ri-verificato (verify è
@@ -2077,7 +2096,7 @@ class Orchestrator(LoggerMixin):
                     self.logger.info("Fix %s: già attivo — salto", name)
                     results[name] = {"applied": True, "skipped_verified": True}
                     continue
-                result = fixer.apply()
+                result = fixer.apply(force=True) if stale else fixer.apply()
                 results[name] = result
                 if result.get("applied"):
                     self.results["applied_fixes"].append(name)

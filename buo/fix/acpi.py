@@ -53,10 +53,14 @@ AGGIORNAMENTO 3 (30/08/2026 — ricerca community, repo ATTIVO):
       BUO, o rimuovere quelle di BUO.
 """
 
+import hashlib
+import json
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -70,6 +74,9 @@ ACPI_REPO = "https://github.com/bc250-collective/bc250-acpi-fix"
 # asset di release (nel tree solo .dsl) — incompatibile col flusso
 # checkout-based: vedi docstring, AGGIORNAMENTO 3.
 AML_CST = "SSDT-CST.aml"
+# Marker (in state_dir) con l'hash delle tabelle APPLICATE: il gate ostree
+# verifica che la entry punti a un blob, non QUALI tabelle contiene.
+APPLIED_MARKER = "acpi-applied-tables.json"
 
 
 class ACPIFix(LoggerMixin):
@@ -77,7 +84,8 @@ class ACPIFix(LoggerMixin):
 
     def __init__(self, mock: bool = False, mock_hardware=None,
                  aml_dir: Optional[str] = None,
-                 boot_dir: Optional[str] = None):
+                 boot_dir: Optional[str] = None,
+                 marker_path: Optional[str] = None):
         self.mock = mock
         self.mock_hw = mock_hardware
         # Root del boot (ESP): /boot di default, iniettabile nei test
@@ -90,6 +98,78 @@ class ACPIFix(LoggerMixin):
                 aml_dir = str(auto)
         self.aml_dir = Path(aml_dir) if aml_dir else None
         self.distro = detect_distro()
+        # Marker delle tabelle APPLICATE (hash): il gate verifica che l'entry
+        # punti a un blob, non QUALI tabelle contiene — senza marker una
+        # migrazione delle tabelle resta inerte (campo 10/09/2026).
+        self._marker_path = Path(marker_path) if marker_path else None
+
+    @property
+    def marker_path(self) -> Path:
+        """Path del marker (risolto lazy: nessun I/O di stato nel costruttore)."""
+        if self._marker_path is None:
+            from ..utils.paths import state_dir
+            self._marker_path = state_dir() / APPLIED_MARKER
+        return self._marker_path
+
+    # ------------------------------------------------------------------ #
+    # Marker tabelle applicate (hash) — ASTRAZIONE: mai dichiarare
+    # applicate tabelle che non si sono costruite.
+    # ------------------------------------------------------------------ #
+
+    def tables_hash(self) -> Optional[str]:
+        """sha256 deterministico delle tabelle .aml correnti (None se assenti)."""
+        if not self.aml_dir or not Path(self.aml_dir).is_dir():
+            return None
+        files = sorted(p for p in Path(self.aml_dir).glob("*.aml")
+                       if p.is_file())
+        if not files:
+            return None
+        h = hashlib.sha256()
+        for p in files:
+            h.update(p.name.encode())
+            h.update(hashlib.sha256(p.read_bytes()).digest())
+        return h.hexdigest()
+
+    def applied_tables_hash(self) -> Optional[str]:
+        """hash registrato nell'ultimo apply (None se marker assente/rotto)."""
+        try:
+            data = json.loads(self.marker_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        value = data.get("tables_sha256")
+        return value if isinstance(value, str) and value else None
+
+    def is_stale(self) -> bool:
+        """True se le tabelle sul disco sono DIVERSE da quelle applicate.
+
+        Marker assente → False (provenienza ignota: non si presume stale;
+        serve un apply esplicito con force).
+        """
+        applied = self.applied_tables_hash()
+        current = self.tables_hash()
+        return bool(applied and current and applied != current)
+
+    def _write_marker(self, blob: Optional[str]) -> None:
+        """Registra le tabelle applicate (fail-soft: mai eccezioni)."""
+        current = self.tables_hash()
+        if current is None:
+            return
+        files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in sorted(Path(self.aml_dir).glob("*.aml"))
+                 if p.is_file()}
+        data = {
+            "tables_sha256": current,
+            "files": files,
+            "blob": blob,
+            "applied_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            self.marker_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.marker_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+            os.replace(tmp, self.marker_path)
+        except OSError as e:  # pragma: no cover - difesa I/O
+            self.logger.warning("Marker tabelle ACPI non scritto: %s", e)
 
     # ------------------------------------------------------------------ #
 
@@ -126,7 +206,7 @@ class ACPIFix(LoggerMixin):
         except Exception:
             return False
 
-    def apply(self) -> Dict[str, Any]:
+    def apply(self, force: bool = False) -> Dict[str, Any]:
         """Installa le tabelle C-State secondo il metodo della distro."""
         if self.mock and self.mock_hw is not None:
             ok = self.mock_hw.apply_acpi_fix()
@@ -156,7 +236,14 @@ class ACPIFix(LoggerMixin):
         if self.distro.initramfs_tool == "ostree":
             # Bazzite/SteamOS: metodo CONCATENATO validato sul campo
             # (cpio ACPI + initramfs in un blob, UNA riga initrd).
-            return self._install_ostree()
+            out = self._install_ostree(force=force)
+            if out.get("applied") and not out.get("already"):
+                # Marker SOLO quando il blob è stato davvero costruito:
+                # sul ramo "già applicato" la provenienza delle tabelle è
+                # ignota (non si dichiara ciò che non si è costruito).
+                self._write_marker(out.get("blob"))
+                out["tables_sha256"] = self.tables_hash()
+            return out
         return {"applied": False, "error": f"distro non supportata: {self.distro.id}"}
 
     # ------------------------- metodi distro ------------------------- #
@@ -254,7 +341,7 @@ class ACPIFix(LoggerMixin):
         entries = sorted(loader.glob("*.conf"))
         return entries[0] if entries else None
 
-    def _install_ostree(self) -> Dict[str, Any]:
+    def _install_ostree(self, force: bool = False) -> Dict[str, Any]:
         """Bazzite/ostree: initramfs CONCATENATO (metodo validato).
 
         cpio ACPI + initramfs in un blob unico → boot entry (systemd-boot)
@@ -265,6 +352,11 @@ class ACPIFix(LoggerMixin):
         - verifica magic cpio sul blob prima di sostituire la entry;
         - nessuna modifica se qualcosa non quadra (initramfs assente/
           troppo piccolo, blob non valido, righe initrd != 1).
+
+        `force=True` ricostruisce il blob anche se la entry è già a posto
+        (serve per MIGRARE le tabelle: il gate non vede quali contiene).
+        In quel caso la base è l'initramfs ORIGINALE, non il blob
+        precedente (concatenarlo di nuovo anniderebbe i cpio).
         """
         if self.aml_dir is None:
             return {"applied": False, "error": "aml_dir non disponibile"}
@@ -285,14 +377,18 @@ class ACPIFix(LoggerMixin):
                     "error": f"entry senza righe linux/initrd: {entry.name}"}
 
         cur_initrd = m_initrd.group(1)
+        ver = Path(m_linux.group(1)).name.replace("vmlinuz-", "")
+        blob = self.boot_dir / f"initramfs-acpi-{ver}.img"
         # Idempotenza: la entry punta già a un nostro blob valido
-        if self._is_acpi_blob(cur_initrd):
+        if self._is_acpi_blob(cur_initrd) and not force:
             return {"applied": True, "method": "ostree-concat",
                     "needs_reboot": False, "already": True}
 
-        ver = Path(m_linux.group(1)).name.replace("vmlinuz-", "")
-        blob = self.boot_dir / f"initramfs-acpi-{ver}.img"
-        src = self.boot_dir / cur_initrd.lstrip("/")
+        if self._is_acpi_blob(cur_initrd):
+            # Rebuild forzato: base = initramfs originale del kernel
+            src = self.boot_dir / f"initramfs-{ver}.img"
+        else:
+            src = self.boot_dir / cur_initrd.lstrip("/")
         if not src.is_file() or src.stat().st_size < 20 * 1024 * 1024:
             return {"applied": False,
                     "error": f"initramfs originale non valido: {src}"}
@@ -317,7 +413,6 @@ class ACPIFix(LoggerMixin):
         tmp.replace(blob)
 
         # Backup della entry (timestamp unico)
-        from datetime import datetime
         backup = entry.with_name(
             entry.name + f".bak-{datetime.now():%Y%m%d-%H%M%S}")
         backup.write_text(text)
