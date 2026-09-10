@@ -251,6 +251,18 @@ class StressTest(LoggerMixin):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
+        # Diagnosability (bug di campo 10/09): con rc != 0 il comando non
+        # diceva NULLA sul perché (stderr in un pipe mai letto). Qui il
+        # processo è terminato → la lettura non blocca.
+        if proc.returncode != 0:
+            try:
+                err = (proc.stderr.read() or b"").decode(errors="replace")
+            except Exception:  # pragma: no cover - difesa I/O
+                err = ""
+            if err.strip():
+                self.logger.error("Stress: '%s' rc=%s — ultime righe: %s",
+                                  " ".join(cmd), proc.returncode,
+                                  err.strip()[-500:])
         return proc.returncode, cpu_temp_max, gpu_temp_max, power_max
 
     def _mock_run(self, duration_minutes: int,
