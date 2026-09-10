@@ -63,6 +63,29 @@ class TestAuditMock(unittest.TestCase):
         self.assertNotIn("governor_missing", ids)
         self.assertIn("tlb_fault", ids)  # problema sempre presente (stock)
 
+    def test_ostree_acpi_fix_not_reported_as_missing(self):
+        """Falso positivo di campo (10/09): con l'iniezione via initramfs le
+        tabelle NON compaiono per nome in /sys (kernel: SSDT1..N) → il
+        rilevatore le dava per mancanti anche col fix ATTIVO. Il segnale
+        affidabile su ostree è la boot entry (`boot_fix_present`)."""
+        from buo.audit.problems import ProblemDetector
+        det = ProblemDetector(mock=True)
+        injected = {"acpi": {"cst_present": False, "pst_present": False,
+                             "boot_fix_present": True}}
+        ids = [p["id"] for p in det.detect(injected)]
+        self.assertNotIn("acpi_cst_missing", ids)
+        self.assertNotIn("acpi_pst_missing", ids)
+
+    def test_acpi_missing_still_reported_without_fix(self):
+        """Regressione: se NON c'è né iniezione né tabelle → problema reale."""
+        from buo.audit.problems import ProblemDetector
+        det = ProblemDetector(mock=True)
+        absent = {"acpi": {"cst_present": False, "pst_present": False,
+                           "boot_fix_present": False}}
+        ids = [p["id"] for p in det.detect(absent)]
+        self.assertIn("acpi_cst_missing", ids)
+        self.assertIn("acpi_pst_missing", ids)
+
     def test_mock_run_reflects_hardware_state(self):
         """Lo stato MockHardware viene rispecchiato nell'audit."""
         from buo.utils.mock import MockHardware

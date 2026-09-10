@@ -155,6 +155,24 @@ class TestValidateRollback(BaseValidate):
         self.assertIn("stress: fallito", joined)
         self.assertIn("ripristinata", joined)
 
+    def test_riepilogo_does_not_claim_persisted_after_rollback(self):
+        """Bug di campo 10/09: il riepilogo diceva "persistito: sì" anche
+        dopo che il rollback aveva eseguito `bc250-apply --uninstall`."""
+        orch = self._orch()
+        self._seed_cpu_applied(orch)
+        # fase apply come in una run reale: config CPU persistita
+        orch.checkpoint.set_phase("apply", {
+            "applied": True,
+            "cpu_final": {"applied": True, "freq": 3825, "scale": -26,
+                          "vid": 1125, "persistent": True},
+        }, completed=True)
+        data = self._run_validate(orch, passed=False)
+        orch.checkpoint.set_phase("validate", data, completed=True)
+        joined = "\n".join(orch.riepilogo_lines())
+        self.assertIn("persistito: NO", joined)
+        self.assertIn("riapplicare con `buo unleash`", joined)
+        self.assertNotIn("persistito: sì", joined)
+
 
 class TestValidateRollbackEndToEnd(BaseValidate):
     def test_full_run_validate_fail_rolls_back_cpu(self):

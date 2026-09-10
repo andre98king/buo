@@ -105,7 +105,14 @@ class ProblemDetector(LoggerMixin):
             })
 
         acpi = audit.get("acpi", {})
-        if not acpi.get("cst_present", True):
+        # Con l'iniezione via initramfs (metodo ostree/dracut/mkinitcpio) le
+        # tabelle caricate NON compaiono con il loro nome in /sys/firmware/
+        # acpi/tables: il kernel le espone come SSDT1..N → `cst_present` /
+        # `pst_present` sono FALSI anche col fix attivo (falso positivo di
+        # campo). Il segnale affidabile è la boot entry col blob concatenato
+        # (`boot_fix_present`), la stessa cosa che verifica il gate del fix.
+        acpi_injected = bool(acpi.get("boot_fix_present"))
+        if not acpi_injected and not acpi.get("cst_present", True):
             problems.append({
                 "id": "acpi_cst_missing",
                 "severity": "media",
@@ -116,7 +123,7 @@ class ProblemDetector(LoggerMixin):
                           "la scheda va in boot loop.",
                 "fix": "acpi",
             })
-        if not acpi.get("pst_present", True):
+        if not acpi_injected and not acpi.get("pst_present", True):
             problems.append({
                 "id": "acpi_pst_missing",
                 "severity": "media",

@@ -3479,8 +3479,19 @@ class Orchestrator(LoggerMixin):
                 cpu += " · scale %d" % cpu_final["scale"]
             if cpu_final.get("vid") is not None:
                 cpu += " · VID %d mV" % cpu_final["vid"]
-            cpu += " · persistito: %s" % (
-                "sì" if cpu_final.get("persistent") else "no")
+            # Onestà del report (bug di campo 10/09): se la validate è fallita
+            # il rollback T2 ha eseguito `bc250-apply --uninstall` → la config
+            # NON è più persistita, anche se al momento dell'apply lo era.
+            # Dichiarare "persistito: sì" qui sarebbe falso.
+            rolled_back = bool(
+                (self.checkpoint.get_phase("validate")
+                 .get("data", {}) or {}).get("config_rollback", {}).get("cpu"))
+            if rolled_back:
+                cpu += " · persistito: NO (rimosso dal rollback validate-fail"
+                cpu += " — riapplicare con `buo unleash`)"
+            else:
+                cpu += " · persistito: %s" % (
+                    "sì" if cpu_final.get("persistent") else "no")
             lines.append(cpu)
 
         optimize_data = (self.checkpoint.get_phase("optimize")
