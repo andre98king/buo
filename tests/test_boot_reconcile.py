@@ -409,7 +409,10 @@ class UnitTestCase(unittest.TestCase):
     def test_unit_name_and_no_boot_block_protection(self):
         self.assertEqual(BOOT_UNIT, "buo-boot-reconcile.service")
         # Un fallimento dell'agente non deve bloccare il boot
-        self.assertIn("SuccessExitStatus=0 1", unit_content("/usr/bin/python3"))
+        # Il reboot di riparazione termina l'agente con SIGTERM: non deve
+        # risultare "failed" nel journal (era cosi' nel primo test sul campo).
+        self.assertIn("SuccessExitStatus=0 1 SIGTERM",
+                      unit_content("/usr/bin/python3"))
 
 
 if __name__ == "__main__":

@@ -369,6 +369,9 @@ class BootReconciler(LoggerMixin):
             # Sempre: lo stop qui sopra ha cancellato lo start job del boot.
             self._start_governor()
         unlocked = bool(out.get("unlocked") or out.get("mask") == "0xFF")
+        # Visibile SUBITO: se poi si riavvia, l'output del comando viene troncato
+        self.logger.warning("8 core: maschera %s (dettaglio: %s)",
+                            "riscritta" if unlocked else "NON confermata", out)
         return {"unlocked": unlocked,
                 "needs_reboot": unlocked,
                 "detail": out}
@@ -446,6 +449,9 @@ class BootReconciler(LoggerMixin):
             return {"rebooted": False, "dry_run": True}
         self._write_attempts(attempts + 1)
         self._force_warm_reset()
+        self.logger.warning(
+            "Riavvio WARM (tentativo %d/%d) per attivare la riparazione: %s",
+            attempts + 1, self.max_attempts, "; ".join(self.degraded(check)))
         return self._reboot_fn()
 
     def _force_warm_reset(self) -> Optional[str]:
@@ -498,7 +504,7 @@ ExecStart={python} -m buo boot-reconcile --boot
 RemainAfterExit=yes
 # Il reboot per attivare l'unlock è deciso dall'agente (tetto tentativi +
 # gate gioco): un fallimento dell'agente NON deve bloccare il boot.
-SuccessExitStatus=0 1
+SuccessExitStatus=0 1 SIGTERM
 
 [Install]
 WantedBy=graphical.target
