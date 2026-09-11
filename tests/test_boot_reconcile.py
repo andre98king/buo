@@ -81,6 +81,31 @@ class FakeAcpi:
         return self.apply_result
 
 
+class FakeGPU:
+    """GPU40CUUnlock finto: nessun accesso UMR, nessuna scrittura.
+
+    target_cu_count() = None riproduce l'opt-in off (extra non gestite).
+    """
+
+    def __init__(self, target=40, routed=True, apply_result=None):
+        self.target = target
+        self.routed = routed
+        self.apply_result = apply_result or {"applied": True, "cu_count": 40}
+        self.reads = 0
+        self.applies = 0
+
+    def target_cu_count(self):
+        return self.target
+
+    def is_enabled(self):
+        self.reads += 1
+        return self.routed
+
+    def apply(self, wgps=None):
+        self.applies += 1
+        return self.apply_result
+
+
 class Responder:
     """Sostituto di `run_command` per systemctl (nessun comando reale)."""
 
@@ -155,6 +180,7 @@ class ReconcilerTestCase(unittest.TestCase):
             cmdline_path=self.cmdline,
             reboot_mode_path=self.mode,
             verdict=kwargs.pop("verdict", FakeVerdict()),
+            gpu=kwargs.pop("gpu", None),
             reboot_fn=kwargs.pop("reboot_fn", self.fake_reboot),
             game_check_fn=kwargs.pop("game_check_fn",
                                      lambda: self.game[0]),
@@ -393,6 +419,120 @@ class ReconcilerTestCase(unittest.TestCase):
         self.assertTrue(any("thread" in p for p in problems))
         self.assertTrue(any("governor" in p for p in problems))
         self.assertTrue(any("ACPI" in p for p in problems))
+
+    # ------------------------------------------------------------------ #
+    # CU GPU (opt-in): il routing UMR è volatile come la maschera core.   #
+    # La verifica richiede l'UMR → governor fermo CONFERMATO; la          #
+    # riparazione è il re-enable della maschera TARGET (`apply()`), mai   #
+    # "enable all", e non richiede reboot. Con l'opt-in off (target 24)   #
+    # l'agente non legge e non tocca nulla.                                #
+    # ------------------------------------------------------------------ #
+
+    def test_opt_out_touches_nothing(self):
+        """Opt-in off: le CU extra non sono gestite → nessuna lettura."""
+        gpu = FakeGPU(target=None)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = self.make(gpu=gpu).reconcile()
+        self.assertNotIn("gpu_cu", report)
+        self.assertEqual((gpu.reads, gpu.applies), (0, 0))
+        self.assertEqual(self.gov.stop_calls, 0, "governor mai fermato")
+        self.assertTrue(report["healthy"])
+
+    def test_no_gpu_injected_is_inert(self):
+        """Senza dipendenza iniettata la parte GPU non esiste (mai un
+        oggetto reale costruito di nascosto: l'UMR richiede il governor
+        VERO fermo)."""
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = self.make().reconcile()
+        self.assertNotIn("gpu_cu", report)
+        self.assertEqual(self.gov.stop_calls, 0)
+        self.assertTrue(report["healthy"])
+
+    def test_routing_lost_is_re_enabled_without_reboot(self):
+        """Maschera target non instradata (BUGS #24) → re-enable runtime."""
+        gpu = FakeGPU(target=40, routed=False)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = self.make(gpu=gpu).reconcile()
+        self.assertEqual(gpu.reads, 1)
+        self.assertEqual(gpu.applies, 1)
+        self.assertTrue(report["gpu_cu"]["repaired"])
+        self.assertEqual(self.gov.stop_calls, 1, "governor fermo per l'UMR")
+        self.assertGreaterEqual(self.gov.start_calls, 1,
+                                "governor riavviato dopo l'accesso")
+        self.assertEqual(self.reboot_calls, [], "riparazione runtime")
+        self.assertTrue(report["healthy"])
+
+    def test_routing_ok_only_reads(self):
+        gpu = FakeGPU(target=36, routed=True)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = self.make(gpu=gpu).reconcile()
+        self.assertEqual((gpu.reads, gpu.applies), (1, 0))
+        self.assertTrue(report["gpu_cu"]["routed_ok"])
+        self.assertEqual(self.gov.start_calls, 1)
+        self.assertTrue(report["healthy"])
+
+    def test_never_enable_all_blocks_the_re_enable(self):
+        """Verdetto di condanna: `apply()` rifiuta → stato segnalato."""
+        gpu = FakeGPU(target=40, routed=False,
+                      apply_result={"applied": False,
+                                    "reason": "all_extra_condemned"})
+        rec = self.make(gpu=gpu)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = rec.reconcile()
+            # come `buo boot-reconcile`: a fine run la fotografia è una
+            # check() nuova e la verifica CU della run resta visibile (l'UMR
+            # non si rilegge senza fermare il governor)
+            problems = rec.degraded()
+        self.assertFalse(report["gpu_cu"]["repaired"])
+        self.assertNotIn("healthy", report)
+        self.assertTrue(any("CU GPU" in p and "all_extra_condemned" in p
+                            for p in problems), problems)
+        self.assertGreaterEqual(self.gov.start_calls, 1)
+
+    def test_unknown_governor_state_blocks_the_umr_read(self):
+        gpu = FakeGPU(target=40)
+        with patch("buo.state.reconcile.run_command",
+                   self.responder(gov_state=None)):
+            report = self.make(gpu=gpu).reconcile()
+        self.assertEqual(gpu.reads, 0, "nessun accesso UMR")
+        self.assertIn("non determinabile", report["gpu_cu"]["error"])
+        self.assertIn("CU GPU", "; ".join(self.make(gpu=gpu).degraded(
+            report["checked"])))
+
+    def test_transient_governor_state_blocks_the_umr_read(self):
+        """`activating` NON è 'fermo': fail-closed (mai UMR col governor)."""
+        gpu = FakeGPU(target=40)
+        self.gov.stop_ok = False
+        with patch("buo.state.reconcile.run_command",
+                   self.responder(gov_state="activating")):
+            report = self.make(gpu=gpu).reconcile()
+        self.assertEqual((gpu.reads, gpu.applies), (0, 0))
+        self.assertIn("non confermato FERMO", report["gpu_cu"]["error"])
+
+    def test_dry_run_reads_nothing(self):
+        gpu = FakeGPU(target=40, routed=False)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = self.make(dry_run=True, gpu=gpu).reconcile()
+        self.assertEqual((gpu.reads, gpu.applies), (0, 0))
+        self.assertEqual(self.gov.stop_calls, 0)
+        self.assertTrue(report["gpu_cu"]["dry_run"])
+
+    def test_check_reports_the_target_without_umr(self):
+        """check() è di sola lettura: dice il TARGET, non legge i registri."""
+        gpu = FakeGPU(target=40)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            state = self.make(gpu=gpu).check()
+        self.assertEqual(state["gpu_cu_target"], 40)
+        self.assertIsNone(state["gpu_cu"])
+        self.assertEqual(gpu.reads, 0)
+
+    def test_kill_switch_skips_the_gpu_step(self):
+        self.cmdline.write_text(f"rhgb {KILL_SWITCH}\n")
+        gpu = FakeGPU(target=40)
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = self.make(gpu=gpu).reconcile()
+        self.assertEqual((gpu.reads, gpu.applies), (0, 0))
+        self.assertNotIn("gpu_cu", report)
 
 
 class UnitTestCase(unittest.TestCase):

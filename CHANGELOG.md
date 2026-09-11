@@ -42,6 +42,32 @@
   tabelle 8-core (ogni transazione ostree rigenera le entry e la più nuova,
   senza blob, diventa quella di default).
 
+### Aggiunto — politica CU extra (ricerca 2026)
+- **Le 16 CU extra non sono piu' il default**: si abilitano solo con
+  `phases.probe.gpu_extra_cu: true` (default `false` = **24 CU stock**) e la
+  maschera persistita al boot e' **derivata** dalle WGP validate meno quelle
+  condannate — mai piu' `0x1f,0x1f,0x1f,0x1f` scritto a mano. Motivazione
+  (fonti 2026): l'unlock e' di natura *compute* (glmark2 +4,4%, giochi 1080p
+  +17/28% ma CPU-bound, LLM +1,5-1,6x) con costi reali (+30 W/+4 °C a 1500 MHz;
+  a 2 GHz 181 W e 96 °C; test sostenuto: 107 °C GPU / 100 °C CPU e throughput
+  -10%; efficienza 4,18 -> 2,98 tok/s/W; un caso misurato PERDE l'11%) e su
+  ~26% delle board i CU extra sono difettosi, mentre su questa APU un fault GPU
+  **non e' recuperabile** (niente reset: freeze/schermo nero).
+- **Maschere WGP come punto unico** (`constants.py`): parse/encode fail-closed,
+  granularita' 2 CU (24/26/.../40), `mask_from_wgps`/`wgps_from_mask`/
+  `cu_count_from_mask`, `parse_wgp` con validazione `SE.SH.WGP`.
+- **Verdetto per-WGP** (`wgps_condemned`): una board con coppie guaste resta a
+  **32/36 CU** invece di tornare a 24 (retro-compatibile con `never_enable_all`).
+- **Percorso cumulativo live** `buo oc cu-live SE.SH.WGP`: una WGP alla volta a
+  runtime, zero reboot, accanto alla maratona per-WGP da ~20 reboot (che ha
+  causato black screen a diversi utenti: va usata solo con presidio).
+- **Rilevatore di fault GPU** (`validate/gpu_faults.py`, solo `journalctl -b -k`)
+  + **rollback automatico a 24 CU** quando compaiono firme di fault con le CU
+  extra attive (persistenza disattivata, verdetto registrato; nessuna
+  attribuzione per-WGP: il fault e' di ring/driver).
+- **Guardie**: curva GPU **<= 900 mV** prima di abilitare le CU extra, unico
+  punto di scrittura maschera con allowlist dei comandi che azzerano la CC.
+
 ### Corretto (rifinitura 11/09 sera — audit sistematico delle stesse classi di bug)
 
 - **Sicurezza SMU: nessun accesso col governor in stato incerto.** `_do_cpu_unlock`

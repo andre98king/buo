@@ -637,6 +637,7 @@ def boot_reconcile(check: bool, mock: bool, install_flag: bool,
     from .optimize.governor import GovernorWrapper
     from .state.reconcile import BootReconciler, install_unit, uninstall_unit
     from .unlock.cpu import CPUUnlock
+    from .unlock.gpu import GPU40CUUnlock
     from .utils.mock import MockHardware
 
     show_header()
@@ -666,6 +667,9 @@ def boot_reconcile(check: bool, mock: bool, install_flag: bool,
         cpu=CPUUnlock(mock=mock, mock_hardware=hw),
         governor=GovernorWrapper(mock=mock, mock_hardware=hw),
         acpi=ACPIFix(mock=mock, mock_hardware=hw),
+        # CU GPU: iniettata esplicitamente (mai un default nascosto: is_enabled
+        # legge via UMR e col governor attivo sarebbe un accesso SMU vietato).
+        gpu=GPU40CUUnlock(mock=mock, mock_hardware=hw),
         dry_run=check or mock,
         boot_run=boot_run,
     )

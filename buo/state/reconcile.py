@@ -15,7 +15,11 @@ volatile o vive altrove:
 - il **governor GPU** può non partire al boot (niente curva 800 mV, GPU a
   stock) e nessuna fase di BUO se ne accorgeva;
 - le **tabelle ACPI** vivono nella entry BLS bootata: ogni transazione ostree
-  rigenera le entry e le tabelle spariscono in silenzio.
+  rigenera le entry e le tabelle spariscono in silenzio;
+- la **maschera WGP** delle CU extra (opt-in `phases.probe.gpu_extra_cu`) è
+  volatile allo stesso modo: se il servizio non l'ha riapplicata la macchina
+  gira a 24 CU invece di 32/36/40 (BUGS #24) → verificata e riabilitata
+  (sempre la maschera TARGET, mai "enable all"; nessun reboot: è runtime).
 
 Questo modulo verifica l'EFFETTO REALE (thread online, governor attivo, entry
 bootata) e ripara solo ciò che manca, con un tetto di tentativi persistente e
@@ -91,11 +95,21 @@ class BootReconciler(LoggerMixin):
                  reboot_mode_path: Path = Path("/sys/kernel/reboot/mode"),
                  reboot_fn=None, game_check_fn=None, verdict=None,
                  boot_run: bool = False,
-                 services: tuple = BOOT_SERVICES):
+                 services: tuple = BOOT_SERVICES,
+                 gpu=None):
         # Dipendenze iniettate (testabilità: mai hardware reale nei test).
         self.cpu = cpu
         self.governor = governor
         self.acpi = acpi
+        # GPU40CUUnlock: le CU extra (opt-in) si verificano solo se iniettato
+        # — `None` = parte GPU non gestita dall'agente. MAI un default reale:
+        # `is_enabled()` legge via UMR e costruirlo qui fuori dal controllo dei
+        # test significherebbe accessi UMR col governor VERO attivo.
+        self.gpu = gpu
+        # Ultima verifica delle CU GPU in QUESTA run (la lettura richiede il
+        # governor fermo → `check()` non può rifarla): senza cache il report
+        # finale di `buo boot-reconcile` non vedrebbe un re-enable fallito.
+        self._gpu_cu: Optional[Dict[str, Any]] = None
         self.dry_run = dry_run
         self.expected_threads = expected_threads
         self.max_attempts = max_attempts
@@ -279,7 +293,28 @@ class BootReconciler(LoggerMixin):
             "kargs": self._kargs(),
             "attempts": self._read_attempts(),
             "kill_switch": self.kill_switch(),
+            # CU GPU: solo il TARGET si legge senza toccare nulla (opt-in +
+            # verdetto). Lo stato LIVE richiede l'UMR (governor fermo) → lo
+            # riempie `_verify_gpu_cu`, non questa fotografia di sola lettura.
+            "gpu_cu_target": self.gpu_cu_target(),
+            "gpu_cu": self._gpu_cu,
         }
+
+    def gpu_cu_target(self) -> Optional[int]:
+        """CU della maschera TARGET delle CU extra (None = non gestite).
+
+        Lettura PURA: opt-in off (default prudente) → None, cioè le CU extra
+        non sono gestite da BUO e l'agente non deve né segnalarle né
+        toccarle (stesso ramo E4-bis dell'orchestratore). Nessun accesso UMR:
+        è la guardia di `_verify_gpu_cu`.
+        """
+        if self.gpu is None:
+            return None
+        try:
+            return self.gpu.target_cu_count()
+        except Exception as e:  # pragma: no cover - difesa
+            self.logger.warning("Target CU GPU non determinabile: %s", e)
+            return None
 
     def degraded(self, state: Optional[Dict[str, Any]] = None) -> List[str]:
         """Elenco dei pezzi NON a posto (per log e report)."""
@@ -292,6 +327,16 @@ class BootReconciler(LoggerMixin):
             problems.append(f"governor GPU: {st['governor_state']}")
         if not st["acpi_ok"]:
             problems.append("tabelle ACPI non caricate (entry bootata)")
+        cu = st.get("gpu_cu") or {}
+        if cu.get("error"):
+            problems.append("CU GPU: stato non verificabile — "
+                            + str(cu["error"]))
+        elif cu.get("routed_ok") is False and not cu.get("repaired"):
+            why = (cu.get("repair") or {}).get("reason") \
+                or (cu.get("repair") or {}).get("error") or ""
+            problems.append(
+                "CU GPU: maschera target non instradata (attese %s CU)%s"
+                % (cu.get("target"), f" — {why}" if why else ""))
         for name, ok in st["services"].items():
             if ok is None:
                 problems.append(f"stato del servizio non determinabile: {name}")
@@ -320,6 +365,18 @@ class BootReconciler(LoggerMixin):
             report["skipped"].append(
                 f"kill-switch {KILL_SWITCH} presente in cmdline — nessuna azione")
             return report
+
+        # CU GPU (opt-in): il routing UMR è volatile come la maschera core e
+        # dopo un cold boot o un cambio deployment il servizio può non averlo
+        # riapplicato (BUGS #24). Verifica e riparazione richiedono l'UMR →
+        # governor fermo, quindi NON stanno nel check() di sola lettura.
+        gpu_cu = self._verify_gpu_cu()
+        if gpu_cu is not None:
+            # riusata da check()/degraded() a fine run (vedi __init__)
+            self._gpu_cu = gpu_cu
+            report["gpu_cu"] = gpu_cu
+            check["gpu_cu"] = gpu_cu
+
         if not self.degraded(check):
             # Stato sano: il contatore dei tentativi si azzera (un cold boot
             # futuro riparte con il budget pieno).
@@ -358,6 +415,65 @@ class BootReconciler(LoggerMixin):
             report["reboot"] = self._reboot_guarded(check)
             report["rebooted"] = bool(report["reboot"].get("rebooted"))
         return report
+
+    def _verify_gpu_cu(self) -> Optional[Dict[str, Any]]:
+        """Verifica (e ripara) la maschera delle CU GPU — runtime, senza reboot.
+
+        La maschera WGP è volatile come quella core: se il servizio non l'ha
+        riapplicata, con l'opt-in attivo la macchina gira a 24 CU invece delle
+        32/36/40 validate. La riparazione è il re-enable della maschera
+        **TARGET** (`gpu.apply()`: opt-in, WGP condannate e guardie curva
+        rispettate — MAI "enable all") e non serve un reboot: è runtime UMR.
+
+        Guardie: con opt-in off il target è 24 CU e le extra NON sono gestite
+        → nessuna lettura e nessuna scrittura (ramo E4-bis dell'orchestratore);
+        `is_enabled()` passa dall'UMR, quindi si legge SOLO col governor
+        confermato fermo (`ActiveState` inactive/failed). Un verdetto
+        `never_enable_all` non blocca la verifica ma blocca il re-enable:
+        `apply()` rifiuta da solo. None = niente da fare.
+        """
+        if self.gpu is None:
+            return None
+        target = self.gpu_cu_target()
+        if target is None:
+            return None                    # extra non gestite (opt-in off)
+        if self.dry_run:
+            return {"target": target, "dry_run": True}
+        state = self.governor_state()
+        if state is None:
+            return {"target": target,
+                    "error": "stato del governor non determinabile — lettura "
+                             "UMR annullata (mai registri GPU col governor "
+                             "attivo: freeze del SoC)"}
+        stopped_here = False
+        if state not in INACTIVE_STATES:
+            try:
+                stopped_here = bool(self.governor.stop())
+            except Exception:
+                stopped_here = False
+            if not stopped_here or self.governor_state() not in INACTIVE_STATES:
+                return {"target": target,
+                        "error": "governor non confermato FERMO — lettura UMR "
+                                 "annullata"}
+        try:
+            routed_ok = bool(self.gpu.is_enabled())
+            out: Dict[str, Any] = {"target": target, "routed_ok": routed_ok}
+            if not routed_ok:
+                self.logger.warning(
+                    "CU GPU: maschera target (%d CU) NON instradata — "
+                    "riabilito (il routing UMR è volatile come la maschera "
+                    "core)", target)
+                out["repair"] = self.gpu.apply()
+                out["repaired"] = bool(out["repair"].get("applied"))
+            return out
+        except Exception as e:
+            return {"target": target, "error": str(e)}
+        finally:
+            # Lezione campo 11/09: se siamo stati NOI a fermare il governor,
+            # lo stop ha cancellato lo start job del boot → va riavviato su
+            # OGNI percorso di uscita (lo fa anche il passo 3 del reconcile).
+            if stopped_here:
+                self._start_governor()
 
     def _reunlock(self, check: Dict[str, Any]) -> Dict[str, Any]:
         """Riscrive la maschera core con il governor davvero fermo."""
@@ -518,7 +634,7 @@ def unit_content(python: str) -> str:
     """
     return f"""# BUO boot reconcile — generato automaticamente da `buo boot-reconcile --install`
 [Unit]
-Description=BUO boot reconcile (BC-250: 16 thread, governor GPU, tabelle ACPI)
+Description=BUO boot reconcile (BC-250: 16 thread, governor GPU, CU, ACPI)
 Documentation=man:buo(1)
 After=bc250-cu-live-manager.service
 Before=graphical.target

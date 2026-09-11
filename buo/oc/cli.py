@@ -16,6 +16,7 @@ BUO (/var/lib/buo/state.json) — da non confondere con la fase legacy
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +24,7 @@ import click
 
 from ..constants import GPU_FREQ_STEPS
 from ..utils.paths import SYSTEM_STATE_DIR, state_dir
-from .constants import OC_DIR_DEFAULT
+from .constants import CU_LIVE_FILE, CU_LIVE_SCHEMA, OC_DIR_DEFAULT
 
 try:
     from rich.console import Console
@@ -371,10 +372,89 @@ def oc_heal(mock, dry_run, oc_dir) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _cu_live_path(oc_dir) -> Path:
+    return _path(oc_dir) / CU_LIVE_FILE
+
+
+def read_cu_live(oc_dir) -> list:
+    """Prove registrate dal percorso cumulativo ([] se assente/illeggibile).
+
+    Mai eccezione (fail-soft): un file corrotto è "nessuna prova nota", non
+    un errore che blocca il test.
+    """
+    try:
+        data = json.loads(_cu_live_path(oc_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("schema") != CU_LIVE_SCHEMA:
+        return []
+    tries = data.get("tries")
+    if not isinstance(tries, list):
+        return []
+    return [t for t in tries if isinstance(t, dict)]
+
+
+def record_cu_live(oc_dir, wgps, out=None) -> bool:
+    """Registra una prova RIUSCITA di `cu-live` (fail-soft: mai bloccante).
+
+    Il percorso cumulativo è human-in-the-loop (una WGP per volta + test
+    reale): senza traccia, chi conduce il test non sa cosa ha già provato.
+    Una ri-esecuzione con le stesse WGP aggiorna la voce (non la duplica).
+    """
+    entry = {"wgps": sorted(str(w) for w in wgps), "esito": "applicato",
+             "cu_count": (out or {}).get("cu_count"),
+             "mask": (out or {}).get("mask"),
+             "at": datetime.now(timezone.utc).isoformat()}
+    tries = [t for t in read_cu_live(oc_dir) if t.get("wgps") != entry["wgps"]]
+    tries.append(entry)
+    try:
+        from .apply import _write_json_atomic
+        _write_json_atomic(_cu_live_path(oc_dir),
+                           {"schema": CU_LIVE_SCHEMA,
+                            "updated_at": entry["at"], "tries": tries})
+    except Exception as e:
+        # Mai bloccare l'operazione (le CU extra SONO state abilitate): il
+        # tracciamento è un diario, non una precondizione.
+        if console:
+            console.print(f"[yellow]⚠️ tracciamento cu-live non scritto: "
+                          f"{e}[/]")
+        else:
+            click.echo(f"WARN: tracciamento cu-live non scritto: {e}",
+                       err=True)
+        return False
+    return True
+
+
+def _print_cu_live(oc_dir) -> None:
+    """Mostra le prove registrate (`cu-live --show`: nessuna UI nuova)."""
+    tries = read_cu_live(oc_dir)
+    if console is None:
+        click.echo(json.dumps(tries, ensure_ascii=False))
+        return
+    if not tries:
+        console.print(f"[yellow]Nessuna prova registrata[/] "
+                      f"({_cu_live_path(oc_dir)})")
+        console.print("[dim]`buo oc cu-live SE.SH.WGP` registra ogni prova "
+                      "riuscita; il test reale e il suo esito sono a carico "
+                      "di chi conduce il protocollo.[/]")
+        return
+    table = Table(title="cu-live · WGP extra già provate")
+    for col in ("provate", "CU", "esito", "quando"):
+        table.add_column(col)
+    for t in tries:
+        table.add_row(",".join(t.get("wgps") or []),
+                      str(t.get("cu_count") or "-"),
+                      str(t.get("esito") or "-"),
+                      str(t.get("at") or "-"))
+    console.print(table)
+
+
 @oc_group.command("cu-live")
 @_oc_opts
-@click.argument("wgps")
-def oc_cu_live(mock, dry_run, oc_dir, wgps) -> None:
+@click.argument("wgps", required=False)
+@click.option("--show", is_flag=True,
+              help="Mostra le prove già registrate (nessuna scrittura)")
+def oc_cu_live(mock, dry_run, oc_dir, wgps, show) -> None:
     """Abilita a RUNTIME le WGP extra indicate (cumulativo, senza reboot).
 
     `wgps` = CSV di WGP EXTRA in forma SE.SH.WGP, es. "0.1.3" oppure
@@ -382,13 +462,21 @@ def oc_cu_live(mock, dry_run, oc_dir, wgps) -> None:
     (si richiama il comando aggiungendo la WGP successiva), alternativa
     alla maratona per-WGP (~20 reboot, solo con presidio). Richiede
     l'opt-in `phases.probe.gpu_extra_cu=true` e la curva GPU conservativa
-    (≤900 mV): con 40 CU una curva aggressiva porta la GPU a 96-107 °C.
+    (≤900 mV, o certificata dallo sweep per-silicio): con 40 CU una curva
+    aggressiva porta la GPU a 96-107 °C.
     La maschera è DERIVATA (mai 0x1f a mano) e le WGP condannate dal
     verdetto durevole restano escluse; si riparte sempre da 24 CU, quindi
     il routing non include mai una WGP non validata. Il governor è fermato
     da BUO durante l'accesso ai registri (regola SMU) e riavviato dopo.
+    Ogni prova riuscita è registrata in oc_dir/gpu-cu-live.json
+    (`--show` per vederle).
     """
     from ..unlock.gpu import GPU40CUUnlock
+    if show:
+        _print_cu_live(oc_dir)
+        return
+    if not wgps:
+        raise click.UsageError("serve una WGP extra (SE.SH.WGP) o --show")
     _warn_if_not_system(oc_dir)
     sim = mock or dry_run
     ids = [w.strip() for w in wgps.split(",") if w.strip()]
@@ -408,6 +496,11 @@ def oc_cu_live(mock, dry_run, oc_dir, wgps) -> None:
         for key in ("note", "error"):
             if out.get(key):
                 console.print(f"[dim]{out[key]}[/]")
+    if applied and not sim:
+        # le WGP REGISTRATE sono quelle davvero instradate (`wgps` dell'esito:
+        # una WGP condannata dal verdetto viene esclusa dalla maschera), non
+        # quelle chieste sulla riga di comando
+        record_cu_live(oc_dir, out.get("wgps") or ids, out)
     if not applied and not sim:
         sys.exit(1)
 

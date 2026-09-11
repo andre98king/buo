@@ -29,14 +29,17 @@ CU extra sono realmente difettosi e **un fault GPU su questa APU non è
 recuperabile** (niente GPU reset: freeze/schermo nero). Default: 24 CU.
 """
 
+import json
 import os
-import re
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..constants import (GOVERNOR_CONFIG, MASK_ALL_40, MASK_STOCK_24,
                          cu_count_from_mask, extra_wgps, mask_from_wgps,
                          parse_wgp, stock_wgps)
+from ..oc.constants import OC_DIR_DEFAULT, SWEEP_FILE
+from ..oc.gpu import parse_gpu_config
 from ..utils.logging import LoggerMixin
 from .wrappers.bc250_40cu import BC25040CUWrapper
 from .wrappers.bc250_live_manager import BC250LiveManagerWrapper
@@ -54,8 +57,13 @@ class GPU40CUUnlock(LoggerMixin):
     # le CU extra: 1500 MHz / 900 mV è la curva conservativa consigliata.
     # Con 40 CU una curva aggressiva (es. 2000 MHz / 1000 mV) costa 176-181 W
     # e 96 °C, in test sostenuto GPU 107 °C con throughput −10%: si abilitano
-    # le CU solo a curva conservativa (o su curva già certificata a ≤900 mV).
+    # le CU solo a curva conservativa — o su una curva CERTIFICATA dallo
+    # sweep per-silicio (misurata stabile su QUESTO chip, vedi
+    # `_certified_points`), che è la seconda fonte ammessa.
     CURVE_MAX_MV = 900
+    # Esito dello sweep per-silicio (oc_dir/gpu-sweep.json): percorso
+    # iniettabile nei test; None → OC_DIR_DEFAULT/gpu-sweep.json.
+    sweep_result_path: Optional[str] = None
     # Comandi del live-manager che azzerano mmCC_GC_SHADER_ARRAY_CONFIG prima
     # di scrivere SPI/RLC (sequenza CachyOS nota-buona, `apply_target_masks`).
     # BUO NON ha accesso a quel registro: può solo garantirsi di scrivere la
@@ -141,14 +149,37 @@ class GPU40CUUnlock(LoggerMixin):
         """Maschera conf ASSOLUTA del target: WGP stock + extra validate."""
         return mask_from_wgps(list(stock_wgps()) + self.target_wgps())
 
+    def target_cu_count(self) -> Optional[int]:
+        """CU della maschera TARGET (None = le extra NON sono gestite).
+
+        Opt-in off (default prudente) → None: con 24 CU stock le CU extra
+        non sono gestite da BUO, quindi non c'è né da segnalare né da
+        toccare nulla (stesso ramo E4-bis dell'orchestratore). Opt-in on →
+        WGP validate meno quelle condannate (lettura PURA: nessun accesso
+        UMR, quindi utilizzabile anche fuori da `_governor_paused`).
+        """
+        try:
+            if not self._extra_allowed():
+                return None
+            return cu_count_from_mask(self.target_mask())
+        except Exception as e:
+            self.logger.warning("Target CU non determinabile: %s", e)
+            return None
+
     # ------------------------------------------------------------------ #
     # Guardie (P5)
     # ------------------------------------------------------------------ #
 
     def curve_conservative(self) -> Optional[bool]:
-        """True se la curva GPU attiva è conservativa (ogni safe-point
-        ≤ CURVE_MAX_MV). None se non determinabile (config assente o
-        senza safe-point): C1, mai un giudizio inventato.
+        """True se la curva GPU attiva è ammessa con le CU extra.
+
+        Due fonti ammesse: ogni safe-point ≤ CURVE_MAX_MV (1500 MHz/900 mV),
+        oppure la curva È quella **certificata** dallo sweep per-silicio
+        (`oc_dir/gpu-sweep.json`), cioè misurata stabile su questo chip: una
+        curva certificata vale anche sopra 900 mV (il motivo del limite è
+        termico/instabilità, non la tensione in sé). None se non
+        determinabile (config assente o senza safe-point): C1, mai un
+        giudizio inventato.
 
         In mock/dry-run la curva è un file di SISTEMA: non si legge (mai
         accesso reale in simulazione, pattern C1) e la guardia non ha
@@ -161,11 +192,48 @@ class GPU40CUUnlock(LoggerMixin):
                 text = fh.read()
         except OSError:
             return None
-        volts = [int(m) for m in
-                 re.findall(r"(?m)^\s*voltage\s*=\s*(\d+)", text)]
+        curve = parse_gpu_config(text)
+        volts = [p.voltage for p in curve.points] if curve else []
         if not volts:
             return None
-        return max(volts) <= self.CURVE_MAX_MV
+        if max(volts) <= self.CURVE_MAX_MV:
+            return True
+        certified = self._certified_points()
+        if certified and [(p.freq, p.voltage) for p in curve.points] == \
+                certified:
+            self.logger.info(
+                "curva certificata da gpu-sweep.json (%d punti, %d mV max) — "
+                "CU extra ammesse oltre il limite %d mV",
+                len(certified), max(volts), self.CURVE_MAX_MV)
+            return True
+        return False
+
+    def _certified_points(self) -> Optional[List[Tuple[int, int]]]:
+        """Curva certificata dallo sweep per-silicio (None = non disponibile).
+
+        `oc_dir/gpu-sweep.json` (buo/oc/gpu_sweep.py) porta il vincitore e i
+        safe-points dello sweep. Conta SOLO `source == "per-silicon"`: il
+        fallback community è una tabella non misurata su questo silicio e non
+        certifica nulla. File assente, corrotto, di schema inatteso o senza
+        punti → None (fail-closed: si torna al limite di CURVE_MAX_MV, mai
+        passare per un JSON illeggibile).
+        """
+        path = Path(self.sweep_result_path) if self.sweep_result_path else \
+            Path(OC_DIR_DEFAULT) / SWEEP_FILE
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("source") != "per-silicon":
+            return None
+        points = data.get("safe_points")
+        if not isinstance(points, list) or not points:
+            return None
+        try:
+            return [(int(p["freq"]), int(p["voltage"])) for p in points
+                    if isinstance(p, dict) and "freq" in p and "voltage" in p]
+        except (TypeError, ValueError):
+            return None
 
     @contextmanager
     def _governor_paused(self):
@@ -275,7 +343,9 @@ class GPU40CUUnlock(LoggerMixin):
                 "applied": False,
                 "reason": "curve_not_conservative",
                 "error": "curva GPU non conservativa per le CU extra: %s. "
-                         "Servono safe-point ≤%d mV (1500 MHz/900 mV) in %s" % (
+                         "Servono safe-point ≤%d mV (1500 MHz/900 mV) o la "
+                         "curva certificata dallo sweep per-silicio "
+                         "(gpu-sweep.json) in %s" % (
                              "config illeggibile o senza safe-point"
                              if curve is None
                              else "c'è un safe-point sopra il limite",
@@ -461,7 +531,8 @@ class GPU40CUUnlock(LoggerMixin):
         if curve is not True:
             return {"persisted": False, "reason": "curve_not_conservative",
                     "error": "curva GPU non conservativa per le CU extra: %s. "
-                             "Servono safe-point ≤%d mV (1500 MHz/900 mV) in "
+                             "Servono safe-point ≤%d mV (1500 MHz/900 mV) o la "
+                             "curva certificata dallo sweep per-silicio in "
                              "%s" % (
                                  "config illeggibile o senza safe-point"
                                  if curve is None

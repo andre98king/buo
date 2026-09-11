@@ -1231,6 +1231,13 @@ class Orchestrator(LoggerMixin):
                 health = self.health_test.read_results()
                 results["health"] = health
                 defective = health.get("defective", [])
+                # Verdetto durevole del silicio (P2/CU extra): se le CU
+                # difettose stanno nelle WGP extra si resta a 32/34/36 CU;
+                # casi ambigui → condanna globale (fail-closed dentro il metodo).
+                try:
+                    self.unlock_verdict.set_gpu_from_defective_cus(defective)
+                except Exception as e:
+                    self.logger.warning("Verdetto WGP non scritto: %s", e)
                 if health.get("complete"):
                     self.logger.info(
                         "CU health: results.tsv completo (%d righe) — "

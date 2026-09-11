@@ -79,6 +79,7 @@ class BC250HealthWrapper(BaseWrapper):
                     "complete": False, "present": False, "rows": 0,
                     "error": "results.tsv non trovato"}
 
+        rows = 0
         try:
             with open(path) as f:
                 for line in f:
@@ -89,19 +90,29 @@ class BC250HealthWrapper(BaseWrapper):
                     if len(parts) < 5:
                         continue
                     idx, se, sh, wgp, status = parts[:5]
-                    cu_index = int(se) * 8 + int(sh) * 4 + int(wgp)
+                    # BUG DI CAMPO (audit 11/09): `se*8 + sh*4 + wgp` è un
+                    # indice di WGP che COLLIDE fra gli SH (es. 4 = (0,0,4) e
+                    # (0,1,0)) e non è un indice CU → la mappatura CU→WGP dei
+                    # consumatori era sbagliata (spesso fail-closed, a volte
+                    # WGP extra inesistente). Un WGP copre DUE CU: indice base
+                    # 2*(SA*5 + WGP), con SA = SE*2 + SH.
+                    rows += 1
+                    sa = int(se) * 2 + int(sh)
+                    cus = (2 * (sa * 5 + int(wgp)), 2 * (sa * 5 + int(wgp)) + 1)
                     if status == "PASS":
-                        stable.append(cu_index)
+                        stable.extend(cus)
                     else:
-                        defective.append(cu_index)
-            total = len(stable) + len(defective)
+                        defective.extend(cus)
+            # `total`/`rows` = RIGHE (WGP testate) — la completezza si misura
+            # in WGP, non in CU: `stable`/`defective` contengono gli INDICI CU
+            # (2 per WGP) perché è quello che serve ai consumatori.
             return {
                 "stable": sorted(stable),
                 "defective": sorted(defective),
-                "total": total,
-                "complete": total >= HEALTH_WGP_TOTAL,
+                "total": rows,
+                "complete": rows >= HEALTH_WGP_TOTAL,
                 "present": True,
-                "rows": total,
+                "rows": rows,
             }
         except Exception as e:
             return {"stable": [], "defective": [], "total": 0,

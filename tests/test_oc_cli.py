@@ -249,5 +249,91 @@ class TestSimulatedNoWrites(Base):
         self.assertFalse(list(self.oc.glob("apply-*.conf")))
 
 
+class TestCuLiveTracking(Base):
+    """Tracciamento del percorso cumulativo (oc_dir/gpu-cu-live.json).
+
+    Il protocollo è human-in-the-loop: senza diario, chi conduce il test non
+    sa quali WGP ha già provato. Il tracciamento è fail-soft: NON deve mai
+    bloccare un'operazione che ha già scritto i registri.
+    """
+
+    def _path(self):
+        return self.oc / "gpu-cu-live.json"
+
+    def test_record_and_read_roundtrip(self):
+        from buo.oc.cli import read_cu_live, record_cu_live
+        self.assertTrue(record_cu_live(self.oc, ["0.1.3"],
+                                       {"cu_count": 26,
+                                        "mask": "0x07,0x0f,0x07,0x07"}))
+        tries = read_cu_live(self.oc)
+        self.assertEqual(len(tries), 1)
+        self.assertEqual(tries[0]["wgps"], ["0.1.3"])
+        self.assertEqual(tries[0]["cu_count"], 26)
+        self.assertEqual(tries[0]["esito"], "applicato")
+        self.assertTrue(tries[0]["at"])
+        schema = json.loads(self._path().read_text(encoding="utf-8"))
+        self.assertEqual(schema["schema"], 1)
+        self.assertEqual(schema["tries"], tries)
+
+    def test_same_wgps_updates_instead_of_duplicating(self):
+        from buo.oc.cli import read_cu_live, record_cu_live
+        record_cu_live(self.oc, ["0.1.3"], {"cu_count": 26})
+        record_cu_live(self.oc, ["0.1.3"], {"cu_count": 26})
+        self.assertEqual(len(read_cu_live(self.oc)), 1)
+        record_cu_live(self.oc, ["0.1.3", "0.1.4"], {"cu_count": 28})
+        self.assertEqual(len(read_cu_live(self.oc)), 2)
+
+    def test_missing_or_corrupt_file_is_no_history(self):
+        from buo.oc.cli import read_cu_live
+        self.assertEqual(read_cu_live(self.oc), [])
+        self._path().write_text("{non json", encoding="utf-8")
+        self.assertEqual(read_cu_live(self.oc), [])
+        self._path().write_text(json.dumps({"schema": 99, "tries": [1]}),
+                                encoding="utf-8")
+        self.assertEqual(read_cu_live(self.oc), [])
+
+    def test_unwritable_tracking_is_fail_soft(self):
+        """File di stato non scrivibile → False, nessuna eccezione (le CU
+        extra SONO già state abilitate: il diario non blocca nulla)."""
+        from buo.oc.cli import record_cu_live
+        blocked = Path(self.tmp.name) / "bloccato"
+        blocked.write_text("sono un file, non una dir\n", encoding="utf-8")
+        self.assertFalse(record_cu_live(blocked, ["0.1.3"], {"cu_count": 26}))
+
+    def test_mock_writes_no_tracking(self):
+        """--mock: nessuna scrittura (C1), nemmeno il diario."""
+        from buo.config import BUOConfig
+        cfg = BUOConfig({"phases": {"probe": {"gpu_extra_cu": True}}})
+        with mock.patch("buo.config.BUOConfig.load", return_value=cfg):
+            res = self.invoke("oc", "cu-live", "0.1.3", "--mock", "--oc-dir",
+                              str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertFalse(self._path().exists())
+
+    def test_show_lists_recorded_tries(self):
+        from buo.oc.cli import record_cu_live
+        record_cu_live(self.oc, ["0.1.3", "0.1.4"], {"cu_count": 28,
+                                                    "mask": "0x07,0x1f,0x07,0x07"})
+        res = self.invoke("oc", "cu-live", "--show", "--oc-dir", str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("0.1.3,0.1.4", res.output)
+        self.assertIn("28", res.output)
+
+    def test_show_without_history_is_explicit(self):
+        res = self.invoke("oc", "cu-live", "--show", "--oc-dir", str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("Nessuna prova registrata", res.output)
+
+    def test_no_wgp_and_no_show_is_a_usage_error(self):
+        res = self.invoke("oc", "cu-live", "--oc-dir", str(self.oc))
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("WGP", res.output)
+
+    def test_tracking_file_name_is_owned_by_the_tool(self):
+        from buo.oc.constants import CU_LIVE_FILE, CU_LIVE_SCHEMA
+        self.assertEqual(CU_LIVE_FILE, "gpu-cu-live.json")
+        self.assertEqual(CU_LIVE_SCHEMA, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

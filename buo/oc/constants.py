@@ -37,6 +37,12 @@ PROFILES_FILE = "profiles.json"
 APPLY_MARKER = "apply.json"
 APPLY_LOG = "apply.log"
 SMOKE_MARKER = "smoke.marker.json"
+# Esito dello sweep GPU per-silicio (buo/oc/gpu_sweep.py) e tracciamento del
+# percorso CUMULATIVO live (`buo oc cu-live SE.SH.WGP`: una WGP per volta,
+# protocollo human-in-the-loop → chi conduce il test sa cosa ha già provato).
+SWEEP_FILE = "gpu-sweep.json"
+CU_LIVE_FILE = "gpu-cu-live.json"
+CU_LIVE_SCHEMA = 1
 
 # silicon-profile.json è PROPRIETÀ del motore: qui SOLO lettura (SiliconView).
 SILICON_PROFILE = "silicon-profile.json"

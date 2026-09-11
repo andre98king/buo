@@ -24,7 +24,8 @@ from unittest import mock
 from buo.config import BUOConfig
 from buo.constants import (MASK_ALL_40, MASK_STOCK_24, all_wgps,
                            cu_count_from_mask, extra_wgps, mask_from_wgps,
-                           parse_wgp, stock_wgps, wgps_from_mask)
+                           parse_wgp, stock_wgps, wgps_from_cu_pairs,
+                           wgps_from_mask)
 from buo.unlock.gpu import GPU40CUUnlock
 from buo.unlock.validation import (VERDICT_GPU_WGPS_CONDEMNED, UnlockVerdict,
                                    evidence)
@@ -94,6 +95,19 @@ def _curve(tmp, volts=(800, 900)):
     path.write_text("".join("[[safe-points]]\nfrequency = %d\nvoltage = %d\n"
                             % (1000 + i * 100, v)
                             for i, v in enumerate(volts)), encoding="utf-8")
+    return str(path)
+
+
+def _sweep_json(tmp, source="per-silicon", points=None):
+    """Esito finto dello sweep per-silicio (oc_dir/gpu-sweep.json)."""
+    path = Path(tmp) / "gpu-sweep.json"
+    path.write_text(json.dumps({
+        "schema_version": 1, "source": source,
+        "safe_points": points if points is not None else [
+            {"freq": 1000, "voltage": 800},
+            {"freq": 1100, "voltage": 925}],
+        "winner": {"freq": 1000, "voltage": 800},
+    }), encoding="utf-8")
     return str(path)
 
 
@@ -300,6 +314,16 @@ class TestDerivedMask(unittest.TestCase):
             out = g.persist()
         self.assertTrue(out["persisted"])
         self.assertIn(MASK_ALL_40, Path(g.boot_conf_path).read_text())
+
+    def test_target_cu_count_is_the_managed_target(self):
+        """R4 (agente di boot): None = CU extra NON gestite (opt-in off) →
+        l'agente non legge e non tocca nulla."""
+        self.assertIsNone(_unlock(self.tmp, wrapper=_FakeWrapper(),
+                                  extra_cu=False).target_cu_count())
+        g = _unlock(self.tmp, wrapper=_FakeWrapper(), extra_cu=True,
+                    verdict=_verdict(self.tmp, VERDICT_GPU_WGPS_CONDEMNED,
+                                     ["0.1.3", "0.1.4"]))
+        self.assertEqual(g.target_cu_count(), 36)
 
     def test_effect_verification_fails_closed(self):
         """Lo script riporta un conteggio diverso dall'atteso → NON
@@ -564,6 +588,162 @@ class TestGuards(unittest.TestCase):
         (es. rollback a 24 CU quando le CU extra sono attive)."""
         self.assertEqual(cu_count_from_mask("0x1f,0x07,0x1f,0x1f"), 36)
         self.assertEqual(wgps_from_mask(MASK_STOCK_24), stock_wgps())
+
+
+# ===================================================================== #
+# Mappatura CU → WGP (R1: produttore del verdetto per-WGP)
+# ===================================================================== #
+
+class TestCuToWgpMapping(unittest.TestCase):
+    """Un WGP copre 2 CU: CU 2*(S*5+N) e +1 (punto unico, fail-closed)."""
+
+    def test_pairs_map_to_the_owning_wgp(self):
+        # extra: WGP 3-4 di ogni SA → CU 6-9 (SA0), 16-19 (SA1), 26-29, 36-39
+        cases = [
+            ([6], ["0.0.3"]), ([7], ["0.0.3"]),      # stessa WGP (coppia)
+            ([6, 7], ["0.0.3"]),                     # coppia completa
+            ([8, 9], ["0.0.4"]),
+            ([16, 17], ["0.1.3"]),
+            ([26, 28], ["1.0.3", "1.0.4"]),
+            ([39], ["1.1.4"]),
+            ([6, 7, 16, 26], ["0.0.3", "0.1.3", "1.0.3"]),
+        ]
+        for cus, wgps in cases:
+            self.assertEqual(wgps_from_cu_pairs(cus), wgps, cus)
+
+    def test_stock_cu_maps_to_a_stock_wgp(self):
+        """Le CU delle WGP 0-2 sono stock (la maschera non scende sotto 24)."""
+        self.assertEqual(wgps_from_cu_pairs([0, 1]), ["0.0.0"])
+        self.assertIn("0.0.0", stock_wgps())
+        self.assertNotIn("0.0.0", extra_wgps())
+
+    def test_all_40_cu_cover_the_20_wgps(self):
+        """Consistenza: 40 CU → le 20 WGP, in ordine di (SA, WGP)."""
+        self.assertEqual(wgps_from_cu_pairs(range(40)), all_wgps())
+
+    def test_not_determinable_is_none(self):
+        """Indice anomalo/non numerico → None (mai una lista inventata)."""
+        for bad in [[40], [-1], [999], ["x"], [None], ["0.1.3"], 5, None]:
+            self.assertIsNone(wgps_from_cu_pairs(bad), repr(bad))
+
+    def test_empty_list_is_no_condemnation(self):
+        self.assertEqual(wgps_from_cu_pairs([]), [])
+
+
+class TestDefectiveCuVerdict(unittest.TestCase):
+    """Verdetto durevole dalle CU difettose del health test (R1)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.path = Path(self.tmp) / "unlock-verdict.json"
+        self.addCleanup(self._tmp.cleanup)
+
+    def _verdict(self):
+        return UnlockVerdict(path=self.path, sim=True)
+
+    def test_extra_cu_defects_narrow_the_mask_not_the_whole_die(self):
+        """CU guaste su WGP extra → condanna PER-WGP (resta a 34 CU)."""
+        v = self._verdict()
+        out = v.set_gpu_from_defective_cus([6, 7, 16])
+        self.assertTrue(out["mapped"])
+        self.assertEqual(out["verdict"], VERDICT_GPU_WGPS_CONDEMNED)
+        self.assertEqual(v.condemned_wgps(), ["0.0.3", "0.1.3"])
+        # end-to-end: la maschera derivata resta a 34 CU, mai a 24
+        mask = mask_from_wgps(stock_wgps()
+                              + [w for w in extra_wgps()
+                                 if w not in ("0.0.3", "0.1.3")])
+        self.assertEqual(cu_count_from_mask(mask), 36, "solo 2 WGP escluse")
+
+    def test_stock_cu_defect_is_fail_closed(self):
+        """CU guasta su una WGP STOCK: la condanna per-WGP non è esprimibile
+        (la maschera non scende sotto le 24) → verdetto globale."""
+        v = self._verdict()
+        out = v.set_gpu_from_defective_cus([0, 6])
+        self.assertFalse(out["mapped"])
+        self.assertEqual(v.get("gpu"), "never_enable_all")
+        self.assertEqual(sorted(v.condemned_wgps()), sorted(extra_wgps()))
+
+    def test_anomalous_input_is_fail_closed(self):
+        """Indice fuori dai 40 CU / non numerico → verdetto globale."""
+        v = self._verdict()
+        for bad in [[40], ["boh"], 5, None]:
+            out = v.set_gpu_from_defective_cus(bad)
+            self.assertFalse(out["mapped"], repr(bad))
+            self.assertEqual(v.get("gpu"), "never_enable_all", repr(bad))
+
+    def test_empty_defective_list_writes_no_verdict(self):
+        """Nessuna CU guasta non è una condanna: nessun verdetto scritto."""
+        v = self._verdict()
+        out = v.set_gpu_from_defective_cus([])
+        self.assertFalse(out["written"])
+        self.assertIsNone(v.get("gpu"))
+
+    def test_evidence_keeps_the_raw_cus(self):
+        v = UnlockVerdict(path=self.path, sim=False)
+        v.set_gpu_from_defective_cus([6, 7])
+        ev = json.loads(self.path.read_text(encoding="utf-8"))["gpu"]["evidence"]
+        self.assertEqual(ev["defective_cu"], [6, 7])
+        self.assertEqual(ev["condemned_wgps"], ["0.0.3"])
+
+
+# ===================================================================== #
+# Curva certificata dallo sweep per-silicio (R2)
+# ===================================================================== #
+
+class TestCertifiedCurve(unittest.TestCase):
+    """Seconda fonte ammessa per la guardia curva: il vincitore CERTIFICATO
+    dello sweep per-silicio (gpu-sweep.json), anche sopra 900 mV."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def _gpu(self, volts=(800, 900), sweep=None, **kw):
+        _curve(self.tmp, volts)
+        g = _unlock(self.tmp, wrapper=_FakeWrapper(), **kw)
+        g.sweep_result_path = sweep if sweep is not None else \
+            str(Path(self.tmp) / "assente.json")
+        return g
+
+    def test_certified_curve_above_900_is_allowed(self):
+        """Curva = quella certificata dallo sweep (1100@925) → passa."""
+        g = self._gpu((800, 925), sweep=_sweep_json(self.tmp),
+                      extra_cu=True)
+        with self.assertLogs("buo.GPU40CUUnlock", level="INFO") as logs:
+            self.assertIs(g.curve_conservative(), True)
+        self.assertTrue(any("certificata da gpu-sweep.json" in m
+                            for m in logs.output))
+        self.assertTrue(g.apply()["applied"])
+
+    def test_missing_json_keeps_the_900_mv_limit(self):
+        g = self._gpu((800, 925), extra_cu=True)
+        self.assertFalse(g.curve_conservative())
+        self.assertEqual(g.apply()["reason"], "curve_not_conservative")
+
+    def test_corrupt_or_foreign_json_keeps_the_limit(self):
+        """JSON illeggibile / schema inatteso / fallback community: mai
+        un lasciapassare (fail-closed)."""
+        broken = Path(self.tmp) / "rotto.json"
+        broken.write_text("{non json", encoding="utf-8")
+        for sweep in (str(broken),
+                      _sweep_json(self.tmp, source="community_defaults"),
+                      _sweep_json(self.tmp, points=[]),
+                      _sweep_json(self.tmp, points=[{"freq": 1000},
+                                                    {"voltage": 925}])):
+            g = self._gpu((800, 925), sweep=sweep)
+            self.assertFalse(g.curve_conservative(), sweep)
+
+    def test_other_curve_is_not_certified(self):
+        """Curva DIVERSA dal vincitore certificato → limite 900 mV."""
+        g = self._gpu((800, 950), sweep=_sweep_json(self.tmp),
+                      extra_cu=True)
+        self.assertFalse(g.curve_conservative())
+
+    def test_conservative_curve_needs_no_sweep_json(self):
+        g = self._gpu((800, 900))
+        self.assertIs(g.curve_conservative(), True)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ sono sovrascrivibili da file di configurazione utente.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, List, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 
 # ============================================================================
@@ -223,6 +223,35 @@ def cu_count_from_mask(mask: str) -> int:
     """CU totali della maschera: 2 per WGP accesa (usato per verificare
     che la maschera scritta sia davvero quella attesa)."""
     return 2 * len(wgps_from_mask(mask))
+
+
+def wgps_from_cu_pairs(cus: Iterable[int]) -> Optional[List[str]]:
+    """Indici di CU difettose (0-39) → WGP che le contengono.
+
+    Un WGP copre 2 CU: il WGP N della SA S copre le CU ``2*(S*5+N)`` e
+    ``+1``; la maschera ha esattamente questa granularità, quindi una CU
+    guasta condanna TUTTA la WGP (non si può spegnere mezza WGP).
+
+    Fail-closed: un indice non intero o fuori dai 40 CU rende la mappatura
+    NON determinabile → ``None`` — il chiamante torna al verdetto globale
+    invece di scrivere una lista di WGP inventata (una WGP guasta
+    instradata su questa APU blocca la GPU in modo non recuperabile).
+    Elenco vuoto → ``[]`` (nessuna CU guasta = nessuna condanna).
+    """
+    out: List[str] = []
+    try:
+        values = [int(c) for c in cus]
+    except (TypeError, ValueError):
+        return None
+    for cu in values:
+        if not 0 <= cu < 2 * WGP_SA_COUNT * WGP_PER_SA:
+            return None
+        sa, wgp = divmod(cu // 2, WGP_PER_SA)
+        name = wgp_name(sa, wgp)
+        if name not in out:
+            out.append(name)
+    return sorted(out, key=parse_wgp)
+
 
 # Versioni minime richieste (confermate nello studio)
 KERNEL_MIN = (6, 11)

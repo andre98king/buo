@@ -30,12 +30,13 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..constants import LIMITS
 from .apply import _write_json_atomic
+from .constants import SWEEP_FILE
 from .profiles import machine_silicon_fingerprint
 
 logger = logging.getLogger("buo.oc.gpu_sweep")
 
 SWEEP_SCHEMA_VERSION = 1
-ESITO_FILE = "gpu-sweep.json"
+ESITO_FILE = SWEEP_FILE
 # Default spec §1 — identici ai default di config.py (gpu_sweep_*): il
 # comando CLI li risolve da BUOConfig quando esiste, qui valgono da base.
 DEFAULT_FREQS = [1200, 1500, 2000]

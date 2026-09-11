@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..constants import (LIMITS, extra_wgps, parse_wgp)
+from ..constants import (LIMITS, extra_wgps, parse_wgp, wgps_from_cu_pairs)
 from ..oc.smoke import _whea_delta
 from ..utils.logging import LoggerMixin
 from ..utils.paths import state_dir
@@ -252,6 +252,45 @@ class UnlockVerdict:
             return (list(extra_wgps())
                     if verdict == VERDICT_GPU_WGPS_CONDEMNED else [])
         return []
+
+    def set_gpu_from_defective_cus(
+            self, cus, extra_evidence: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Verdetto GPU dalle CU difettose del health test (condanna PER-WGP).
+
+        Mappa le CU (indici 0-39) sui WGP con il punto unico
+        (`wgps_from_cu_pairs`) e scrive `wgps_condemned`: così la macchina può
+        restare a 32/36 CU invece di tornare a 24. Fail-closed — mappatura non
+        determinabile (indice anomalo) oppure CU di una WGP **stock** (la
+        maschera non scende sotto le 24 CU: la condanna per-WGP non sarebbe
+        esprimibile) → verdetto globale `never_enable_all`, cioè il
+        comportamento attuale: mai una lista inventata. Elenco vuoto = nessuna
+        CU guasta → NESSUN verdetto (non è una condanna).
+        """
+        try:
+            raw: Optional[List[int]] = [int(c) for c in cus]
+        except (TypeError, ValueError):
+            raw = None          # input anomalo → mappatura non determinabile
+        wgps = wgps_from_cu_pairs(raw) if raw is not None else None
+        if raw == []:
+            return {"verdict": None, "condemned_wgps": [], "written": False,
+                    "note": "nessuna CU difettosa: nessun verdetto"}
+        ev = dict(extra_evidence or {})
+        ev.update(cause="defective_cu", defective_cu=raw)
+        if wgps is not None and any(w not in extra_wgps() for w in wgps):
+            wgps = None
+        if wgps is None:
+            logger.warning(
+                "CU difettose %s: mappatura CU→WGP non determinabile (indice "
+                "anomalo o CU di una WGP stock) — verdetto globale "
+                "never_enable_all", raw)
+            self.set("gpu", "never_enable_all", ev)
+            return {"verdict": "never_enable_all", "written": True,
+                    "mapped": False, "condemned_wgps": list(extra_wgps())}
+        self.set("gpu", VERDICT_GPU_WGPS_CONDEMNED,
+                 dict(ev, condemned_wgps=wgps))
+        return {"verdict": VERDICT_GPU_WGPS_CONDEMNED, "written": True,
+                "mapped": True, "condemned_wgps": wgps}
 
 
 # --------------------------------------------------------------------- #
