@@ -132,14 +132,21 @@ class TestCpuAudit(unittest.TestCase):
         open_.assert_not_called()
 
     def test_governor_confirmed_inactive_semantics(self):
-        """rc 3 (inactive) → True; rc 0 (active) → False; altro/errore → None."""
+        """Solo `inactive`/`failed` = CONFERMATO fermo → True; `active` →
+        False; stati transitori/vuoti/errore → None = NON autorizzato
+        (fail-closed: `is-active` esce con rc=3 anche per activating, e un
+        accesso SMN partirebbe mentre il governor scrive sull'SMU)."""
         audit = HardwareAudit()
-        for rc, expected in ((3, True), (0, False), (1, None), (127, None)):
+        cases = (("inactive", True), ("failed", True), ("active", False),
+                 ("activating", None), ("deactivating", None),
+                 ("reloading", None), ("", None))
+        for state, expected in cases:
+            out = f"ActiveState={state}\nLoadState=loaded\n"
             with mock.patch("subprocess.run",
                             return_value=subprocess.CompletedProcess(
-                                [], rc, "", "")):
+                                [], 0, out, "")):
                 self.assertIs(audit._governor_confirmed_inactive(), expected,
-                              f"rc={rc}")
+                              f"state={state!r}")
         with mock.patch("subprocess.run", side_effect=OSError("no systemctl")):
             self.assertIsNone(audit._governor_confirmed_inactive())
 

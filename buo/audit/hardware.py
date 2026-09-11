@@ -153,23 +153,15 @@ class HardwareAudit(LoggerMixin):
     def _governor_confirmed_inactive(self) -> Optional[bool]:
         """True SOLO se cyan-skillfish-governor-smu è CONFERMATO inattivo.
 
-        Fail-closed: `systemctl` non eseguibile / rc inatteso → None
-        (stato sconosciuto = NON autorizzato). Serve a proteggere gli
+        Fail-closed: `systemctl` non eseguibile, stato TRANSITORIO
+        (activating/deactivating: `is-active` esce rc=3 anche lì) o
+        sconosciuto → None (NON autorizzato). Serve a proteggere gli
         accessi SMN: il trigger (PCI config 0xB8/0xBC) è lo STESSO paio
         usato dal governor, quindi una lettura concorrente corrompe le
         sue scritture (freeze del SoC osservato sul campo, 30/08).
         """
-        from ..constants import GOVERNOR_SERVICE
-        try:
-            r = subprocess.run(["systemctl", "is-active", GOVERNOR_SERVICE],
-                               capture_output=True, text=True, timeout=10)
-        except Exception:
-            return None
-        if r.returncode == 3:      # inactive
-            return True
-        if r.returncode == 0:      # active
-            return False
-        return None
+        from ..optimize.governor import governor_confirmed_inactive
+        return governor_confirmed_inactive()
 
     def _read_core_mask_smn(self) -> Optional[int]:
         """Legge la core presence mask via SMN (PCI config space).
@@ -476,15 +468,9 @@ class HardwareAudit(LoggerMixin):
 
     def _audit_governor(self) -> Dict[str, Any]:
         from ..constants import GOVERNOR_SERVICE
-        active = False
-        try:
-            import subprocess
-            r = subprocess.run(["systemctl", "is-active", GOVERNOR_SERVICE],
-                               capture_output=True, text=True, timeout=10)
-            active = r.stdout.strip() == "active"
-        except Exception:
-            pass
-        return {"service": GOVERNOR_SERVICE, "active": active}
+        from ..optimize.governor import governor_states
+        state = governor_states().get("ActiveState")
+        return {"service": GOVERNOR_SERVICE, "active": state == "active"}
 
     # -------------------------- AMDGPU ----------------------------- #
 

@@ -31,7 +31,7 @@ from .benchmark.runner import BenchmarkRunner
 from .config import BUOConfig
 from .constants import (CORE_MASK_STOCK, EXIT_ERROR, EXIT_REBOOT,
                         EXIT_SAFETY_VIOLATION, EXIT_SUCCESS, GOVERNOR_CONFIG,
-                        LIMITS, PHASES, SMU_OC_SERVICE)
+                        GOVERNOR_SERVICE, LIMITS, PHASES, SMU_OC_SERVICE)
 from .exceptions import ConfigurationError, SafetyViolation
 from .fix.ace import ACEComputeFix
 from .fix.acpi import ACPIFix
@@ -42,7 +42,8 @@ from .fix.tlb import TLBKernelFix
 from .fix.vram import VRAMConfig
 from .optimize.cpu import (CPUUndervoltOptimizer,
                            resolve_cpu_target_vid)
-from .optimize.governor import GovernorWrapper
+from .optimize.governor import (GovernorWrapper,
+                                governor_confirmed_inactive)
 from .optimize.gpu import GPUUndervoltOptimizer
 from .optimize.overclock import OverclockOptimizer
 from .oc.constants import OC_DIR_DEFAULT
@@ -1004,7 +1005,18 @@ class Orchestrator(LoggerMixin):
 
         # 1. CPU 8-core (volatile) — con GATE ACPI fail-closed e gate
         # verdetto durevole (D6: silicio condannato → mai più sbloccare)
-        if self.config.probe_cpu_unlock and "cpu_core_unlock" not in done:
+        # Il ledger NON basta: l'unlock è VOLATILE e un COLD boot riporta
+        # la maschera a 0x77 (12 thread) lasciando `cpu_core_unlock`
+        # marcato → senza questo check la macchina restava a 12 thread per
+        # sempre. Thread < 16 con ledger marcato = unlock PERSO → ri-sblocco.
+        if self.config.probe_cpu_unlock and (
+                "cpu_core_unlock" not in done
+                or self._cpu_unlock_effective() is False):
+            if "cpu_core_unlock" in done:
+                self.logger.warning(
+                    "CPU: ledger dice unlock fatto ma i thread online sono "
+                    "< 16 (maschera volatile persa a un cold boot) — "
+                    "ri-eseguo l'unlock 8-core")
             if self.unlock_verdict.get("cpu") == "never_unlock":
                 self.logger.warning(
                     "CPU: silicio marcato never_unlock — unlock 8-core "
@@ -1289,15 +1301,32 @@ class Orchestrator(LoggerMixin):
             cpu_out["skipped"] = "duration_zero"
             self.results["unlock_validation"] = data
             return data
+        threads = self._cpu_online_threads()
         mask = self._cpu_read_mask()  # M4: try/except + governor FERMO
         if mask is not None and (mask & 0xFF) == CORE_MASK_STOCK:
-            self.logger.info(
-                "CPU: maschera 0x77 (stock) — revert già avvenuto, niente "
-                "da validare")
-            cpu_out["skipped"] = "mask_stock"
+            if self._cpu_unlock_effective() is False:
+                # Maschera stock MA thread < 16 dopo un unlock DICHIARATO
+                # nel ledger: NON è un revert, è un unlock PERSO (la
+                # maschera è volatile al cold boot). Si segnala — senza
+                # condannare il silicio: non è un problema del chip.
+                self.logger.error(
+                    "CPU: unlock DICHIARATO ma maschera 0x77 (stock) e %s "
+                    "thread online — unlock PERSO (maschera volatile al "
+                    "cold boot), NON un revert: nessuno stress da validare",
+                    threads)
+                self.results["notes"].append(
+                    "Unlock CPU perso: maschera 0x77 (stock) e %d thread "
+                    "online con `cpu_core_unlock` nel ledger — la maschera "
+                    "core non sopravvive al cold boot (servirebbe un nuovo "
+                    "unlock 8-core)" % (threads or 0))
+                cpu_out["skipped"] = "unlock_lost"
+            else:
+                self.logger.info(
+                    "CPU: maschera 0x77 (stock) — revert già avvenuto, "
+                    "niente da validare")
+                cpu_out["skipped"] = "mask_stock"
             self.results["unlock_validation"] = data
             return data
-        threads = self._cpu_online_threads()
         if threads is not None and threads <= 12:
             self.logger.info(
                 "CPU: %d thread attivi — niente da validare", threads)
@@ -1416,6 +1445,18 @@ class Orchestrator(LoggerMixin):
         from .unlock.validation import cpu_online_count
         return cpu_online_count()
 
+    def _cpu_unlock_effective(self) -> Optional[bool]:
+        """EFFETTO reale dell'unlock 8-core: True se i 16 thread sono
+        online. None se il conteggio non è determinabile (fail-closed: il
+        chiamante resta sul comportamento conservativo).
+
+        La maschera core (SMN 0x5A870) è VOLATILE: dopo un COLD boot torna
+        0x77 (12 thread) mentre il ledger resta marcato — la verità è qui,
+        non nel ledger (lettura sysfs, mai SMU: nessun accesso SMU serve).
+        """
+        threads = self._cpu_online_threads()
+        return None if threads is None else threads >= 16
+
     def _cpu_read_mask(self) -> Optional[int]:
         """Lettura maschera core (SMN) con governor FERMO (M4: regola
         assoluta AGENTS — MAI SMU con governor attivo) e try/except:
@@ -1439,21 +1480,24 @@ class Orchestrator(LoggerMixin):
         """Governor FERMO durante un accesso SMU/SMN (regola assoluta
         AGENTS: accessi concorrenti = freeze SoC silenzioso). Fail-closed:
         se lo stato FERMO non è CONFERMATO → RuntimeError (abort
-        dell'accesso, mai procedere). In mock è un no-op."""
+        dell'accesso, mai procedere). In mock è un no-op.
+
+        "Fermo" = ActiveState inactive/failed: `is-active` esce rc=3 anche
+        per activating/deactivating, quindi un bool "is_running" NON basta
+        (il vecchio `was_active is None` era irraggiungibile: is_running
+        non torna mai None → stato sconosciuto = accesso SMU permesso).
+        """
         if self.mock:
             yield
             return
-        was_active: Optional[bool] = None
-        try:
-            was_active = bool(self.governor.is_running())
-        except Exception:
-            was_active = None
-        if was_active is None:
+        confirmed_inactive = governor_confirmed_inactive()
+        if confirmed_inactive is None:
             raise RuntimeError(
-                "Stato del governor non determinabile — accesso SMU "
-                "annullato (mai SMU con governor attivo: freeze SoC). "
-                "Verificare cyan-skillfish-governor-smu e riprovare.")
-        if was_active:
+                "Stato del governor non determinabile (in transito o "
+                "sconosciuto) — accesso SMU annullato (mai SMU con governor "
+                "attivo: freeze SoC). Verificare "
+                "cyan-skillfish-governor-smu e riprovare.")
+        if not confirmed_inactive:
             try:
                 stopped = self.governor.stop()
             except Exception:
@@ -1466,7 +1510,7 @@ class Orchestrator(LoggerMixin):
         try:
             yield
         finally:
-            if was_active:
+            if not confirmed_inactive:
                 try:
                     self.governor.start()
                 except Exception:
@@ -2999,6 +3043,7 @@ class Orchestrator(LoggerMixin):
 
         # Verifica dei fix applicati
         verification = self.verifier.verify_all(self.results["applied_fixes"])
+        self._verify_governor(verification)
         results["fix_verification"] = verification
         self.results["fixes"] = verification
 
@@ -3023,6 +3068,33 @@ class Orchestrator(LoggerMixin):
         self.results["after"] = self.audit.run()
 
         return results
+
+    def _verify_governor(self, verification: Dict[str, Any]) -> None:
+        """Rende VERIFICATO il governor (prima invisibile: non è un fix di
+        questa run → non entra in `applied_fixes` → nessun check, né
+        fallimento né rollback).
+
+        Scelta (b) del design: check ESPLICITO in validate, non un fixer
+        nuovo. Un fixer entrerebbe nel ledger/applied_fixes e il rollback
+        F-B lo fermerebbe — cioè annullerebbe una modifica NON di questo
+        run (esattamente ciò che la semantica `skipped_verified` evita).
+        Gate sull'INSTALLAZIONE del servizio: su una macchina senza
+        governor il check non è applicabile e non produce falsi
+        fallimenti (in mock/dry-run `is_installed()` è False → nessun
+        subprocess reale nei test, C1). Esito negativo → errore nel log,
+        nota nel report e voce `fixes.governor`.
+        """
+        if not self.governor.is_installed():
+            return
+        verification.update(self.verifier.verify_all(["governor"]))
+        if verification["governor"].get("ok") is False:
+            msg = ("Governor NON attivo (%s): la curva GPU non è applicata "
+                   "(undervolt/overclock GPU inerti) — avviarlo con "
+                   "`systemctl start %s`" % (
+                       verification["governor"].get("detail"),
+                       GOVERNOR_SERVICE))
+            self.logger.error(msg)
+            self.results["notes"].append(msg)
 
     # ================================================================== #
     # FINALIZE / ERROR / REBOOT

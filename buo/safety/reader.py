@@ -41,7 +41,7 @@ import sys
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from ..constants import GOVERNOR_SERVICE
+from ..optimize.governor import governor_confirmed_inactive
 from ..utils import smn
 from ..utils.logging import get_logger
 
@@ -178,9 +178,9 @@ class RealHardwareReader:
     def _governor_active(self) -> Optional[bool]:
         """Stato di cyan-skillfish-governor-smu (con cache TTL).
 
-        True = attivo, False = inattivo, None = sconosciuto (systemctl
-        non eseguibile o rc diverso da 0/3 — fail-soft). La cache TTL
-        (default 10s, iniettabile) evita un subprocess a ogni
+        True = attivo, False = CONFERMATO inattivo, None = transitorio
+        (activating/deactivating) o sconosciuto — fail-closed. La cache
+        TTL (default 10s, iniettabile) evita un subprocess a ogni
         campionamento del monitor. REGOLA di progetto: prima di QUALSIASI
         accesso SMN (core mask, VID SMU) il governor deve essere
         CONFERMATO inattivo — accessi concorrenti sul paio PCI config
@@ -190,20 +190,15 @@ class RealHardwareReader:
         if (self._governor_cache is not None
                 and now - self._governor_cache[0] < self._governor_ttl):
             return self._governor_cache[1]
+        # "non active" non è "fermo": durante la partenza del governor
+        # (activating) l'SMU è già in uso → None (mai SMN in concorrenza).
         try:
-            r = subprocess.run([self._systemctl, "is-active",
-                                GOVERNOR_SERVICE],
-                               capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                active: Optional[bool] = True
-            elif r.returncode == 3:
-                active = False
-            else:
-                active = None
+            confirmed = governor_confirmed_inactive(self._systemctl)
+            active: Optional[bool] = (None if confirmed is None
+                                      else not confirmed)
         except Exception:
-            self.logger.debug("Check governor (systemctl is-active) non "
-                              "eseguibile (cmd=%s)", self._systemctl,
-                              exc_info=True)
+            self.logger.debug("Check governor non eseguibile (cmd=%s)",
+                              self._systemctl, exc_info=True)
             active = None
         self._governor_cache = (now, active)
         return active

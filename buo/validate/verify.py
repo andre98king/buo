@@ -12,7 +12,7 @@ Metodi di verifica (dal design finale, messaggio 100):
     • ACE fix         → vkmark con compute (FPS >= baseline)
     • IOMMU           → attivo (iommu=off ASSENTE: è lo stato corretto)
     • ACPI fix        → tabelle SSDT*CST in /sys/firmware/acpi/tables
-    • Governor        → systemctl is-active
+    • Governor        → systemctl show -p ActiveState
 """
 
 from pathlib import Path
@@ -112,10 +112,12 @@ class FixVerifier(LoggerMixin):
     def _check_governor(self):
         if self.mock and self.mock_hw is not None:
             return True, "governor attivo (mock)"
-        rc, out, _ = run_command(
-            ["systemctl", "is-active", "cyan-skillfish-governor-smu"],
-            check=False)
-        return rc == 0 and out.strip() == "active", out.strip()
+        # Stato da `systemctl show -p ActiveState` (punto unico in
+        # optimize/governor.py): "activating" NON è "attivo" e nemmeno
+        # "fermo" — il report deve dire lo stato vero, non rc=3.
+        from ..optimize.governor import governor_states
+        state = governor_states().get("ActiveState") or "sconosciuto"
+        return state == "active", state
 
     def _check_gpu_mask(self):
         if self.mock and self.mock_hw is not None:

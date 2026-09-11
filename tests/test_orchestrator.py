@@ -367,8 +367,9 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         # Governor stub: test ermetico (nessun systemctl reale, lo stato
         # del governor della macchina non deve influenzare l'esito).
         orch.governor = mock.Mock()
-        orch.governor.is_running.return_value = False
-        with mock.patch.object(orch, "_gpu_validation_needed",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=True), \
+             mock.patch.object(orch, "_gpu_validation_needed",
                                return_value="certified"), \
              self.assertLogs("buo.Orchestrator", level="INFO") as logs:
             orch._suggest_40cu_persistence(results, gpu)
@@ -439,8 +440,9 @@ class TestSuggest40cuPersistence(unittest.TestCase):
         fake.persist.return_value = {"persisted": False, "error": "boom"}
         orch.gpu_unlock = fake
         orch.governor = mock.Mock()
-        orch.governor.is_running.return_value = False  # test ermetico
-        with mock.patch.object(orch, "_gpu_validation_needed",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=True), \
+             mock.patch.object(orch, "_gpu_validation_needed",
                                return_value="certified"), \
              self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
             orch._suggest_40cu_persistence(results, gpu)  # non deve sollevare
@@ -458,13 +460,14 @@ class TestSuggest40cuPersistence(unittest.TestCase):
                             interactive=False)
         gpu, results = self._gpu()
         mgr = mock.Mock()
-        mgr.gov.is_running.return_value = True
         mgr.gov.stop.return_value = True
         mgr.gov.start.return_value = True
         mgr.gpu.persist.return_value = {"persisted": True, "note": "ok"}
         orch.governor = mgr.gov
         orch.gpu_unlock = mgr.gpu
-        with mock.patch.object(orch, "_gpu_validation_needed",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=False), \
+             mock.patch.object(orch, "_gpu_validation_needed",
                                return_value="certified"):
             orch._suggest_40cu_persistence(results, gpu)
         calls = mgr.mock_calls
@@ -488,14 +491,15 @@ class TestSuggest40cuPersistence(unittest.TestCase):
                             interactive=False)
         gpu, results = self._gpu()
         gov = mock.Mock()
-        gov.is_running.return_value = True
         gov.stop.return_value = False  # stop non confermato
         orch.governor = gov
         fake = mock.Mock()
         fake.persist.side_effect = AssertionError(
             "persist non deve partire a governor non confermato fermo")
         orch.gpu_unlock = fake
-        with mock.patch.object(orch, "_gpu_validation_needed",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=False), \
+             mock.patch.object(orch, "_gpu_validation_needed",
                                return_value="certified"), \
              self.assertLogs("buo.Orchestrator", level="WARNING") as logs:
             orch._suggest_40cu_persistence(results, gpu)  # non deve sollevare

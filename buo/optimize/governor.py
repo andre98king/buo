@@ -28,7 +28,7 @@ Dallo studio:
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..constants import GOVERNOR_CONFIG, GOVERNOR_SERVICE
 from ..utils.logging import LoggerMixin
@@ -37,6 +37,44 @@ from ..utils.logging import LoggerMixin
 _TEMPLATE_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "governor-default.toml"
 )
+
+
+def governor_states(systemctl_cmd: str = "systemctl") -> Dict[str, str]:
+    """ActiveState/LoadState del governor — {} se non determinabile.
+
+    `systemctl is-active` NON basta: esce con rc=3 anche per gli stati
+    TRANSITORI (activating/deactivating) → lo stato verrebbe letto come
+    "fermo" e un accesso SMN/SMU partirebbe mentre il governor scrive
+    sull'SMU (freeze del SoC, incidente 30/08). `show -p ActiveState`
+    distingue "fermo" da "in transito".
+    """
+    try:
+        r = subprocess.run([systemctl_cmd, "show", "-p", "ActiveState",
+                            "-p", "LoadState", GOVERNOR_SERVICE],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return {}
+    if r.returncode != 0:
+        return {}
+    return dict(line.split("=", 1)
+                for line in (r.stdout or "").splitlines() if "=" in line)
+
+
+def governor_confirmed_inactive(systemctl_cmd: str = "systemctl"
+                                ) -> Optional[bool]:
+    """True SOLO se il governor è CONFERMATO fermo (inactive/failed);
+    False se attivo; None se in transito (activating/deactivating/
+    reloading) o sconosciuto = NON autorizzato.
+
+    Punto UNICO della regola di progetto "mai SMU con governor attivo":
+    "non è active" NON significa "fermo" (fail-closed).
+    """
+    state = governor_states(systemctl_cmd).get("ActiveState")
+    if state in ("inactive", "failed"):
+        return True
+    if state == "active":
+        return False
+    return None
 
 
 class GovernorWrapper(LoggerMixin):
@@ -53,12 +91,16 @@ class GovernorWrapper(LoggerMixin):
     def is_running(self) -> bool:
         if self.mock:
             return False
-        try:
-            r = subprocess.run(["systemctl", "is-active", GOVERNOR_SERVICE],
-                               capture_output=True, text=True, timeout=10)
-            return r.stdout.strip() == "active"
-        except Exception:
+        return governor_states().get("ActiveState") == "active"
+
+    def is_installed(self) -> bool:
+        """True se l'unità del governor esiste (LoadState != not-found):
+        su una macchina senza governor il check non è applicabile e non
+        deve produrre un falso fallimento."""
+        if self.mock:
             return False
+        load = governor_states().get("LoadState")
+        return bool(load) and load != "not-found"
 
     def stop(self) -> bool:
         """Ferma il governor (prerequisito per undervolt/overclock)."""

@@ -90,15 +90,23 @@ class TestReaderSensors(unittest.TestCase):
         self.cpuinfo = self.base / "cpuinfo"
         self.cpuinfo.write_text(_cpuinfo_text(6))
         # --- systemctl finto di DEFAULT ---
-        # governor INATTIVO (rc 3) → gli accessi SMN (VID/core mask) sono
-        # permessi; ogni altro servizio → rc 4 (stato sconosciuto → None).
+        # `show -p ActiveState -p LoadState`: governor CONFERMATO fermo
+        # (inactive/loaded) → gli accessi SMN (VID/core mask) sono
+        # permessi; `is-active` di altri servizi → rc 4 (sconosciuto).
         self.systemctl = self.base / "systemctl"
         self.systemctl.write_text(
             '#!/bin/sh\n'
-            'case "$2" in\n'
-            '  cyan-skillfish-governor-smu) exit 3 ;;\n'
-            '  *) exit 4 ;;\n'
-            'esac\n')
+            'for a in "$@"; do unit="$a"; done\n'
+            'if [ "$1" = "show" ]; then\n'
+            '  echo "ActiveState=inactive"\n'
+            '  if [ "$unit" = "cyan-skillfish-governor-smu" ]; then\n'
+            '    echo "LoadState=loaded"\n'
+            '  else\n'
+            '    echo "LoadState=not-found"\n'
+            '  fi\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 4\n')
         self.systemctl.chmod(0o755)
         self.reader = self._reader()
 
@@ -121,6 +129,12 @@ class TestReaderSensors(unittest.TestCase):
         p.write_text(f"#!/bin/sh\n{body}")
         p.chmod(0o755)
         return str(p)
+
+    def _gov_systemctl(self, state):
+        """systemctl finto con ActiveState/LoadState del governor (il gate
+        SMU legge lo stato VERO: "non active" non significa "fermo")."""
+        return self._fake_systemctl(
+            f'echo "ActiveState={state}"; echo "LoadState=loaded"\n')
 
     # ------------------------- CPU ------------------------------- #
 
@@ -160,7 +174,7 @@ class TestReaderSensors(unittest.TestCase):
     def test_cpu_vid_governor_active_returns_none(self):
         """Governor ATTIVO → MAI accesso SMU: VID None (conflitto
         SMU↔governor: accessi concorrenti corrompono il governor)."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        r = self._reader(systemctl_cmd=self._gov_systemctl("active"))
         with mock.patch("buo.safety.reader._bc250_smu_import",
                         return_value=_FakeSmuModule) as imp:
             self.assertIsNone(r.get_cpu_vid())
@@ -168,7 +182,7 @@ class TestReaderSensors(unittest.TestCase):
 
     def test_cpu_vid_governor_inactive_reads_smu(self):
         """Governor inattivo (rc 3) → si legge il VID reale dall'SMU."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 3\n"))
+        r = self._reader(systemctl_cmd=self._gov_systemctl("inactive"))
         with mock.patch("buo.safety.reader._bc250_smu_import",
                         return_value=_FakeSmuModule):
             self.assertEqual(r.get_cpu_vid(), 993)
@@ -187,8 +201,9 @@ class TestReaderSensors(unittest.TestCase):
         """Entro il TTL la seconda lettura NON riesegue systemctl
         (cache: il subprocess gira una volta sola)."""
         r = self._reader(governor_ttl=10.0)
-        fake_run = mock.Mock(return_value=mock.Mock(returncode=3))
-        with mock.patch("buo.safety.reader.subprocess.run", fake_run), \
+        fake_run = mock.Mock(return_value=mock.Mock(
+            returncode=0, stdout="ActiveState=inactive\nLoadState=loaded\n"))
+        with mock.patch("buo.optimize.governor.subprocess.run", fake_run), \
                 mock.patch("buo.safety.reader._bc250_smu_import",
                            return_value=_FakeSmuModule):
             self.assertEqual(r.get_cpu_vid(), 993)
@@ -198,8 +213,9 @@ class TestReaderSensors(unittest.TestCase):
     def test_governor_ttl_zero_always_checks(self):
         """TTL=0 → nessuna cache: ogni lettura riesegue systemctl."""
         r = self._reader(governor_ttl=0.0)
-        fake_run = mock.Mock(return_value=mock.Mock(returncode=3))
-        with mock.patch("buo.safety.reader.subprocess.run", fake_run), \
+        fake_run = mock.Mock(return_value=mock.Mock(
+            returncode=0, stdout="ActiveState=inactive\nLoadState=loaded\n"))
+        with mock.patch("buo.optimize.governor.subprocess.run", fake_run), \
                 mock.patch("buo.safety.reader._bc250_smu_import",
                            return_value=_FakeSmuModule):
             self.assertEqual(r.get_cpu_vid(), 993)
@@ -209,10 +225,20 @@ class TestReaderSensors(unittest.TestCase):
     def test_core_mask_governor_active_returns_none(self):
         """Governor ATTIVO → MAI accesso SMN: core mask None (stesso
         gate di get_cpu_vid: il paio PCI config 0xB8/0xBC è condiviso)."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        r = self._reader(systemctl_cmd=self._gov_systemctl("active"))
         with mock.patch("buo.safety.reader.smn.read_core_mask") as m:
             self.assertIsNone(r.get_core_mask())
             m.assert_not_called()
+
+    def test_core_mask_governor_activating_returns_none(self):
+        """DIFETTO 3: `activating` NON è "fermo" (`is-active` esce rc=3
+        anche lì) — durante la partenza il governor scrive sull'SMU:
+        accesso SMN NEGATO (mai freeze del SoC)."""
+        for state in ("activating", "deactivating", "reloading"):
+            r = self._reader(systemctl_cmd=self._gov_systemctl(state))
+            with mock.patch("buo.safety.reader.smn.read_core_mask") as m:
+                self.assertIsNone(r.get_core_mask())
+                m.assert_not_called()
 
     # ------------------------- CORE MASK ------------------------- #
 
@@ -273,7 +299,7 @@ class TestReaderSensors(unittest.TestCase):
         debugfs interroga l'SMU — mai letture mailbox in concorrenza
         col governor, incidente 30/08)."""
         (self.hwmon / "hwmon0" / "in0_input").unlink()
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        r = self._reader(systemctl_cmd=self._gov_systemctl("active"))
         with mock.patch("buo.safety.reader.glob.glob") as glob_mock:
             self.assertIsNone(r.get_gpu_voltage())
             glob_mock.assert_not_called()  # amdgpu_pm_info non viene aperto
@@ -281,7 +307,7 @@ class TestReaderSensors(unittest.TestCase):
     def test_gpu_voltage_hwmon_safe_with_governor_active(self):
         """hwmon in0 è SICURO a governor attivo (metrics table cached,
         nessun mailbox): la lettura NON è gated."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        r = self._reader(systemctl_cmd=self._gov_systemctl("active"))
         self.assertEqual(r.get_gpu_voltage(), 1050)
 
     def test_gpu_voltage_hwmon_wins_over_vddgfx(self):
@@ -320,7 +346,7 @@ class TestReaderSensors(unittest.TestCase):
         """Governor ATTIVO → pm_info MAI letta: total_power None (il
         debugfs interroga l'SMU via driver — mailbox UNICO — mai in
         concorrenza col governor: incidente 30/08, freeze silenzioso)."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+        r = self._reader(systemctl_cmd=self._gov_systemctl("active"))
         with mock.patch("buo.safety.reader.glob.glob") as glob_mock:
             self.assertIsNone(r.get_total_power())
             glob_mock.assert_not_called()  # amdgpu_pm_info non viene aperto

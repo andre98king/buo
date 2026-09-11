@@ -100,6 +100,53 @@ class _OrchCase(unittest.TestCase):
 # 1. Validatori — unit (scenario 1, 2, 6 + determinismo 15)
 # ===================================================================== #
 
+class TestPhaseUnlockLedger(_OrchCase):
+    """DIFETTO 1: la verità è l'EFFETTO (thread online), non il ledger —
+    la maschera core (SMN 0x5A870) è VOLATILE al cold boot."""
+
+    def _resume_with_ledger(self, orch, cores, mask=CORE_MASK_STOCK):
+        orch.checkpoint.set("applied_steps", ["cpu_core_unlock"])
+        orch.hardware.state.core_mask = mask
+        orch.hardware.state.cpu_cores = cores
+
+    def test_ledger_marked_but_12_threads_reunlocks(self):
+        """Ledger `cpu_core_unlock` + 12 thread (maschera persa a un cold
+        boot) → NON si salta l'unlock: si ri-sblocca."""
+        orch, hw = self._make(gpu_probe=False)
+        self._resume_with_ledger(orch, cores=6)
+        with mock.patch.object(orch.cpu_unlock, "unlock",
+                               return_value={"changed": True,
+                                             "needs_reboot": True}) as m:
+            orch._phase_unlock()
+        m.assert_called_once()
+        self.assertEqual(orch.checkpoint.get_reboot_count(), 1,
+                         "l'unlock volatile richiede il reboot")
+
+    def test_ledger_marked_and_16_threads_skips(self):
+        """Ledger marcato E 16 thread online → unlock EFFETTIVO: si salta
+        (nessuna ri-esecuzione inutile)."""
+        orch, hw = self._make(gpu_probe=False)
+        self._resume_with_ledger(orch, cores=8, mask=CORE_MASK_UNLOCKED)
+        with mock.patch.object(
+                orch.cpu_unlock, "unlock",
+                side_effect=AssertionError("unlock già efficace: non si "
+                                           "ri-esegue")) as m:
+            orch._phase_unlock()
+        m.assert_not_called()
+
+    def test_threads_not_determinable_keeps_ledger_behaviour(self):
+        """Conteggio thread non determinabile → comportamento
+        conservativo: vale il ledger (mai un unlock a caso)."""
+        orch, hw = self._make(gpu_probe=False)
+        self._resume_with_ledger(orch, cores=6)
+        with mock.patch.object(orch, "_cpu_online_threads",
+                               return_value=None), \
+             mock.patch.object(
+                 orch.cpu_unlock, "unlock",
+                 side_effect=AssertionError("thread ignoti: non ri-sbloccare")):
+            orch._phase_unlock()
+
+
 class TestCpuValidationUnit(unittest.TestCase):
     def _hw(self, **kw):
         hw = MockHardware(seed=1)
@@ -370,13 +417,14 @@ class TestGovernorSmuGate(unittest.TestCase):
         scrivere SMN a governor attivo)."""
         orch = self._real_orch()
         fake = mock.Mock()
-        fake.is_running.return_value = True
         fake.stop.return_value = False  # stop non confermato
         orch.governor = fake
-        with mock.patch.object(
-                orch.cpu_unlock, "revert_to_stock",
-                side_effect=AssertionError(
-                    "revert non deve partire a governor non fermo")):
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=False), \
+             mock.patch.object(
+                 orch.cpu_unlock, "revert_to_stock",
+                 side_effect=AssertionError(
+                     "revert non deve partire a governor non fermo")):
             with self.assertRaises(RuntimeError):
                 orch._cpu_revert_and_reboot({"x": 1}, condemn=False)
 
@@ -385,10 +433,11 @@ class TestGovernorSmuGate(unittest.TestCase):
         riavviato a fine accesso."""
         orch = self._real_orch()
         fake = mock.Mock()
-        fake.is_running.return_value = True
         fake.stop.return_value = True
         orch.governor = fake
-        with mock.patch.object(orch, "_schedule_reboot") as sched, \
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=False), \
+             mock.patch.object(orch, "_schedule_reboot") as sched, \
              mock.patch.object(orch.cpu_unlock, "revert_to_stock",
                                return_value={"reverted": True,
                                              "mask": "0x77"}):
@@ -398,11 +447,14 @@ class TestGovernorSmuGate(unittest.TestCase):
         sched.assert_called_once()
 
     def test_read_mask_aborts_when_governor_state_unknown(self):
+        """Stato NON confermato (transitorio `activating`/sconosciuto) →
+        abort: solo `inactive`/`failed` autorizzano l'accesso SMN."""
         orch = self._real_orch()
         fake = mock.Mock()
-        fake.is_running.side_effect = OSError("systemctl boom")
         orch.governor = fake
-        with mock.patch.object(orch.cpu_unlock, "read_core_mask",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=None), \
+             mock.patch.object(orch.cpu_unlock, "read_core_mask",
                                side_effect=AssertionError(
                                    "nessuna lettura senza stato governor")):
             with self.assertRaises(RuntimeError):
@@ -413,9 +465,10 @@ class TestGovernorSmuGate(unittest.TestCase):
         assumere stock da una lettura fallita)."""
         orch = self._real_orch()
         fake = mock.Mock()
-        fake.is_running.return_value = False  # governor già fermo
         orch.governor = fake
-        with mock.patch.object(orch.cpu_unlock, "read_core_mask",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=True), \
+             mock.patch.object(orch.cpu_unlock, "read_core_mask",
                                side_effect=OSError("pci error")):
             self.assertIsNone(orch._cpu_read_mask())
         fake.start.assert_not_called()
@@ -425,10 +478,11 @@ class TestGovernorSmuGate(unittest.TestCase):
         lettura SMN."""
         orch = self._real_orch()
         fake = mock.Mock()
-        fake.is_running.return_value = True
         fake.stop.return_value = True
         orch.governor = fake
-        with mock.patch.object(orch.cpu_unlock, "read_core_mask",
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=False), \
+             mock.patch.object(orch.cpu_unlock, "read_core_mask",
                                return_value=0xFF) as spy:
             m = orch._cpu_read_mask()
         self.assertEqual(m, 0xFF)
@@ -439,9 +493,10 @@ class TestGovernorSmuGate(unittest.TestCase):
     def test_governor_not_running_no_stop_needed(self):
         orch = self._real_orch()
         fake = mock.Mock()
-        fake.is_running.return_value = False
         orch.governor = fake
-        with mock.patch.object(orch, "_schedule_reboot"), \
+        with mock.patch("buo.orchestrator.governor_confirmed_inactive",
+                        return_value=True), \
+             mock.patch.object(orch, "_schedule_reboot"), \
              mock.patch.object(orch.cpu_unlock, "revert_to_stock",
                                return_value={"reverted": True,
                                              "mask": "0x77"}):
@@ -614,16 +669,36 @@ class TestPhaseUnlockValidate(_OrchCase):
         self.assertEqual(data["cpu"]["skipped"], "no_unlock_this_run")
 
     def test_skip_when_mask_already_stock(self):
-        """Maschera 0x77 (revert già avvenuto) → niente da validare."""
+        """Maschera 0x77 E 16 thread attivi (revert già avvenuto) →
+        niente da validare."""
         orch, hw = self._make()
         hw.state.core_mask = CORE_MASK_STOCK
-        hw.state.cpu_cores = 6
+        hw.state.cpu_cores = 8
         orch.checkpoint.set("applied_steps", ["cpu_core_unlock"])
         with mock.patch.object(orch.cpu_validation, "run",
                                side_effect=AssertionError(
                                    "maschera stock: niente da validare")):
             data = orch._phase_unlock_validate()
         self.assertEqual(data["cpu"]["skipped"], "mask_stock")
+
+    def test_mask_stock_with_12_threads_is_unlock_lost(self):
+        """DIFETTO 1: maschera 0x77 e 12 thread con l'unlock NEL LEDGER →
+        NON è un revert ("revert già avvenuto" era la lettura sbagliata) ma
+        un unlock PERSO al cold boot: visibile (nota + esito dedicato),
+        senza condannare il silicio."""
+        orch, hw = self._make()
+        hw.state.core_mask = CORE_MASK_STOCK
+        hw.state.cpu_cores = 6  # 12 thread
+        orch.checkpoint.set("applied_steps", ["cpu_core_unlock"])
+        with mock.patch.object(orch.cpu_validation, "run",
+                               side_effect=AssertionError(
+                                   "unlock perso: niente da validare")):
+            data = orch._phase_unlock_validate()
+        self.assertEqual(data["cpu"]["skipped"], "unlock_lost")
+        self.assertIsNone(orch.unlock_verdict.get("cpu"),
+                          "unlock perso ≠ silicio condannato")
+        self.assertTrue(any("unlock" in n.lower()
+                            for n in orch.results["notes"]))
 
     def test_revert_write_failure_never_reboots(self):
         """D5: revert impossibile (readback != 0x77) → NIENTE reboot:
