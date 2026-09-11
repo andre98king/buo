@@ -38,8 +38,12 @@ class TestLazyImport(unittest.TestCase):
         """In un interprete pulito, buo.cli è il gruppo click (callable)."""
         code = (
             "import sys; sys.path.insert(0, '.')\n"
+            "import tomllib\n"
             "import buo\n"
-            "assert buo.__version__ == '1.4.0'\n"
+            # Niente versione hardcoded (drift a ogni bump): confronto con
+            # pyproject.toml, fonte della distribuzione.
+            "attesa = tomllib.load(open('pyproject.toml','rb'))['project']['version']\n"
+            "assert buo.__version__ == attesa, (buo.__version__, attesa)\n"
             "assert callable(buo.Orchestrator)\n"
             "assert callable(buo.cli)\n"
             "from buo import cli\n"
