@@ -55,8 +55,12 @@ THREADS_EXPECTED = 16
 BOOT_SERVICES = (SMU_OC_SERVICE, "bc250-cu-live-manager")
 # Stati systemd che significano "davvero fermo" (fail-closed su activating).
 INACTIVE_STATES = frozenset({"inactive", "failed"})
-# Gate largo: qualunque gioco/launcher Proton, Steam, runtime, compositor.
-GAME_PATTERNS = (r"\.exe", "steam", "pressure-vessel", "gamescope")
+# Gate: un GIOCO in esecuzione blocca sempre (un .exe Proton/launcher o il
+# runtime pressure-vessel). Steam/gamescope da soli = sessione desktop, non un
+# gioco: bloccano solo le run MANUALI (--boot le consente, perché su questa
+# macchina Steam È la sessione e al boot sarebbe sempre "attiva").
+GAME_PATTERNS = (r"\.exe", "pressure-vessel")
+SESSION_PATTERNS = ("steam", "gamescope")
 
 
 class BootReconciler(LoggerMixin):
@@ -70,6 +74,7 @@ class BootReconciler(LoggerMixin):
                  cmdline_path: Path = Path("/proc/cmdline"),
                  reboot_mode_path: Path = Path("/sys/kernel/reboot/mode"),
                  reboot_fn=None, game_check_fn=None, verdict=None,
+                 boot_run: bool = False,
                  services: tuple = BOOT_SERVICES):
         # Dipendenze iniettate (testabilità: mai hardware reale nei test).
         self.cpu = cpu
@@ -84,6 +89,9 @@ class BootReconciler(LoggerMixin):
         self._attempts_path = Path(attempts_path) if attempts_path else None
         self._reboot_fn = reboot_fn or self._reboot_real
         self._game_check_fn = game_check_fn or self._game_active_real
+        # boot_run: invocazione dall'unità di boot (sessione non ancora avviata
+        # o appena avviata) → la sola presenza della sessione Steam non blocca.
+        self.boot_run = boot_run
         self._verdict = verdict
         self.services = tuple(services)
 
@@ -174,8 +182,10 @@ class BootReconciler(LoggerMixin):
         return out.strip() or None
 
     def _game_active_real(self) -> bool:
-        """Gate largo: qualunque sessione di gioco/Steam in corso."""
-        for pattern in GAME_PATTERNS:
+        """True se un gioco è in esecuzione (gate largo, regola di campo)."""
+        patterns = (GAME_PATTERNS if self.boot_run
+                    else GAME_PATTERNS + SESSION_PATTERNS)
+        for pattern in patterns:
             rc, out, _ = run_command(["pgrep", "-f", pattern], timeout=10)
             if rc == 0 and out.strip():
                 return True
@@ -429,7 +439,7 @@ class BootReconciler(LoggerMixin):
                     "attempts": attempts}
         if self._game_check_fn():
             self.logger.warning(
-                "Reboot NON eseguito: sessione di gioco/Steam attiva "
+                "Reboot NON eseguito: gioco o sessione Steam attiva "
                 "(riavviare a sessione chiusa: `sudo buo boot-reconcile`)")
             return {"rebooted": False, "blocked": "sessione_gioco_attiva"}
         if self.dry_run:
@@ -474,7 +484,8 @@ def unit_content(python: str) -> str:
 [Unit]
 Description=BUO boot reconcile (BC-250: 16 thread, governor GPU, tabelle ACPI)
 Documentation=man:buo(1)
-After=multi-user.target bc250-cu-live-manager.service
+After=bc250-cu-live-manager.service
+Before=graphical.target
 Wants=bc250-cu-live-manager.service
 
 [Service]
@@ -482,14 +493,15 @@ Type=oneshot
 # La cwd di un'unità systemd è "/" (read-only su ostree): servono directory
 # scrivibili per i tool che usano la cwd (stress, OC).
 WorkingDirectory=/tmp
-ExecStart={python} -m buo boot-reconcile
+# --boot: la sessione (Steam) non è ancora avviata → basta il gate sui giochi
+ExecStart={python} -m buo boot-reconcile --boot
 RemainAfterExit=yes
 # Il reboot per attivare l'unlock è deciso dall'agente (tetto tentativi +
 # gate gioco): un fallimento dell'agente NON deve bloccare il boot.
 SuccessExitStatus=0 1
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
 """
 
 

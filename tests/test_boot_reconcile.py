@@ -328,6 +328,46 @@ class ReconcilerTestCase(unittest.TestCase):
             # 12 thread È lo stato corretto: nessun problema segnalato
             self.assertEqual(rec.degraded(), [])
 
+    def test_boot_run_ignores_steam_session_but_not_games(self):
+        """Al boot Steam È la sessione: non deve bloccare il recupero."""
+        self.present.write_text("0-11\n")
+        rec = self.make(boot_run=True)
+        rec._game_check_fn = lambda: False          # niente gioco
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = rec.reconcile()
+        self.assertEqual(report["reboot"]["rebooted"], True)
+
+    def test_manual_run_still_blocks_on_steam_session(self):
+        """Una run manuale mid-session resta prudente (regola di campo)."""
+        self.present.write_text("0-11\n")
+        self.game[0] = True
+        rec = self.make()                            # boot_run=False
+        rec._game_check_fn = lambda: True
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            report = rec.reconcile()
+        self.assertEqual(report["reboot"]["blocked"], "sessione_gioco_attiva")
+
+    def test_game_check_real_splits_game_from_session(self):
+        """`pgrep` che trova 'steam' blocca la run manuale, non quella di boot."""
+        class SteamOnly:
+            def __init__(self):
+                self.seen = []
+
+            def __call__(self, cmd, **kwargs):
+                self.seen.append(cmd[-1])
+                return (0, "1234 steam\n", "") if cmd[-1] == "steam" \
+                    else (1, "", "")
+
+        manual = self.make()
+        manual._game_check_fn = None
+        with patch("buo.state.reconcile.run_command", SteamOnly()):
+            self.assertTrue(manual._game_active_real(), "run manuale: blocca")
+        boot = self.make(boot_run=True)
+        boot._game_check_fn = None
+        with patch("buo.state.reconcile.run_command", SteamOnly()):
+            self.assertFalse(boot._game_active_real(),
+                             "run di boot: la sessione Steam non blocca")
+
     def test_dry_run_never_writes_nor_reboots(self):
         self.present.write_text("0-11\n")
         self.acpi.booted = False
@@ -361,7 +401,9 @@ class UnitTestCase(unittest.TestCase):
         text = unit_content("/var/opt/buo-venv/bin/python")
         self.assertIn("ExecStart=/var/opt/buo-venv/bin/python -m buo "
                       "boot-reconcile", text)
-        self.assertIn("WantedBy=multi-user.target", text)
+        self.assertIn("WantedBy=graphical.target", text)
+        self.assertIn("Before=graphical.target", text)
+        self.assertIn("boot-reconcile --boot", text)
         self.assertIn("WorkingDirectory=/tmp", text)
 
     def test_unit_name_and_no_boot_block_protection(self):

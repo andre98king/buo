@@ -619,8 +619,11 @@ def _print_boot_state(state) -> None:
               help="Installa e abilita l'agente di boot (gira a ogni "
                    "accensione)")
 @click.option("--uninstall", is_flag=True, help="Rimuove l'agente di boot")
+@click.option("--boot", "boot_run", is_flag=True,
+              help="Invocazione dall'unità di boot (sessione non ancora "
+                   "avviata): la sola sessione Steam non blocca il reboot")
 def boot_reconcile(check: bool, mock: bool, install_flag: bool,
-                   uninstall: bool) -> None:
+                   uninstall: bool, boot_run: bool) -> None:
     """Riallinea la macchina allo stato certificato dopo un cold boot.
 
     Verifica l'EFFETTO REALE, non il ledger: thread CPU online (la maschera
@@ -664,6 +667,7 @@ def boot_reconcile(check: bool, mock: bool, install_flag: bool,
         governor=GovernorWrapper(mock=mock, mock_hardware=hw),
         acpi=ACPIFix(mock=mock, mock_hardware=hw),
         dry_run=check or mock,
+        boot_run=boot_run,
     )
     if check:
         state = reconciler.check()
