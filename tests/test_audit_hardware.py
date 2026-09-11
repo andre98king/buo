@@ -168,17 +168,52 @@ class TestGpuCuCountUrm(unittest.TestCase):
                 side_effect=lambda name: "40" if name == "num_cu" else None):
             gpu = audit._audit_gpu()
         self.assertEqual(gpu["cu_count"], 40)
+        self.assertEqual(gpu["cu_source"], "sysfs")
 
     def test_audit_gpu_falls_back_to_live_manager_config(self):
-        """num_cu assente (runtime UMR) → cu_count dal config live-manager."""
+        """num_cu assente (runtime UMR) → cu_count dal conf, MARCATO stale."""
         audit = HardwareAudit()
         with mock.patch.object(HardwareAudit, "_read_sysfs",
                                return_value=None), \
+             mock.patch("buo.unlock.wrappers.bc250_live_manager."
+                        "BC250LiveManagerWrapper",
+                        return_value=mock.Mock(available=False)), \
              mock.patch.object(Path, "exists", return_value=True), \
              mock.patch.object(Path, "read_text",
                                return_value="  CUs active & routed  : 40/40\n"):
             gpu = audit._audit_gpu()
         self.assertEqual(gpu["cu_count"], 40)
+        # Il conf è persistenza, non stato live: il consumatore deve saperlo.
+        self.assertIn("conf", gpu["cu_source"])
+
+    def test_runtime_status_wins_over_stale_conf(self):
+        """Il routing LIVE batte il conf: conf stale 40 CU vs runtime 24.
+
+        Bug: leggere prima il conf riportava 40 CU mentre il routing reale
+        era 24 ("applicato ≠ verificato").
+        """
+        audit = HardwareAudit()
+        wrapper = mock.Mock(available=True)
+        wrapper.status.return_value = {
+            "stdout": "  CUs active & routed  : 24/40\n"}
+        with mock.patch("buo.unlock.wrappers.bc250_live_manager."
+                        "BC250LiveManagerWrapper", return_value=wrapper), \
+             mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch.object(Path, "read_text",
+                               return_value="  CUs active & routed  : 40/40\n"):
+            cu, source = audit._read_cu_count_umr()
+        self.assertEqual(cu, 24)
+        self.assertEqual(source, "runtime")
+
+    def test_not_determinable_returns_none(self):
+        audit = HardwareAudit()
+        wrapper = mock.Mock(available=False)
+        with mock.patch("buo.unlock.wrappers.bc250_live_manager."
+                        "BC250LiveManagerWrapper", return_value=wrapper), \
+             mock.patch.object(Path, "exists", return_value=False):
+            cu, source = audit._read_cu_count_umr()
+        self.assertIsNone(cu)
+        self.assertEqual(source, "non determinabile")
 
 
 class TestMesaFallback(unittest.TestCase):
@@ -225,66 +260,62 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestBootAcpiBlob(unittest.TestCase):
-    """Detection ostree: boot entry → blob initramfs-acpi-*.img (G5)."""
+class TestAcpiAudit(unittest.TestCase):
+    """ACPI: il segnale è la entry del deployment BOOTATO (ACPIFix.verify).
 
-    def _tree(self, initrd_line=None):
+    Prima l'audit accettava QUALSIASI entry BLS con un blob: con un blob
+    residuo su una entry vecchia diceva "fix presente" mentre la macchina
+    bootava senza tabelle (fail-open). Su ostree i nomi SSDT*CST in /sys non
+    sopravvivono (il kernel li fonde in SSDT1..N) → cst/pst derivano da lì.
+    """
+
+    def _distro(self, tool):
+        return mock.Mock(initramfs_tool=tool)
+
+    def _ssdt_dir(self, tmp, names):
+        tables = Path(tmp) / "tables"
+        tables.mkdir()
+        for n in names:
+            (tables / n).write_text("")
+        return tables
+
+    def test_booted_entry_verify_is_the_signal(self):
+        audit = HardwareAudit()
+        with mock.patch("buo.fix.acpi.detect_distro",
+                        return_value=self._distro("ostree")), \
+             mock.patch("buo.fix.acpi.ACPIFix.verify",
+                        return_value=True) as verify:
+            acpi = audit._audit_acpi()
+        verify.assert_called_once()
+        self.assertTrue(acpi["boot_fix_present"])
+        self.assertTrue(acpi["cst_present"])
+        self.assertTrue(acpi["pst_present"])
+
+    def test_stale_blob_on_another_entry_is_not_a_fix(self):
+        """verify() False (blob su entry NON bootata) → tabelle mancanti."""
+        audit = HardwareAudit()
+        with mock.patch("buo.fix.acpi.detect_distro",
+                        return_value=self._distro("ostree")), \
+             mock.patch("buo.fix.acpi.ACPIFix.verify", return_value=False):
+            acpi = audit._audit_acpi()
+        self.assertFalse(acpi["boot_fix_present"])
+        self.assertFalse(acpi["cst_present"])
+        self.assertFalse(acpi["pst_present"])
+
+    def test_non_ostree_keeps_table_names_as_signal(self):
+        """dracut/initramfs-tools: i nomi in /sys SONO il segnale."""
         import tempfile
-        td = tempfile.TemporaryDirectory()
-        root = Path(td.name)
-        entries = root / "loader" / "entries"
-        entries.mkdir(parents=True)
-        if initrd_line is not None:
-            (entries / "ostree-1.conf").write_text(
-                "title Bazzite\n"
-                "linux /ostree/.../vmlinuz-x\n"
-                f"{initrd_line}\n")
-        return td, root
-
-    def test_true_with_valid_blob(self):
-        td, root = self._tree("initrd /initramfs-acpi-1.img")
-        try:
-            blob = root / "initramfs-acpi-1.img"
-            blob.write_bytes(b"070701" + b"\x00" * 64)
-            self.assertTrue(HardwareAudit._boot_acpi_blob_present(td.name))
-        finally:
-            td.cleanup()
-
-    def test_false_without_entries(self):
-        td, _ = self._tree(None)
-        try:
-            self.assertFalse(HardwareAudit._boot_acpi_blob_present(td.name))
-        finally:
-            td.cleanup()
-
-    def test_false_when_blob_without_cpio_magic(self):
-        td, root = self._tree("initrd /initramfs-acpi-1.img")
-        try:
-            (root / "initramfs-acpi-1.img").write_bytes(b"NOTCPIO" + b"\x00" * 64)
-            self.assertFalse(HardwareAudit._boot_acpi_blob_present(td.name))
-        finally:
-            td.cleanup()
-
-    def test_false_when_entry_points_to_plain_initramfs(self):
-        td, root = self._tree("initrd /initramfs-1.img")
-        try:
-            (root / "initramfs-1.img").write_bytes(b"070701" + b"\x00" * 64)
-            self.assertFalse(HardwareAudit._boot_acpi_blob_present(td.name))
-        finally:
-            td.cleanup()
-
-    def test_audit_acpi_exposes_boot_fix_present(self):
-        td, root = self._tree("initrd /initramfs-acpi-1.img")
-        try:
-            (root / "initramfs-acpi-1.img").write_bytes(b"070701" + b"\x00" * 64)
-            with mock.patch("buo.audit.hardware.Path.is_dir",
-                            side_effect=lambda: True), \
-                 mock.patch("buo.audit.hardware.HardwareAudit."
-                            "_boot_acpi_blob_present",
-                            return_value=True):
-                audit = HardwareAudit()
+        audit = HardwareAudit()
+        with tempfile.TemporaryDirectory() as tmp:
+            tables = self._ssdt_dir(tmp, ["SSDT-CST", "SSDT-PST"])
+            with mock.patch("buo.fix.acpi.detect_distro",
+                            return_value=self._distro("dracut")), \
+                 mock.patch("buo.fix.acpi.ACPIFix.verify",
+                            return_value=False), \
+                 mock.patch("buo.audit.hardware.Path",
+                            return_value=tables):
                 acpi = audit._audit_acpi()
-            self.assertTrue(acpi["boot_fix_present"])
-            self.assertIn("ssdt_tables", acpi)
-        finally:
-            td.cleanup()
+        self.assertTrue(acpi["cst_present"])
+        self.assertTrue(acpi["pst_present"])
+        # Il blob sulla entry non è il segnale su queste distro
+        self.assertFalse(acpi["boot_fix_present"])

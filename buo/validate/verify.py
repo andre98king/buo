@@ -5,13 +5,15 @@
 """
 Fix Verification — verifica che ogni fix sia attivo e funzionante.
 
-Metodi di verifica (dal design finale, messaggio 100):
-    • 8-core CPU      → conteggio processor in /proc/cpuinfo
-    • 40-CU GPU       → num_cu da sysfs
+Metodi di verifica (dal design finale, messaggio 100) — sempre l'EFFETTO
+reale a runtime, mai la presenza di un file/conf/nome:
+    • 8-core CPU      → core FISICI + thread online (sysfs e /proc/cpuinfo)
+    • 40-CU GPU       → CU attive dal punto unico dell'audit (sysfs/UMR)
     • TLB fix         → assenza di crash in carichi compute
     • ACE fix         → vkmark con compute (FPS >= baseline)
     • IOMMU           → attivo (iommu=off ASSENTE: è lo stato corretto)
-    • ACPI fix        → tabelle SSDT*CST in /sys/firmware/acpi/tables
+    • ACPI fix        → ACPIFix.verify(): entry del deployment BOOTATO
+                        (su ostree i nomi SSDT*CST non sopravvivono)
     • Governor        → systemctl show -p ActiveState
 """
 
@@ -19,7 +21,6 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..utils.logging import LoggerMixin
-from ..utils.shell import run_command
 
 
 class FixVerifier(LoggerMixin):
@@ -60,30 +61,58 @@ class FixVerifier(LoggerMixin):
     # --------------------------- checkers ---------------------------- #
 
     def _check_cpu_cores(self):
+        """8 core FISICI / 16 thread reali: l'EFFETTO a runtime.
+
+        Il conteggio delle righe `processor` di /proc/cpuinfo sono i THREAD
+        SMT: una macchina 6c/12t superava il check `>= 8` (falso positivo di
+        campo). Punti unici riusati: `HardwareAudit._count_cpuinfo` (core
+        fisici, coppie physical/core id) e `cpu_online_count` (thread online).
+        Fail-closed: conteggio non determinabile → "non verificabile", mai ok.
+        """
         if self.mock and self.mock_hw is not None:
             ok = self.mock_hw.read_core_mask() == 0xFF
             return ok, "8 core (mock)" if ok else "6 core (mock)"
-        try:
-            with open("/proc/cpuinfo") as f:
-                cores = sum(1 for l in f if l.startswith("processor"))
-            return cores >= 8, f"{cores} core"
-        except Exception as e:
-            return False, str(e)
+        from ..audit.hardware import HardwareAudit
+        from ..unlock.validation import cpu_online_count
+        cores = HardwareAudit._count_cpuinfo()
+        threads = cpu_online_count()
+        if not cores:
+            return None, "core fisici non leggibili (/proc/cpuinfo) — non verificabile"
+        if threads is None:
+            return None, "thread online non leggibili (sysfs) — non verificabile"
+        return cores >= 8 and threads >= 16, \
+            f"{cores} core fisici, {threads} thread online (attesi 8/16)"
+
+    @staticmethod
+    def _gpu_effect():
+        """(CU, fonte) dal punto unico dell'audit.
+
+        `_audit_gpu` risolve l'ordine giusto (sysfs num_cu → runtime UMR/
+        live-manager) e marca il dato che viene dal solo conf: nessuna
+        seconda implementazione della lettura CU.
+        """
+        from ..audit.hardware import HardwareAudit
+        gpu = HardwareAudit()._audit_gpu()
+        return gpu.get("cu_count"), gpu.get("cu_source") or ""
 
     def _check_gpu_cu(self):
+        """CU attive: lettura reale (sysfs o UMR/live-manager a runtime).
+
+        Il vecchio loop su `card*/num_cu` non trovava nulla su questo path
+        ostree (il file non esiste) e l'ordine di `iterdir` non è
+        deterministico → falso negativo sistematico.
+        """
         if self.mock and self.mock_hw is not None:
             cu = self.mock_hw.get_cu_count()
             return cu >= 38, f"{cu} CU (mock)"
-        try:
-            for entry in Path("/sys/class/drm").iterdir():
-                if entry.name.startswith("card"):
-                    num_cu = entry / "device" / "num_cu"
-                    if num_cu.exists():
-                        cu = int(num_cu.read_text().strip())
-                        return cu >= 38, f"{cu} CU"
-        except Exception:
-            pass
-        return False, "num_cu non leggibile"
+        cu, source = self._gpu_effect()
+        if cu is None:
+            return None, ("CU non determinabili (num_cu assente e "
+                          "live-manager muto) — non verificabile")
+        if source.startswith("conf"):
+            return None, (f"{cu} CU ma solo dal {source}: è persistenza, "
+                          "non un effetto — non verificabile")
+        return cu >= 38, f"{cu} CU ({source})"
 
     def _check_iommu(self):
         if self.mock and self.mock_hw is not None:
@@ -99,8 +128,20 @@ class FixVerifier(LoggerMixin):
             return False, str(e)
 
     def _check_acpi(self):
+        """Tabelle ACPI: su ostree il NOME non sopravvive.
+
+        Il kernel fonde gli override negli slot SSDT1..N → cercare "CST" nei
+        nomi dà un falso negativo col fix attivo. Fonte unica: ACPIFix.verify()
+        (entry del deployment BOOTATO), la stessa cosa che guarda il gate.
+        """
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.state.is_acpi_fixed, "CST presente (mock)"
+        from ..fix.acpi import ACPIFix
+        fix = ACPIFix()
+        if fix.distro.initramfs_tool == "ostree":
+            ok = bool(fix.verify())
+            return ok, ("tabelle ACPI sulla entry bootata" if ok
+                        else "nessuna tabella ACPI sulla entry bootata")
         tables = Path("/sys/firmware/acpi/tables")
         try:
             ssdt = [p.name for p in tables.glob("SSDT*")] if tables.exists() else []
@@ -120,12 +161,20 @@ class FixVerifier(LoggerMixin):
         return state == "active", state
 
     def _check_gpu_mask(self):
+        """EFFETTO (CU instradate a runtime), non il file di conf.
+
+        /etc/modprobe.d/bc250-40cu-selective-mask.conf è INERTE su ostree
+        (lezione GTT: i parametri entrano solo dall'initramfs) e sul campo
+        nessuno lo scrive più → verificare il file era scollegato
+        dall'hardware. Non determinabile a runtime → "non verificabile".
+        """
         if self.mock and self.mock_hw is not None:
             return True, "maschera applicata (mock)"
-        mask = Path("/etc/modprobe.d/bc250-40cu-selective-mask.conf")
-        if mask.exists():
-            return True, f"{mask.name} presente"
-        return False, "nessuna maschera installata"
+        cu, source = self._gpu_effect()
+        if cu is None or source.startswith("conf"):
+            return None, (f"CU instradate non leggibili a runtime "
+                          f"(fonte: {source or 'ignota'}) — non verificabile")
+        return True, f"{cu} CU instradate ({source})"
 
     def _check_gtt(self):
         """Tetto VRAM dinamica EFFETTIVO: `ttm.pages_limit` ≥ richiesto.
@@ -156,13 +205,16 @@ class FixVerifier(LoggerMixin):
         return False, "gtt tuning non attivo"
 
     def _check_fan(self):
-        """Sensori SuperIO attivi: modulo nct6683 caricato (mock risolto)."""
+        """Sensori/PWM SuperIO EFFETTIVI, non `lsmod`.
+
+        Il modulo caricato può non esporre nulla (nct6683 senza `force=true`)
+        → il fix risultava "ok" senza alcun sensore. Stesso punto unico di
+        FanControl.verify() (`sensor_effect`), motivo incluso nel dettaglio.
+        """
         if self.mock and self.mock_hw is not None:
-            return True, "modulo nct6683 (mock)"
-        rc, out, _ = run_command(["lsmod"], check=False)
-        if rc == 0 and "nct668" in out:
-            return True, "nct6683 caricato"
-        return False, "nct6683 non caricato"
+            return True, "sensori nct6686 (mock)"
+        from ..fix import fan as fan_mod
+        return fan_mod.sensor_effect(fan_mod.HWMON_BASE)
 
     def _check_vram(self):
         """VRAM config: verificabile solo se bc250_memcfg è stato applicato

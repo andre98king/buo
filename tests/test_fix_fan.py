@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Test G7: persistenza fan al boot (modules-load.d + modprobe.d)."""
+"""Test fan: persistenza al boot (G7) + EFFETTO reale dei sensori (F4)."""
 
 import tempfile
 import unittest
@@ -9,6 +9,62 @@ from unittest import mock
 
 from buo.fix import fan as fan_mod
 from buo.fix.fan import FanControl
+
+
+class TestFanSensorEffect(unittest.TestCase):
+    """F4: verify() guarda l'EFFETTO (hwmon nct6686 con ventole/PWM), non
+    `lsmod` — un modulo caricato senza `force=true` non espone nulla."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _hwmon(self, name="nct6686", files=()):
+        d = self.base / "hwmon2"
+        d.mkdir(exist_ok=True)
+        (d / "name").write_text(name + "\n")
+        for fname, value in files:
+            (d / fname).write_text(value + "\n")
+        return self.base
+
+    def test_verify_true_when_fan_spins(self):
+        base = self._hwmon(files=[("fan1_input", "0"), ("fan2_input", "2090")])
+        ok, why = fan_mod.sensor_effect(str(base))
+        self.assertTrue(ok)
+        self.assertIn("2090", why)
+
+    def test_verify_true_when_pwm_enabled(self):
+        base = self._hwmon(files=[("fan1_input", "0"), ("pwm2_enable", "2")])
+        ok, why = fan_mod.sensor_effect(str(base))
+        self.assertTrue(ok)
+        self.assertIn("pwm2_enable", why)
+
+    def test_verify_false_when_module_present_without_effect(self):
+        base = self._hwmon(files=[("fan1_input", "0"), ("pwm1_enable", "0")])
+        ok, why = fan_mod.sensor_effect(str(base))
+        self.assertFalse(ok)
+        self.assertIn("nct6686", why)
+
+    def test_verify_false_without_hwmon(self):
+        ok, why = fan_mod.sensor_effect(str(self.base))
+        self.assertFalse(ok)
+        self.assertIn("nessun hwmon", why)
+
+    def test_verify_false_when_base_unreadable(self):
+        ok, why = fan_mod.sensor_effect("/nonexistent/hwmon")
+        self.assertFalse(ok)
+        self.assertIn("non leggibile", why)
+
+    def test_fancontrol_verify_uses_the_effect(self):
+        """`lsmod` non conta più: senza hwmon nct6686 verify() è False."""
+        with mock.patch.object(fan_mod, "HWMON_BASE", str(self.base)):
+            self.assertFalse(FanControl().verify())
+        base = self._hwmon(files=[("fan2_input", "1800")])
+        with mock.patch.object(fan_mod, "HWMON_BASE", str(base)):
+            self.assertTrue(FanControl().verify())
 
 
 class TestFanPersistence(unittest.TestCase):

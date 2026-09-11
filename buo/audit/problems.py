@@ -108,9 +108,11 @@ class ProblemDetector(LoggerMixin):
         # Con l'iniezione via initramfs (metodo ostree/dracut/mkinitcpio) le
         # tabelle caricate NON compaiono con il loro nome in /sys/firmware/
         # acpi/tables: il kernel le espone come SSDT1..N → `cst_present` /
-        # `pst_present` sono FALSI anche col fix attivo (falso positivo di
-        # campo). Il segnale affidabile è la boot entry col blob concatenato
-        # (`boot_fix_present`), la stessa cosa che verifica il gate del fix.
+        # `pst_present` per nome darebbero un falso positivo di campo.
+        # `boot_fix_present` (ACPIFix.verify(): entry del deployment
+        # BOOTATO) è il segnale verificato; sulla stessa distro l'audit
+        # deriva già cst/pst da lì, quindi il fallback per nome vale solo
+        # per le distro dove i nomi sopravvivono.
         acpi_injected = bool(acpi.get("boot_fix_present"))
         if not acpi_injected and not acpi.get("cst_present", True):
             problems.append({

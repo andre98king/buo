@@ -14,7 +14,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..constants import (CORE_MASK_REG, CORE_MASK_STOCK, CORE_MASK_UNLOCKED,
                          HEALTH_RESULTS_FILE, PCI_CONFIG_PATH)
@@ -105,6 +105,7 @@ class HardwareAudit(LoggerMixin):
                 "ssdt_tables": ["SSDT-CST", "SSDT-PST"] if acpi_fixed else [],
                 "cst_present": acpi_fixed,
                 "pst_present": acpi_fixed,
+                "boot_fix_present": acpi_fixed,
             },
             "governor": {
                 "service": GOVERNOR_SERVICE,
@@ -243,35 +244,31 @@ class HardwareAudit(LoggerMixin):
 
         raw_cu = self._read_sysfs("num_cu")
         if raw_cu is not None and str(raw_cu).strip().isdigit():
-            cu_count = int(str(raw_cu).strip())
+            cu_count, cu_source = int(str(raw_cu).strip()), "sysfs"
         else:
-            # num_cu assente sul path runtime UMR (ostree): il conteggio
-            # CU è noto via bc250-cu-live-manager.
-            cu_count = self._read_cu_count_umr()
+            # num_cu assente sul path runtime UMR (ostree): conteggio dal
+            # live-manager (runtime PRIMA del conf — vedi _read_cu_count_umr).
+            cu_count, cu_source = self._read_cu_count_umr()
         return {
             "cu_count": cu_count,
+            # Provenienza del dato: il conf può essere STALE (valori marcati
+            # come "runtime" sono l'unico effetto verificato).
+            "cu_source": cu_source,
             "stable_cu": None,
             "defective_cu": None,
             "wgp_mask": self._read_sysfs("wgp_mask"),
         }
 
-    def _read_cu_count_umr(self) -> Optional[int]:
-        """Fallback CU count via bc250-cu-live-manager (runtime UMR).
+    def _read_cu_count_umr(self) -> Tuple[Optional[int], str]:
+        """(CU instradate, fonte del dato) via bc250-cu-live-manager.
 
-        Prova prima il file di config (/etc/bc250-cu-live-manager.conf),
-        poi l'output di `status` ("CUs active & routed : X/Y"). Mai
-        fabbrica un valore: ritorna None se la riga non viene trovata.
+        RUNTIME prima: l'output di `status` legge la maschera WGP live.
+        Il conf (/etc/bc250-cu-live-manager.conf) è solo l'ULTIMA SPIAGGIA
+        ed è MARCATO: è un file di persistenza, può essere stale e riportare
+        40 CU mentre il routing reale è 24 ("applicato ≠ verificato").
+        Mai fabbricare un valore: (None, motivo) se non determinabile.
         """
-        # 1) file di config (se contiene una riga "CUs active & routed")
-        try:
-            conf = Path("/etc/bc250-cu-live-manager.conf")
-            if conf.exists():
-                n = self._parse_routed_cus(conf.read_text())
-                if n is not None:
-                    return n
-        except Exception:
-            pass
-        # 2) output di `status` (fonte autoritativa a runtime)
+        # 1) runtime: output di `status` (fonte autoritativa)
         try:
             from ..unlock.wrappers.bc250_live_manager import BC250LiveManagerWrapper
             wrapper = BC250LiveManagerWrapper()
@@ -279,10 +276,23 @@ class HardwareAudit(LoggerMixin):
                 result = wrapper.status()
                 n = self._parse_routed_cus(result.get("stdout", ""))
                 if n is not None:
-                    return n
+                    return n, "runtime"
         except Exception:
             pass
-        return None
+        # 2) file di config: PERSISTENZA, non stato live
+        try:
+            conf = Path("/etc/bc250-cu-live-manager.conf")
+            if conf.exists():
+                n = self._parse_routed_cus(conf.read_text())
+                if n is not None:
+                    self.logger.warning(
+                        "CU count da %s (routing live non leggibile): dato "
+                        "di persistenza, può non riflettere le CU attive",
+                        conf)
+                    return n, "conf (stale?)"
+        except Exception:
+            pass
+        return None, "non determinabile"
 
     @staticmethod
     def _parse_routed_cus(text: str) -> Optional[int]:
@@ -296,7 +306,7 @@ class HardwareAudit(LoggerMixin):
         """Legge una voce sysfs del dispositivo amdgpu."""
         drm = "/sys/class/drm"
         try:
-            for entry in os.listdir(drm):
+            for entry in sorted(os.listdir(drm)):
                 if entry.startswith("card") and \
                    os.path.exists(f"{drm}/{entry}/device"):
                     path = f"{drm}/{entry}/device/{name}"
@@ -424,45 +434,34 @@ class HardwareAudit(LoggerMixin):
                 ssdt = sorted(p.name for p in tables_dir.glob("SSDT*"))
             except Exception:
                 pass
+
+        # Tabelle presenti PER IL DEPLOYMENT BOOTATO: punto unico
+        # ACPIFix.verify() (su ostree risolve l'entry dal valore `ostree=`
+        # di /proc/cmdline). Prima si accettava QUALSIASI entry BLS: un blob
+        # residuo su una entry vecchia faceva dire all'audit che il fix
+        # c'era mentre la macchina bootava senza tabelle — fail-open, lo
+        # stesso bug chiuso in ACPI.verify() (ogni transazione ostree
+        # rigenera le entry e la più nuova, senza blob, diventa il default).
+        from ..fix.acpi import ACPIFix
+        fix = ACPIFix(mock=self.mock, mock_hardware=self.mock_hw)
+        tables_on_boot = bool(fix.verify())
+        if fix.distro.initramfs_tool == "ostree":
+            # Ostree: gli override sono FUSI negli slot SSDT1..N → il nome
+            # in /sys non è un segnale (falso negativo col fix attivo). La
+            # fonte è verify(), la stessa cosa che guarda il gate.
+            cst = pst = tables_on_boot
+        else:
+            cst = any("CST" in s for s in ssdt)
+            pst = any("PST" in s for s in ssdt)
         return {
             "ssdt_tables": ssdt,
-            "cst_present": any("CST" in s for s in ssdt),
-            "pst_present": any("PST" in s for s in ssdt),
+            "cst_present": cst,
+            "pst_present": pst,
             "cpu_present": any("CPU" in s for s in ssdt),
-            # ostree: le tabelle caricate non compaiono per nome in /sys
-            # (fuse negli slot SSDT1-N): segnale affidabile = boot entry
-            "boot_fix_present": self._boot_acpi_blob_present(),
+            # Significato: le tabelle ci sono per il DEPLOYMENT BOOTATO
+            # (non "esiste un blob su qualche entry").
+            "boot_fix_present": tables_on_boot,
         }
-
-    @staticmethod
-    def _boot_acpi_blob_present(boot_dir: str = "/boot") -> bool:
-        """True se la boot entry di default punta a un blob concatenato.
-
-        Metodo ostree (initramfs concatenato): il segnale affidabile NON
-        sono i nomi delle tabelle in /sys (il kernel fonde gli override
-        negli slot SSDT1-N), ma la boot entry che carica un blob
-        /boot/initramfs-acpi-*.img con magic cpio newc in testa.
-        """
-        loader = Path(boot_dir) / "loader" / "entries"
-        if not loader.is_dir():
-            return False
-        try:
-            for entry in sorted(loader.glob("*.conf")):
-                text = entry.read_text(errors="replace")
-                m = re.search(r"^initrd\s+(\S+)", text, re.M)
-                if not m:
-                    continue
-                name = Path(m.group(1)).name
-                if not name.startswith("initramfs-acpi-"):
-                    continue
-                blob = Path(boot_dir) / name
-                if blob.is_file():
-                    with open(blob, "rb") as f:
-                        if f.read(6) == b"070701":
-                            return True
-        except Exception:
-            return False
-        return False
 
     # ------------------------- GOVERNOR ---------------------------- #
 
