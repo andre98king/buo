@@ -319,3 +319,28 @@ class TestAcpiAudit(unittest.TestCase):
         self.assertTrue(acpi["pst_present"])
         # Il blob sulla entry non è il segnale su queste distro
         self.assertFalse(acpi["boot_fix_present"])
+
+class SuperIOConditionalTestCase(unittest.TestCase):
+    """`superio_missing` dipende dall'EFFETTO, non è un problema "a priori".
+
+    Era fra i problemi dichiarati "sempre presenti su una BC-250 stock": su una
+    macchina con ventole e PWM attivi (nct6686 + fan2 > 0) il report affermava
+    un difetto che non esisteva.
+    """
+
+    def _ids(self, fan_ok):
+        from unittest import mock as m
+        from buo.audit.problems import ProblemDetector
+        with m.patch("buo.fix.fan.sensor_effect",
+                     return_value=(fan_ok, "motivo di prova")):
+            return [p["id"] for p in ProblemDetector().detect({})]
+
+    def test_no_superio_problem_when_sensors_active(self):
+        self.assertNotIn("superio_missing", self._ids(True))
+
+    def test_superio_problem_when_sensors_missing(self):
+        self.assertIn("superio_missing", self._ids(False))
+
+
+if __name__ == "__main__":
+    unittest.main()

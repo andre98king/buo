@@ -29,6 +29,24 @@ from ..utils.logging import LoggerMixin
 from ..utils.shell import stress_cwd, which
 
 
+def max_metric(*values):
+    """Massimo fra misure, ignorando i None (sensore non leggibile).
+
+    Una misura mai letta NON è 0: 0 W/0 °C sarebbero valori finti nel
+    riepilogo (C1). Se nessuna misura è valida il risultato è None e chi
+    stampa mostra "non rilevabile".
+    """
+    valid = [v for v in values if v is not None]
+    return max(valid) if valid else None
+
+
+def fmt_metric(value, unit: str = "") -> str:
+    """Formatta una misura (None → "n/d")."""
+    if value is None:
+        return "n/d"
+    return f"{value:.0f}{unit}"
+
+
 class StressTest(LoggerMixin):
     """Esegue lo stress test di validazione."""
 
@@ -95,7 +113,7 @@ class StressTest(LoggerMixin):
             }
 
         reader = self._get_reader()
-        cpu_temp_max, gpu_temp_max, power_max = 0.0, 0.0, 0.0
+        cpu_temp_max = gpu_temp_max = power_max = None
 
         # Carico CPU (con campionamento live) — saltato con scope="gpu"
         # (rc=0 sintetico: il componente non è in validazione)
@@ -105,12 +123,13 @@ class StressTest(LoggerMixin):
             if which("stress-ng"):
                 cpu_rc, t1, t2, p = self._run_loaded(
                     ["stress-ng", "--cpu", "0", "--timeout", str(duration_s),
-                     "--metrics-brief"], duration_s, reader, power_budget)
+                     "--metrics-brief"], duration_s, reader, power_budget,
+                    label="CPU")
                 cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
             elif which("stress"):
                 cpu_rc, t1, t2, p = self._run_loaded(
                     ["stress", "--cpu", "0", "--timeout", str(duration_s)],
-                    duration_s, reader, power_budget)
+                    duration_s, reader, power_budget, label="CPU")
                 cpu_temp_max, gpu_temp_max, power_max = t1, t2, p
 
         # Carico GPU — saltato con scope="cpu".
@@ -135,10 +154,10 @@ class StressTest(LoggerMixin):
             else:
                 gpu_cmd_used = cmd
                 gpu_rc, t1, t2, p = self._run_loaded(
-                    cmd, duration_s, reader, power_budget)
-                cpu_temp_max = max(cpu_temp_max, t1)
-                gpu_temp_max = max(gpu_temp_max, t2)
-                power_max = max(power_max, p)
+                    cmd, duration_s, reader, power_budget, label="GPU")
+                cpu_temp_max = max_metric(cpu_temp_max, t1)
+                gpu_temp_max = max_metric(gpu_temp_max, t2)
+                power_max = max_metric(power_max, p)
 
         passed = cpu_rc == 0 and gpu_rc == 0
         if not passed:
@@ -152,9 +171,12 @@ class StressTest(LoggerMixin):
             "passed": passed,
             "duration_minutes": duration_minutes,
             "scope": scope,
-            "cpu_temp_max": round(cpu_temp_max, 1),
-            "gpu_temp_max": round(gpu_temp_max, 1),
-            "power_max": round(power_max, 1),
+            "cpu_temp_max": (round(cpu_temp_max, 1)
+                             if cpu_temp_max is not None else None),
+            "gpu_temp_max": (round(gpu_temp_max, 1)
+                             if gpu_temp_max is not None else None),
+            "power_max": (round(power_max, 1)
+                          if power_max is not None else None),
             "cpu_rc": cpu_rc,
             "gpu_rc": gpu_rc,
             "gpu_skipped": gpu_skipped,
@@ -167,8 +189,9 @@ class StressTest(LoggerMixin):
     def _run_loaded(self, cmd: List[str], duration_s: int, reader: Any,
                     power_budget: int,
                     on_tick: Optional[Callable[[], None]] = None,
-                    progress_s: int = 30
-                    ) -> Tuple[int, float, float, float]:
+                    progress_s: int = 30, label: str = "CPU"
+                    ) -> Tuple[int, Optional[float], Optional[float],
+                               Optional[float]]:
         """Esegue un comando di stress con campionamento LIVE e abort.
 
         Ogni secondo campiona temperature/potenza (reali o mock) e invoca
@@ -190,7 +213,10 @@ class StressTest(LoggerMixin):
         proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             cwd=stress_cwd())
-        cpu_temp_max = gpu_temp_max = power_max = 0.0
+        # None = misura MAI letta (sensore non leggibile): non diventa 0
+        cpu_temp_max: Optional[float] = None
+        gpu_temp_max: Optional[float] = None
+        power_max: Optional[float] = None
         started = time.monotonic()
         last_progress = started
         deadline = (started + duration_s + self.deadline_grace)
@@ -224,11 +250,11 @@ class StressTest(LoggerMixin):
                                 "non verificabile", label)
                         continue
                     if bucket == "cpu":
-                        cpu_temp_max = max(cpu_temp_max, value)
+                        cpu_temp_max = max_metric(cpu_temp_max, value)
                     elif bucket == "gpu":
-                        gpu_temp_max = max(gpu_temp_max, value)
+                        gpu_temp_max = max_metric(gpu_temp_max, value)
                     else:
-                        power_max = max(power_max, value)
+                        power_max = max_metric(power_max, value)
                     if value > limit:
                         proc.terminate()
                         raise SafetyViolation(
@@ -240,11 +266,13 @@ class StressTest(LoggerMixin):
                 if now - last_progress >= progress_s:
                     elapsed = int(now - started)
                     self.logger.info(
-                        "Stress in corso: %d:%02d/%d:%02d — CPU %.0f°C · "
-                        "GPU %.0f°C (massimi, nessun errore finora)",
-                        elapsed // 60, elapsed % 60,
+                        "Stress in corso (%s): %d:%02d/%d:%02d — CPU %s · "
+                        "GPU %s · %s (massimi, nessun errore finora)",
+                        label, elapsed // 60, elapsed % 60,
                         duration_s // 60, duration_s % 60,
-                        cpu_temp_max, gpu_temp_max)
+                        fmt_metric(cpu_temp_max, "°C"),
+                        fmt_metric(gpu_temp_max, "°C"),
+                        fmt_metric(power_max, "W"))
                     last_progress = now
                 time.sleep(1)
         finally:

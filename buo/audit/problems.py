@@ -189,13 +189,22 @@ class ProblemDetector(LoggerMixin):
             "detail": "Aumentare ttm.pages_limit per usare più memoria",
             "fix": "gtt",
         })
-        problems.append({
-            "id": "superio_missing",
-            "severity": "bassa",
-            "title": "Sensori SuperIO (NCT6686) non attivi",
-            "detail": "modprobe nct6683 force=true (o driver nct6687)",
-            "fix": "fan",
-        })
+        # Sensori/PWM: NON è un problema "sempre presente" — dipende
+        # dall'effetto reale (punto unico `fix.fan.sensor_effect`: hwmon
+        # nct668* con ventola o PWM attivi). Dichiararlo a priori era la
+        # stessa classe di bug delle tabelle ACPI per nome: il report
+        # affermava un difetto che la macchina non aveva.
+        from ..fix.fan import sensor_effect
+        fan_ok, fan_reason = sensor_effect()
+        if not fan_ok:
+            problems.append({
+                "id": "superio_missing",
+                "severity": "bassa",
+                "title": "Sensori SuperIO (NCT6686) non attivi",
+                "detail": f"{fan_reason} — modprobe nct6683 force=true "
+                          "(o driver nct6687)",
+                "fix": "fan",
+            })
 
         if self.mock and self.mock_hw is not None:
             problems = self._mock_filter(problems)

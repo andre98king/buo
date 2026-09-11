@@ -42,6 +42,42 @@
   tabelle 8-core (ogni transazione ostree rigenera le entry e la più nuova,
   senza blob, diventa quella di default).
 
+### Corretto (rifinitura 11/09 sera — audit sistematico delle stesse classi di bug)
+
+- **Sicurezza SMU: nessun accesso col governor in stato incerto.** `_do_cpu_unlock`
+  scriveva il registro core senza alcun gate; `_phase_optimize` fermava il governor
+  ignorando l'esito; l'apply UV girava senza verifica; `oc/apply` e `safety/reader`
+  leggevano `systemctl is-active` (che esce con rc=3 **anche** per
+  `activating`/`deactivating`: "non è active" ≠ "è fermo"). Ora un solo punto
+  (`governor_states()`/`governor_confirmed_inactive()`), stop verificato con retry e
+  abort su stato ignoto, e il display OC mostra lo stato reale.
+- **"Applicato" solo con l'effetto verificato.** `_check_cpu_cores` considerava ok una
+  macchina a **6 core/12 thread** (soglia sulle righe `processor`); `_check_gpu_cu`
+  leggeva `card*/num_cu` (inesistente su questo path ostree → falso negativo);
+  `_check_gpu_mask` verificava l'esistenza di un conf `modprobe.d` (inerte su ostree);
+  `FanControl.verify()` si accontentava di `lsmod` (modulo caricato ≠ sensori attivi);
+  l'audit dei CU leggeva un conf stale come dato runtime (nuovo campo `cu_source`).
+- **ACPI: una sola fonte, l'entry bootata.** `_boot_acpi_blob_present` (audit) accettava
+  "una qualunque entry" — lo stesso fail-open già chiuso in `verify()`, che sopprimeva i
+  problemi ACPI quando il blob stava su un'entry vecchia. Eliminata: `boot_fix_present`
+  ora significa "tabelle per il **deployment bootato**"; su ostree anche `cst/pst` si
+  leggono da lì (le tabelle iniettate sono fuse in `SSDT1..N`: il check per nome dava
+  falsi "ACPI mancante").
+- **Ledger ≠ realtà.** `gpu_40cu` veniva saltato dal ledger senza guardare le CU reali
+  (routing UMR volatile); `unlock_lost` si limitava a una nota (run "verde" a 12 thread)
+  → il ledger viene ora sgonfiato; una transazione ostree (kargs GTT) rigenera le entry
+  BLS e invalida il fix ACPI appena applicato → viene tolto dal ledger e riapplicato al
+  rientro (evita 16 thread **senza** tabelle).
+- **Reboot guardati.** Ogni reboot forza il reset **warm** (la maschera core sopravvive
+  solo al warm reset: con un cold reset l'unlock si perde → boot-loop, caso reale della
+  community); kill-switch `bc250.nocoreunlock` anche nel flusso di `unleash`; gate gioco
+  (mai un reboot su una partita in corso — la sola sessione Steam non blocca); se
+  `buo-resume.service` non viene creato il reboot è **annullato** invece di lasciare la
+  run orfana.
+- **`superio_missing` ora dipende dall'effetto** (hwmon `nct668*` con ventola o PWM
+  attivi): era dichiarato "sempre presente su una BC-250 stock", quindi il report
+  segnalava un difetto anche su macchine con ventole funzionanti.
+
 ## v1.5.0 (2026-09-11)
 
 ### Aggiunto

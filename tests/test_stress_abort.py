@@ -64,6 +64,34 @@ class TestStressAbort(unittest.TestCase):
         self.assertGreaterEqual(gpu_max, 45.0)
         self.assertGreaterEqual(power_max, 120.0)
 
+    def test_unreadable_power_is_not_reported_as_zero(self):
+        """Sensore di potenza muto → None, MAI 0 W nel riepilogo (C1).
+
+        Campo 11/09: la run reale ha stampato "picchi ... / 0 W" perché
+        `power_max` partiva da 0.0 e nessun campione arrivava.
+        """
+        stress = StressTest(reader=_BlindReader())
+        rc, cpu_max, gpu_max, power_max = stress._run_loaded(
+            ["sleep", "2"], 2, _BlindReader(), 300)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(power_max)
+        self.assertIsNone(cpu_max)
+
+    def test_ticker_labels_the_component(self):
+        """Il ticker dice QUALE componente sta girando (prima diceva sempre
+        '— CPU', anche durante il passaggio GPU)."""
+        import logging
+        stress = StressTest(reader=_CoolReader())
+        from unittest import mock as m
+        logger = logging.getLogger("buo.StressTest")
+        with m.patch.object(logger, "info") as info:
+            stress._run_loaded(["sleep", "2"], 2, _CoolReader(), 300,
+                               progress_s=1, label="GPU")
+        # logger lazy: il template del ticker deve portare il componente
+        templates = [str(c.args[0]) for c in info.call_args_list if c.args]
+        self.assertTrue(any("Stress in corso (%s)" in msg
+                            for msg in templates), templates)
+
     def test_progress_ticker_logs(self):
         """Ticker di progresso (UX 04/09): le fasi lunghe (validate 10
         min) loggano una riga INFO periodica — il watch-log non deve
