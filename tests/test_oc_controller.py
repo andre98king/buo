@@ -208,16 +208,52 @@ class TestStatus(Base):
         self.assertIn("L2", st["state"]["phase_label"])
         self.assertEqual(st["log_tail"], ["riga di log"])
 
-    def test_status_governor_explicit_check(self):
-        # is-active è letto ESPLICITAMENTE (systemctl), mai dal reader
+    def test_status_governor_reads_active_state(self):
+        """Il display legge ActiveState REALE (mai `systemctl is-active`:
+        esce rc=3 anche per i transitori → mostrerebbe "inactive" mentre
+        il governor scrive sull'SMU)."""
         from buo.oc.state import OcState
         reader = FakeStateReader(self.oc, state=OcState())
         c = self.ctl(state_reader=reader)
-        c.status()
-        sys_calls = [c for c in self.rec.calls if c[0] == "systemctl"]
-        self.assertTrue(any(c[1:3] == ["is-active",
-                                       "cyan-skillfish-governor-smu"]
-                            for c in sys_calls))
+        fake = mock.Mock(returncode=0, stdout="ActiveState=activating\n"
+                                              "LoadState=loaded\n")
+        with mock.patch("buo.optimize.governor.subprocess.run",
+                        return_value=fake):
+            st = c.status()
+        self.assertEqual(st["governor"], "activating")
+        # `is-active` NON è più interrogato per il governor
+        self.assertFalse(any(c2[:2] == ["systemctl", "is-active"]
+                             and "cyan-skillfish-governor-smu" in c2
+                             for c2 in self.rec.calls))
+
+    def test_status_governor_active(self):
+        from buo.oc.state import OcState
+        c = self.ctl(state_reader=FakeStateReader(self.oc, state=OcState()))
+        fake = mock.Mock(returncode=0,
+                         stdout="ActiveState=active\nLoadState=loaded\n")
+        with mock.patch("buo.optimize.governor.subprocess.run",
+                        return_value=fake):
+            self.assertEqual(c.status()["governor"], "active")
+
+    def test_status_governor_unknown_state(self):
+        """Stato non leggibile (rc≠0) → "sconosciuto", mai "inactive"
+        (fail-closed sul display, come il gate SMU)."""
+        from buo.oc.state import OcState
+        c = self.ctl(state_reader=FakeStateReader(self.oc, state=OcState()))
+        fake = mock.Mock(returncode=1, stdout="")
+        with mock.patch("buo.optimize.governor.subprocess.run",
+                        return_value=fake):
+            self.assertEqual(c.status()["governor"], "sconosciuto")
+
+    def test_status_governor_mock_is_simulated(self):
+        """--mock/--dry-run: nessun comando, stato dichiarato "simulato"
+        (vocabolario di `_gov_word`, mai "inactive" = una misura finta)."""
+        from buo.oc.state import OcState
+        c = OcController(oc_dir=self.oc, mock=True, dry_run=True,
+                         state_reader=FakeStateReader(self.oc,
+                                                     state=OcState()))
+        self.assertEqual(c.status()["governor"], "simulato")
+        self.assertEqual(self.rec.calls, [])
 
 
 class TestHealDelegation(Base):

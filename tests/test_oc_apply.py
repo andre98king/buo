@@ -19,14 +19,19 @@ from buo.oc.smoke import SmokeResult
 
 
 class Recorder:
-    """Fake di run_command: registra argv e ritorna rc configurabili."""
+    """Fake di run_command: registra argv e ritorna rc configurabili.
+
+    Lo stato del governor NON passa più da qui: `_governor_active()` legge
+    ActiveState (`governor_states`), che i test iniettano (seam
+    `governor_active`, stringa)."""
 
     def __init__(self):
         self.calls = []
         self.apply_rc = 0          # bc250-apply
         self.install_rc = 0
         self.enable_rc = 0
-        self.governor_active = "inactive"   # per is-active governor
+        self.governor_active = "inactive"   # ActiveState del governor
+        self.stop_works = True   # False = stop "riesce" ma lo stato non cambia
 
     def __call__(self, cmd, timeout=60, sudo=False, capture=True, **kw):
         self.calls.append(list(cmd))
@@ -34,8 +39,6 @@ class Recorder:
         if base == "bc250-apply":
             return (self.apply_rc, "", "")
         if base == "systemctl":
-            if "is-active" in cmd and "cyan-skillfish-governor-smu" in cmd:
-                return (0, self.governor_active, "")
             if "is-enabled" in cmd:
                 return (0, "enabled", "")
             if "enable" in cmd:
@@ -44,7 +47,8 @@ class Recorder:
                 self.governor_active = "active"   # stateful → retry azzerato
                 return (0, "", "")
             if "stop" in cmd:
-                self.governor_active = "inactive"
+                if self.stop_works:
+                    self.governor_active = "inactive"
                 return (0, "", "")
             return (0, "", "")
         if base == "cp":
@@ -257,6 +261,131 @@ class TestApplySequence(Base):
         sys = [c for c in self.rec.calls if c[0] == "systemctl"
                and c[1] == "start"]
         self.assertTrue(sys)
+
+
+class TestGovernorStateFailClosed(Base):
+    """FIX fail-open (regola SMU): lo stato del governor si legge da
+    ActiveState REALE (`governor_states()`), mai `systemctl is-active` —
+    esce rc=3 anche per gli stati TRANSITORI (activating/deactivating) e
+    mappare rc≠0 su "inactive" faceva partire l'apply SMU mentre il
+    governor scriveva sull'SMU (freeze del SoC, incidente 30/08)."""
+
+    def _mk_real(self, states):
+        """ApplyManager con il METODO VERO `_governor_active` (gli altri
+        test lo sostituiscono col Recorder) e `governor_states` iniettato:
+        mai systemctl/subprocess reali."""
+        mgr = ApplyManager(
+            FakeController(), store=ProfileStore(self.oc),
+            validator=ProfileValidator(),
+            smoke=FakeSmoke(SmokeResult(ok=True)), reader=None,
+            oc_dir=self.oc, bc250_apply_cmd=str(self.fake_apply),
+            smu_conf=str(self.smu_conf), mock=False, dry_run=False)
+        mgr._cmd = self.rec
+        patcher = mock.patch("buo.oc.apply.governor_states",
+                             return_value=states)
+        self.gov_states = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mgr
+
+    def test_reads_active_state_not_is_active(self):
+        """`activating` è uno stato REALE (prima l'output veniva scartato):
+        la lettura passa dal punto unico `governor_states()`, e `activating`
+        NON vale come "fermo confermato"."""
+        mgr = self._mk_real({"ActiveState": "activating",
+                             "LoadState": "loaded"})
+        self.assertEqual(mgr._governor_active(), "activating")
+        self.assertIsNone(mgr._governor_confirmed_inactive())
+        self.assertTrue(self.gov_states.called)
+
+    def test_unknown_state_is_not_confirmed(self):
+        """Nessuno stato leggibile → "unknown" e NON confermato fermo."""
+        mgr = self._mk_real({})
+        self.assertEqual(mgr._governor_active(), "unknown")
+        self.assertIsNone(mgr._governor_confirmed_inactive())
+
+    def test_apply_aborts_when_governor_transient(self):
+        """Activating/deactivating ⇒ ABORT: nessun apply SMU, marcatore
+        aborted, governor comunque riavviato (invariante I2)."""
+        for state in ("activating", "deactivating"):
+            with self.subTest(state=state):
+                self.rec.calls.clear()
+                self.rec.stop_works = False   # stop "ok" ma stato invariato
+                self.rec.governor_active = state
+                out = self.mk().apply(self.stock())
+                self.assertEqual(out.result, "aborted")
+                self.assertEqual(out.cause, "governor non fermato")
+                self.assertFalse([c for c in self.rec.calls
+                                  if Path(c[0]).name == "bc250-apply"])
+                self.assertTrue([c for c in self.rec.calls
+                                 if c[0] == "systemctl" and "start" in c])
+
+    def test_apply_aborts_when_state_unknown(self):
+        """Stato non determinabile ⇒ ABORT (fail-closed): nessun comando
+        bc250-apply, nemmeno quello di re-apply."""
+        mgr = self._mk_real({})
+        out = mgr.apply(self.stock())
+        self.assertEqual(out.result, "aborted")
+        self.assertEqual(out.cause, "governor non fermato")
+        self.assertFalse([c for c in self.rec.calls
+                          if Path(c[0]).name == "bc250-apply"])
+
+    def test_apply_proceeds_when_governor_failed(self):
+        """`failed` è "fermo CONFERMATO" quanto `inactive`: si procede."""
+        self.rec.stop_works = False
+        self.rec.governor_active = "failed"
+        out = self.mk().apply(self.stock())
+        self.assertEqual(out.result, "ok", out.cause)
+
+    def test_stop_retries_when_still_active(self):
+        """Stop inefficace (ancora active) → ri-verifica: secondo stop e
+        procedi solo quando lo stato è confermato fermo."""
+        mgr = self._mk_real({})
+        seq = iter([{"ActiveState": "active"}, {"ActiveState": "inactive"}])
+        with mock.patch("buo.oc.apply.governor_states",
+                        side_effect=lambda *a, **k: next(seq)), \
+                mock.patch("buo.oc.apply.time.sleep"):
+            details = []
+            self.assertTrue(mgr._governor_stop_verified(details))
+        stops = [c for c in self.rec.calls
+                 if c[0] == "systemctl" and "stop" in c]
+        self.assertEqual(len(stops), 2)
+        self.assertTrue(any("retry" in d for d in details), details)
+
+    def test_stop_aborts_after_two_ineffective_stops(self):
+        """Due stop senza effetto (governor sempre active) → abort."""
+        mgr = self._mk_real({})
+        with mock.patch("buo.oc.apply.governor_states",
+                        return_value={"ActiveState": "active"}), \
+                mock.patch("buo.oc.apply.time.sleep"):
+            details = []
+            self.assertFalse(mgr._governor_stop_verified(details))
+        self.assertTrue(any("NON fermabile" in d for d in details), details)
+
+    def test_start_path_unknown_state_alerts_without_abort(self):
+        """Sul percorso di START lo stato ignoto NON è un abort: il
+        governor va comunque (ri)avviato (invariante I2) — esito = alert."""
+        mgr = self._mk_real({})
+        with mock.patch("buo.oc.apply.time.sleep"):
+            details = []
+            self.assertFalse(mgr._governor_start_verified(details))
+        starts = [c for c in self.rec.calls
+                  if c[0] == "systemctl" and "start" in c]
+        self.assertEqual(len(starts), 2)   # tentativo + retry
+        self.assertTrue(any("NON ripartito" in d for d in details), details)
+
+    def test_start_path_activating_is_not_verified(self):
+        """`activating` non è `active`: mai dichiarare avviato ciò che non
+        lo è (dopo il retry resta l'alert esplicito)."""
+        mgr = self._mk_real({"ActiveState": "activating"})
+        with mock.patch("buo.oc.apply.time.sleep"):
+            details = []
+            self.assertFalse(mgr._governor_start_verified(details))
+        self.assertTrue(any("NON ripartito" in d for d in details), details)
+
+    def test_start_path_active_verified(self):
+        """Caso felice: ActiveState=active ⇒ verifica positiva."""
+        mgr = self._mk_real({"ActiveState": "active"})
+        self.assertTrue(mgr._governor_start_verified([]))
 
 
 class TestRestoreStock(Base):

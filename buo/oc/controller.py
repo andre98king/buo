@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..constants import GOVERNOR_SERVICE
+from ..optimize.governor import governor_states
 from ..utils.paths import SYSTEM_STATE_DIR, state_dir
 from ..utils.shell import run_command
 from .constants import (
@@ -137,12 +137,18 @@ class OcController:
         }
 
     def _governor_active(self) -> str:
-        """is-active ESPLICITO (read-only, sicuro) — mai la cache TTL per le
-        azioni che scrivono l'SMU (regola: check esplicito, non reader)."""
-        rc, out, _ = self._sysctl(["is-active", GOVERNOR_SERVICE])
+        """ActiveState REALE del governor per il display (transitori
+        inclusi: activating/deactivating; "sconosciuto" se non
+        determinabile).
+
+        MAI `systemctl is-active`: esce rc=3 anche per i transitori →
+        il pannello direbbe "inactive" mentre il governor scrive
+        sull'SMU (regola SMU, incidente 30/08). Sola lettura: qui non si
+        tocca l'SMU."""
         if self.mock or self.dry_run:
-            return "unknown"
-        return out.strip() if rc == 0 else "inactive"
+            return "simulato"
+        return (governor_states(self.systemctl).get("ActiveState")
+                or "sconosciuto")
 
     def _tctl(self) -> Optional[float]:
         if self.reader is None:

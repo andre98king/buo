@@ -31,7 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..constants import LIMITS, SMU_OC_SERVICE
+from ..constants import GOVERNOR_SERVICE, LIMITS, SMU_OC_SERVICE
+from ..optimize.governor import governor_states
 from ..utils.shell import run_command
 from .constants import (
     APPLY_LOG,
@@ -118,13 +119,28 @@ class ApplyManager:
         return self._cmd([self.systemctl] + args, timeout=timeout)
 
     def _governor_active(self) -> str:
-        """is-active ESPLICITO (mai la cache TTL del reader: regola assoluta
-        per le azioni che scrivono l'SMU)."""
+        """ActiveState REALE del governor (transitori inclusi).
+
+        MAI `systemctl is-active`: esce con rc=3 anche per gli stati
+        TRANSITORI (activating/deactivating) e mappare rc≠0 su "inactive"
+        farebbe partire l'apply SMU mentre il governor scrive sull'SMU
+        (freeze del SoC, incidente 30/08). Punto unico di lettura:
+        `governor_states()` (mai la cache TTL del reader).
+        "unknown" se non determinabile."""
         if self.mock or self.dry_run:
             return "inactive"
-        rc, out, _ = self._sysctl(["is-active",
-                                   "cyan-skillfish-governor-smu"])
-        return out.strip() if rc == 0 else "inactive"
+        return governor_states(self.systemctl).get("ActiveState") or "unknown"
+
+    def _governor_confirmed_inactive(self) -> Optional[bool]:
+        """True SOLO per inactive/failed (fermo CONFERMATO), False se
+        active, None se transitorio o sconosciuto — stessa semantica di
+        `governor_confirmed_inactive()` (governor.py), sulla lettura
+        INIETTABILE `_governor_active()` (i test sostituiscono quella,
+        non subprocess)."""
+        state = self._governor_active()
+        if state in ("inactive", "failed"):
+            return True
+        return False if state == "active" else None
 
     def _write_marker(self, state: str, profile: Optional[str],
                       persisted: bool = False,
@@ -218,40 +234,46 @@ class ApplyManager:
         return True
 
     def _governor_stop_verified(self, details: List[str]) -> bool:
-        """Stop + VERIFICA esplicita is-active → inactive (retry 1×)."""
+        """Stop + verifica CONFERMATA del fermo (retry 1×).
+
+        Si procede SOLO con `inactive`/`failed`: attivo → stop e
+        ri-verifica; stato TRANSITORIO o sconosciuto → ABORT (mai SMU su
+        stato ignoto: "non active" non è "fermo", regola SMU 30/08)."""
         if self.mock or self.dry_run:
             self._log(details, "[MOCK] governor fermo e VERIFICATO")
             return True
-        self._cmd([self.systemctl, "stop", "cyan-skillfish-governor-smu"],
-                  timeout=30)
-        if self._governor_active() == "inactive":
-            self._log(details, "governor fermo e VERIFICATO (inactive)")
-            return True
-        time.sleep(2)
-        self._cmd([self.systemctl, "stop", "cyan-skillfish-governor-smu"],
-                  timeout=30)
-        if self._governor_active() == "inactive":
-            self._log(details, "governor fermo e VERIFICATO (inactive, retry)")
-            return True
+        for retry in (False, True):
+            self._sysctl(["stop", GOVERNOR_SERVICE], timeout=30)
+            confirmed = self._governor_confirmed_inactive()
+            if confirmed is True:
+                self._log(details, "governor fermo e VERIFICATO (inactive"
+                           + (", retry)" if retry else ")"))
+                return True
+            if confirmed is None:
+                self._log(details, "governor in stato NON determinabile "
+                                   f"({self._governor_active()}) — abort, "
+                                   "nulla toccato")
+                return False
+            time.sleep(2)
         self._log(details, "governor NON fermabile — abort, nulla toccato")
         return False
 
     def _governor_start_verified(self, details: List[str]) -> bool:
-        """Start + verifica is-active (retry 1×); fail → alert esplicito."""
+        """Start + verifica ActiveState == active (retry 1×); fail → alert.
+
+        Qui lo stato ignoto NON è un abort: il governor va SEMPRE rimesso su
+        (invariante I2) — l'esito resta l'alert esplicito, mai una uscita
+        silenziosa con la GPU senza curva."""
         if self.mock or self.dry_run:
             self._log(details, "[MOCK] governor attivo (VERIFICATO)")
             return True
-        self._cmd([self.systemctl, "start", "cyan-skillfish-governor-smu"],
-                  timeout=30)
-        if self._governor_active() == "active":
-            self._log(details, "governor attivo (VERIFICATO)")
-            return True
-        time.sleep(2)
-        self._cmd([self.systemctl, "start", "cyan-skillfish-governor-smu"],
-                  timeout=30)
-        if self._governor_active() == "active":
-            self._log(details, "governor attivo (VERIFICATO, retry)")
-            return True
+        for retry in (False, True):
+            self._sysctl(["start", GOVERNOR_SERVICE], timeout=30)
+            if self._governor_active() == "active":
+                self._log(details, "governor attivo (VERIFICATO"
+                           + (", retry)" if retry else ")"))
+                return True
+            time.sleep(2)
         self._log(details, "🚨 governor NON ripartito — la macchina gira ma "
                            "senza governor GPU (curve assente: +7°C sotto "
                            "carico). Avviare: systemctl start "

@@ -511,23 +511,34 @@ class RealHardwareReader:
         return float(m.group(1)) if m else None
 
     def get_is_40cu_enabled(self) -> Optional[bool]:
-        """40-CU attive: `systemctl is-active bc250-cu-live-manager`.
+        """40-CU attive: ActiveState di bc250-cu-live-manager.
 
-        rc 0 → True; rc 3 → False; qualsiasi altro rc o eccezione
-        (servizio assente, systemctl inesistente) → None (fail-soft)."""
+        True SOLO per `active`; False per inactive/failed (unità presente);
+        None (C1: non rilevabile) per gli stati TRANSITORI — `systemctl
+        is-active` esce rc=3 anche per activating/deactivating, che
+        diventavano un falso "non attiva" — per unità assente
+        (LoadState=not-found, BUGS #24) o errore.
+        """
         try:
-            r = subprocess.run([self._systemctl, "is-active",
-                                "bc250-cu-live-manager"],
+            r = subprocess.run([self._systemctl, "show", "-p", "ActiveState",
+                                "-p", "LoadState", "bc250-cu-live-manager"],
                                capture_output=True, text=True, timeout=10)
-            if r.returncode == 0:
-                return True
-            if r.returncode == 3:
-                return False
-            return None
         except Exception:
-            self.logger.debug("systemctl is-active non eseguibile "
-                              "(cmd=%s)", self._systemctl, exc_info=True)
+            self.logger.debug("systemctl show non eseguibile (cmd=%s)",
+                              self._systemctl, exc_info=True)
             return None
+        if r.returncode != 0:
+            return None
+        vals = dict(line.split("=", 1)
+                    for line in (r.stdout or "").splitlines() if "=" in line)
+        if vals.get("LoadState") == "not-found":
+            return None
+        state = vals.get("ActiveState")
+        if state == "active":
+            return True
+        if state in ("inactive", "failed"):
+            return False
+        return None
 
     def get_system_info(self) -> Dict[str, Any]:
         """Riepilogo per `buo status`: valori REALI o None (mai fittizi).

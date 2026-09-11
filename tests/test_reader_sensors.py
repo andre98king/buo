@@ -390,19 +390,51 @@ class TestReaderSensors(unittest.TestCase):
 
     # ------------------------- 40-CU ----------------------------- #
 
-    def test_is_40cu_systemctl_active(self):
-        """systemctl is-active rc 0 → True."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
+    def _cu_systemctl(self, state, load="loaded"):
+        """systemctl finto: ActiveState/LoadState di bc250-cu-live-manager
+        (il gate legge lo stato VERO: `is-active` esce rc=3 anche per i
+        transitori → direbbe "non attiva" a torto)."""
+        return self._fake_systemctl(
+            f'echo "ActiveState={state}"; echo "LoadState={load}"\n')
+
+    def test_is_40cu_active(self):
+        """ActiveState=active → True."""
+        r = self._reader(systemctl_cmd=self._cu_systemctl("active"))
         self.assertIs(r.get_is_40cu_enabled(), True)
 
-    def test_is_40cu_systemctl_inactive(self):
-        """systemctl is-active rc 3 → False (servizio fermo)."""
-        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 3\n"))
+    def test_is_40cu_inactive(self):
+        """ActiveState=inactive (unità presente) → False."""
+        r = self._reader(systemctl_cmd=self._cu_systemctl("inactive"))
         self.assertIs(r.get_is_40cu_enabled(), False)
 
-    def test_is_40cu_systemctl_other_rc_none(self):
-        """rc diverso da 0/3 (es. servizio assente, rc 4) → None."""
+    def test_is_40cu_failed_false(self):
+        """ActiveState=failed → False (servizio fermo, non "sconosciuto")."""
+        r = self._reader(systemctl_cmd=self._cu_systemctl("failed"))
+        self.assertIs(r.get_is_40cu_enabled(), False)
+
+    def test_is_40cu_transient_none(self):
+        """Stati TRANSITORI → None (C1: non rilevabile). Prima `is-active`
+        (rc=3) li mappava su False = falso "40-CU non attive"."""
+        for state in ("activating", "deactivating", "reloading"):
+            with self.subTest(state=state):
+                r = self._reader(systemctl_cmd=self._cu_systemctl(state))
+                self.assertIsNone(r.get_is_40cu_enabled())
+
+    def test_is_40cu_unit_not_found_none(self):
+        """Unità assente (LoadState=not-found, BUGS #24) → None: lo stato
+        delle 40-CU non è verificabile, non si inventa un False."""
+        r = self._reader(systemctl_cmd=self._cu_systemctl("inactive",
+                                                          load="not-found"))
+        self.assertIsNone(r.get_is_40cu_enabled())
+
+    def test_is_40cu_other_rc_none(self):
+        """rc≠0 (systemctl in errore) → None."""
         r = self._reader(systemctl_cmd=self._fake_systemctl("exit 4\n"))
+        self.assertIsNone(r.get_is_40cu_enabled())
+
+    def test_is_40cu_no_state_in_output_none(self):
+        """Output senza ActiveState → None (mai interpretare il vuoto)."""
+        r = self._reader(systemctl_cmd=self._fake_systemctl("exit 0\n"))
         self.assertIsNone(r.get_is_40cu_enabled())
 
     def test_is_40cu_systemctl_missing_none(self):
