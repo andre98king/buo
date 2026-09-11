@@ -179,30 +179,33 @@ class ACPIFix(LoggerMixin):
     # ------------------------------------------------------------------ #
 
     def verify(self) -> bool:
-        """True se le tabelle C-State risultano caricate."""
+        """True se le tabelle C-State sono caricate DAL DEPLOYMENT BOOTATO.
+
+        Su ostree (initramfs concatenato) l'unico segnale onesto è la entry
+        del deployment **bootato** che punta a un nostro blob: la versione
+        precedente accettava QUALSIASI entry, quindi un blob residuo su una
+        entry vecchia faceva risultare il fix applicato mentre la macchina
+        bootava senza tabelle — fail-open silenzioso, perché ogni transazione
+        ostree rigenera le entry e la più nuova (senza blob) diventa quella di
+        default (campo 11/09/2026). Sulle distro dracut/initramfs-tools il
+        segnale resta il nome delle tabelle in /sys (lì gli override NON
+        vengono rinominati in SSDT1..N).
+        """
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.state.is_acpi_fixed
         if self.distro.initramfs_tool == "ostree":
-            # Metodo concatenato: fix applicato = la boot entry DI DEFAULT
-            # punta a un nostro blob (initramfs-acpi-*.img) con cpio in
-            # testa. Se il default non è ancora risolvibile, accetta
-            # qualsiasi entry già puntata a un blob valido.
             loader = self.boot_dir / "loader" / "entries"
             if not loader.is_dir():
                 return False
             entry = self._default_entry(loader)
-            candidates = [entry] if entry else []
-            candidates += [e for e in sorted(loader.glob("*.conf"))
-                           if e not in candidates]
-            for e in candidates:
-                try:
-                    text = e.read_text(errors="replace")
-                except Exception:
-                    continue
-                m = re.search(r"^initrd\s+(\S+)", text, re.M)
-                if m and self._is_acpi_blob(m.group(1)):
-                    return True
-            return False
+            if entry is None:
+                return False
+            try:
+                text = entry.read_text(errors="replace")
+            except Exception:
+                return False
+            m = re.search(r"^initrd\s+(\S+)", text, re.M)
+            return bool(m and self._is_acpi_blob(m.group(1)))
         tables = Path("/sys/firmware/acpi/tables")
         if not tables.exists():
             return False
