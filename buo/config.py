@@ -143,7 +143,8 @@ _KNOWN_OSTREE_KEYS = frozenset({"auto_swap_default"})
 
 _KNOWN_PHASE_KEYS: Dict[str, frozenset] = {
     "probe": frozenset({"cpu_unlock", "gpu_unlock", "health_test",
-                        "health_reboot_max", "unlock_validate"}),
+                        "health_reboot_max", "unlock_validate",
+                        "gpu_extra_cu"}),
     "fix": frozenset({"tlb", "ace", "iommu", "acpi", "vram", "gtt",
                       "fan"}),
     "undervolt": frozenset({
@@ -258,6 +259,17 @@ class BUOConfig:
         probe = phases.get("probe", {})
         self.probe_cpu_unlock: bool = bool(probe.get("cpu_unlock", True))
         self.probe_gpu_unlock: bool = bool(probe.get("gpu_unlock", True))
+        # ---- CU EXTRA GPU (le 16 CU oltre le 24 di fabbrica): OPT-IN.
+        # Default False (prudente, community 2026): l'unlock è di natura
+        # compute e su ~26% delle board i CU extra sono difettosi, con un
+        # fault GPU NON recuperabile (freeze/schermo nero, niente GPU
+        # reset). `gpu_unlock: true` NON implica più le CU extra: abilita
+        # solo il flusso di unlock (verifica/stato), la maschera validata
+        # e la persistenza. Config scritta prima di questa chiave → nessun
+        # KeyError, vale False; l'avviso all'utente lo dà il punto di
+        # decisione (GPU40CUUnlock.apply, che NON abilita nulla) e la nota
+        # in config/buo.yaml, senza rumore a ogni load di config.
+        self.probe_gpu_extra_cu: bool = bool(probe.get("gpu_extra_cu", False))
         self.probe_health_test: bool = bool(probe.get("health_test", True))
         self.probe_health_reboot_max: int = int(probe.get("health_reboot_max", 25))
         # Interruttore master della validazione post-unlock (design
@@ -461,6 +473,7 @@ class BUOConfig:
                 "probe": {
                     "cpu_unlock": self.probe_cpu_unlock,
                     "gpu_unlock": self.probe_gpu_unlock,
+                    "gpu_extra_cu": self.probe_gpu_extra_cu,
                     "health_test": self.probe_health_test,
                     "health_reboot_max": self.probe_health_reboot_max,
                     "unlock_validate": self.probe_unlock_validate,

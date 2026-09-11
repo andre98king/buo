@@ -367,6 +367,52 @@ def oc_heal(mock, dry_run, oc_dir) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# cu-live (percorso CUMULATIVO delle 16 CU extra, senza reboot)
+# --------------------------------------------------------------------------- #
+
+
+@oc_group.command("cu-live")
+@_oc_opts
+@click.argument("wgps")
+def oc_cu_live(mock, dry_run, oc_dir, wgps) -> None:
+    """Abilita a RUNTIME le WGP extra indicate (cumulativo, senza reboot).
+
+    `wgps` = CSV di WGP EXTRA in forma SE.SH.WGP, es. "0.1.3" oppure
+    "0.1.3,0.1.4". È la via consigliata "una WGP per volta + test reale"
+    (si richiama il comando aggiungendo la WGP successiva), alternativa
+    alla maratona per-WGP (~20 reboot, solo con presidio). Richiede
+    l'opt-in `phases.probe.gpu_extra_cu=true` e la curva GPU conservativa
+    (≤900 mV): con 40 CU una curva aggressiva porta la GPU a 96-107 °C.
+    La maschera è DERIVATA (mai 0x1f a mano) e le WGP condannate dal
+    verdetto durevole restano escluse; si riparte sempre da 24 CU, quindi
+    il routing non include mai una WGP non validata. Il governor è fermato
+    da BUO durante l'accesso ai registri (regola SMU) e riavviato dopo.
+    """
+    from ..unlock.gpu import GPU40CUUnlock
+    _warn_if_not_system(oc_dir)
+    sim = mock or dry_run
+    ids = [w.strip() for w in wgps.split(",") if w.strip()]
+    out = GPU40CUUnlock(mock=sim).apply(wgps=ids)
+    applied = bool(out.get("applied"))
+    if sim:
+        _skip_simulated("CU extra non abilitate (nessuna scrittura)")
+    if console is None:
+        click.echo(json.dumps(out, ensure_ascii=False))
+    elif applied:
+        console.print(f"[bold green]✓ {'[simulato] ' if sim else ''}"
+                      f"CU extra: {out.get('cu_count')} CU[/] "
+                      f"(maschera {out.get('mask')}, volatile)")
+    else:
+        console.print(f"[yellow]⚠️ non applicato: "
+                      f"{out.get('reason') or out.get('error')}[/]")
+        for key in ("note", "error"):
+            if out.get(key):
+                console.print(f"[dim]{out[key]}[/]")
+    if not applied and not sim:
+        sys.exit(1)
+
+
+# --------------------------------------------------------------------------- #
 # sweep-gpu (T4: sweep per-silicio delegato da unleash, design
 # research/DESIGN_T4_SWEEP_OC.md)
 # --------------------------------------------------------------------------- #

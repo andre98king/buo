@@ -36,6 +36,9 @@ class TestAcpiGate(unittest.TestCase):
         cfg.benchmark_enabled = False
         orch = Orchestrator(config=cfg, mock=True, dry_run=False,
                             mock_hardware=hw)
+        # 16 CU extra OPT-IN (default 24 CU stock): qui si verifica il gate
+        # ACPI, non la politica sulle CU extra.
+        orch.gpu_unlock.extra_cu = True
         orch.checkpoint.clear()
         return orch
 

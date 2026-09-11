@@ -417,10 +417,11 @@ class RealHardwareReader:
                     line = line.strip()
                     if not line.startswith("BC250_WGP_MASKS="):
                         continue
-                    total = 0
-                    for mask in line.split("=", 1)[1].split(","):
-                        total += bin(int(mask.strip(), 0)).count("1") * 2
-                    return total
+                    # Punto unico per decodificare la maschera (constants):
+                    # una maschera anomala solleva → None ("non rilevabile"),
+                    # mai un conteggio inventato.
+                    from ..constants import cu_count_from_mask
+                    return cu_count_from_mask(line.split("=", 1)[1].strip())
         except Exception:
             pass
         return None

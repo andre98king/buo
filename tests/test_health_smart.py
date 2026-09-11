@@ -123,9 +123,16 @@ class TestHealthSmartUnlock(unittest.TestCase):
                            "total": 0, "complete": False})
         out = orch._phase_unlock()
         self.assertFalse(out["health"]["complete"])
-        self.assertTrue(any("health test saltato" in n.lower()
-                            for n in orch.results["notes"]),
-                        "la nota di skip deve essere nel report")
+        note = next((n for n in orch.results["notes"]
+                     if "health test saltato" in n.lower()), None)
+        self.assertIsNotNone(note, "la nota di skip deve essere nel report")
+        # La ricetta cita ENTRAMBE le vie e dice che 24 CU è un esito valido
+        # (la maratona per-WGP è presidiata: ~20 reboot, recovery documentato).
+        self.assertIn("per-WGP", note)
+        self.assertIn("bc250-cu-health-test.sh start", note)
+        self.assertIn("cumulativo live", note)
+        self.assertIn("buo oc cu-live", note)
+        self.assertIn("24 CU = esito valido", note)
 
 
 if __name__ == "__main__":

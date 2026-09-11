@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..constants import LIMITS
+from ..constants import (LIMITS, extra_wgps, parse_wgp)
 from ..oc.smoke import _whea_delta
 from ..utils.logging import LoggerMixin
 from ..utils.paths import state_dir
@@ -46,6 +46,13 @@ logger = logging.getLogger("buo.unlock.validation")
 
 VERDICT_SCHEMA = 1
 VERDICT_FILE = "unlock-verdict.json"
+
+# Verdetto GPU con condanna PER-WGP (schema esteso, retro-compatibile):
+# l'evidenza porta `condemned_wgps` e le 16 CU extra restano ammesse al
+# netto di quelle elencate (es. board stabile a 36 CU). Il vecchio
+# `never_enable_all` senza lista resta valido e vale come "tutte le
+# WGP extra condannate".
+VERDICT_GPU_WGPS_CONDEMNED = "wgps_condemned"
 
 # Righe di fault amdgpu (stessa classe di quelle dello sweep GPU:
 # amdgpu reset/fault/timeout, ring gfx, VM_L2_PROTECTION).
@@ -147,9 +154,11 @@ class UnlockVerdict:
 
     Machine-scoped: il "fingerprint" è la macchina stessa (lo state dir
     persiste tra deployment ostree e cold boot). Verdict ammessi:
-    cpu.never_unlock, gpu.never_enable_all (condanna), gpu.stable_short
-    (evidenza positiva). File corrotto/assente → nessun veto (la
-    macchina ri-sblocca e ri-valida: auto-guarigione documentata).
+    cpu.never_unlock, gpu.never_enable_all (condanna di TUTTE le WGP
+    extra), gpu.wgps_condemned (condanna PER-WGP: l'evidenza elenca le
+    WGP guaste in `condemned_wgps`), gpu.stable_short (evidenza
+    positiva). File corrotto/assente → nessun veto (la macchina
+    ri-sblocca e ri-valida: auto-guarigione documentata).
     """
 
     def __init__(self, path: Optional[Path] = None, sim: bool = False):
@@ -186,12 +195,63 @@ class UnlockVerdict:
 
     def set(self, unit: str, verdict: str,
             extra_evidence: Optional[Dict[str, Any]] = None) -> None:
-        """Scrive il verdetto di cpu/gpu con evidenza (schema D6)."""
-        self._data[unit] = {
-            "verdict": verdict,
-            "evidence": extra_evidence or {},
-        }
+        """Scrive il verdetto di cpu/gpu con evidenza (schema D6).
+
+        Se la nuova evidenza NON elenca `condemned_wgps`, la lista
+        precedente viene CONSERVATA: un verdetto positivo successivo
+        (stable_short) non deve far dimenticare le WGP già condannate,
+        altrimenti il run seguente riproverebbe a instradare una WGP
+        guasta (su questa APU un fault GPU non è recuperabile).
+        """
+        evidence = dict(extra_evidence or {})
+        previous = (self._data.get(unit) or {}).get("evidence") or {}
+        if "condemned_wgps" not in evidence \
+                and "condemned_wgps" in previous:
+            evidence["condemned_wgps"] = previous["condemned_wgps"]
+        self._data[unit] = {"verdict": verdict, "evidence": evidence}
         self.save()
+
+    def condemned_wgps(self) -> List[str]:
+        """WGP extra condannate dal verdetto durevole del silicio GPU.
+
+        • `never_enable_all` (anche senza lista, come nei file scritti
+          prima dello schema per-WGP) → TUTTE le WGP extra: "nessuna
+          WGP extra ammessa" (retro-compatibile);
+        • evidenza con `condemned_wgps` → quella lista (vuota = nessuna
+          condanna, ma NON su un verdetto di condanna: contraddizione →
+          tutte le extra);
+        • altro verdetto → nessuna condanna.
+
+        Fail-closed sul trust boundary: una lista malformata (id non
+        nella forma SE.SH.WGP, o una WGP STOCK, o vuota su un verdetto
+        di condanna) non si interpreta a occhio → TUTTE le extra.
+        """
+        data = self._data.get("gpu") or {}
+        verdict = data.get("verdict")
+        listed = (data.get("evidence") or {}).get("condemned_wgps")
+        if verdict == "never_enable_all":
+            return list(extra_wgps())
+        if listed is not None:
+            try:
+                ids = [str(w) for w in listed]
+                for w in ids:
+                    parse_wgp(w)
+                    if w not in extra_wgps():
+                        # una WGP stock "condannata" NON è esprimibile:
+                        # la maschera non può scendere sotto lo stock
+                        raise ValueError("%s non è una WGP extra" % w)
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "Verdetto GPU: lista WGP condannate inattendibile (%s) "
+                    "— condanno TUTTE le %d WGP extra", e, len(extra_wgps()))
+                return list(extra_wgps())
+            if ids:
+                return ids
+            # lista VUOTA = nessuna condanna, ma solo se il verdetto non è
+            # esso stesso una condanna (verdetto ambiguo → fail-closed)
+            return (list(extra_wgps())
+                    if verdict == VERDICT_GPU_WGPS_CONDEMNED else [])
+        return []
 
 
 # --------------------------------------------------------------------- #
@@ -508,7 +568,8 @@ class GpuUnlockValidation(LoggerMixin):
 
 __all__ = [
     "CpuUnlockValidation", "GpuUnlockValidation", "UnlockVerdict",
-    "VERDICT_FILE", "VERDICT_SCHEMA", "GPU_FAULT_RE",
+    "VERDICT_FILE", "VERDICT_SCHEMA", "VERDICT_GPU_WGPS_CONDEMNED",
+    "GPU_FAULT_RE",
     "cpu_online_count", "evidence", "extra_threads",
     "gpu_vkmark_cmd", "gpu_vkmark_env", "parse_cpu_list",
 ]

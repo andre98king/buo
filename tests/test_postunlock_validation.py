@@ -76,6 +76,9 @@ class _OrchCase(unittest.TestCase):
         cfg.probe_gpu_unlock = gpu_probe
         orch = Orchestrator(config=cfg, mock=True, dry_run=dry_run,
                             mock_hardware=hw)
+        # Le 16 CU extra sono OPT-IN (default = 24 CU stock): questi test
+        # coprono il flusso 40-CU/validazione, quindi opt-in esplicito.
+        orch.gpu_unlock.extra_cu = True
         orch.checkpoint.clear()
         return orch, hw
 

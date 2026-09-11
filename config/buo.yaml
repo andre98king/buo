@@ -34,6 +34,17 @@ phases:
   probe:
     cpu_unlock: true
     gpu_unlock: true
+    # 16 CU EXTRA (le WGP oltre le 24 CU di fabbrica): OPT-IN, default
+    # prudente = false → la GPU resta a 24 CU stock. Perché: l'unlock è
+    # di natura COMPUTE (glmark2 +4,4%, compute LLM +1,5-1,6×; ma +30 W /
+    # +4 °C e a 2 GHz con 40 CU 181 W e 96 °C, efficienza 4,18 → 2,98
+    # tok/s/W, −11% misurato su LLM sostenuto), su ~26% delle board i CU
+    # extra sono DIFETTOSI e su questa APU un fault GPU NON è recuperabile
+    # (freeze/schermo nero: niente GPU reset). Con true BUO abilita e
+    # persiste SOLO la maschera derivata dalle WGP validate (le condannate
+    # restano escluse → es. 32/36 CU) e solo a curva conservativa.
+    # NB: `gpu_unlock: true` NON abilita più le CU extra da solo.
+    gpu_extra_cu: false
     # health_test: true = "smart": riusa i results.tsv completi; skip
     # con ricetta se assenti/incompleti (mai la maratona per-WGP da una
     # run non presidiata — design portabilità)

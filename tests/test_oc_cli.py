@@ -198,6 +198,48 @@ class TestSimulatedNoWrites(Base):
         self.assertIn("saltato", res.output)
         self.assertTrue(state.exists())
 
+    def test_cu_live_mock_no_writes_derived_mask(self):
+        """`buo oc cu-live` (percorso cumulativo live): in --mock nessuna
+        scrittura/nessun comando reale e maschera DERIVATA dalle WGP date."""
+        from buo.config import BUOConfig
+        cfg = BUOConfig({"phases": {"probe": {"gpu_extra_cu": True}}})
+        with mock.patch("buo.config.BUOConfig.load", return_value=cfg):
+            res = self.invoke("oc", "cu-live", "0.1.3", "--mock", "--oc-dir",
+                              str(self.oc))
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertIn("saltato", res.output)          # simulazione
+        self.assertIn("0x07,0x0f,0x07,0x07", res.output)   # 26 CU
+        self.assertIn("26 CU", res.output)
+
+    def test_cu_live_opt_out_reports_reason(self):
+        """Opt-out (default): nessuna CU extra, motivo esplicito."""
+        from buo.config import BUOConfig
+        with mock.patch("buo.config.BUOConfig.load",
+                        return_value=BUOConfig()):
+            res = self.invoke("oc", "cu-live", "0.1.3", "--mock", "--oc-dir",
+                              str(self.oc))
+        self.assertIn("extra_cu_disabled", res.output)
+
+    def test_cu_live_real_opt_out_exits_nonzero(self):
+        """Run reale senza opt-in: exit 1, nessuna scrittura maschera."""
+        from buo.config import BUOConfig
+        with mock.patch("buo.config.BUOConfig.load",
+                        return_value=BUOConfig()):
+            res = self.invoke("oc", "cu-live", "0.1.3", "--oc-dir",
+                              str(self.oc))
+        self.assertEqual(res.exit_code, 1, res.output)
+        self.assertIn("extra_cu_disabled", res.output)
+
+    def test_cu_live_invalid_wgp_refused(self):
+        """WGP anomala (o stock) → rifiuto esplicito, mai scrittura."""
+        from buo.config import BUOConfig
+        cfg = BUOConfig({"phases": {"probe": {"gpu_extra_cu": True}}})
+        with mock.patch("buo.config.BUOConfig.load", return_value=cfg):
+            res = self.invoke("oc", "cu-live", "0.0.1", "--oc-dir",
+                              str(self.oc))
+        self.assertEqual(res.exit_code, 1, res.output)
+        self.assertIn("non è una delle extra", res.output)
+
     def test_apply_mock_writes_no_state_files(self):
         res = self.invoke("oc", "apply", "stock", "--mock", "--oc-dir",
                           str(self.oc))

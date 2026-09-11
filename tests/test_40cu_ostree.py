@@ -11,9 +11,11 @@ e selezione del metodo per distro.
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from buo.unlock.gpu import GPU40CUUnlock
+from buo.unlock.validation import UnlockVerdict
 from buo.unlock.wrappers.bc250_live_manager import BC250LiveManagerWrapper
 
 
@@ -93,16 +95,29 @@ class TestGPU40CuPersist(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.conf = os.path.join(self._tmp.name,
                                  "bc250-cu-live-manager.conf")
+        # Curva conservativa (P5): la persistenza scrive una maschera che il
+        # servizio instrada AL BOOT, quindi il gate sulla curva vale anche
+        # qui. Percorso isolato: mai la config reale del governor.
+        self.gov = os.path.join(self._tmp.name, "governor.toml")
+        with open(self.gov, "w", encoding="utf-8") as fh:
+            fh.write("[[safe-points]]\nfrequency = 1500\nvoltage = 900\n")
 
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _unlock(self, mock_mode=False):
-        g = GPU40CUUnlock(mock=mock_mode, use_wrapper=False)
+    def _unlock(self, mock_mode=False, extra_cu=True):
+        g = GPU40CUUnlock(mock=mock_mode, use_wrapper=False,
+                          # opt-in esplicito (default = 24 CU stock)
+                          extra_cu=extra_cu,
+                          # verdetto isolato: mai lo state dir reale
+                          verdict=UnlockVerdict(
+                              path=Path(self._tmp.name) / "verdict.json",
+                              sim=True))
         g.is_ostree = True
         if not mock_mode:
             g.wrapper = _FakeLiveManager()
         g.boot_conf_path = self.conf
+        g.governor_conf_path = self.gov
         return g
 
     @staticmethod
@@ -227,9 +242,13 @@ class TestGPU40CuPersist(unittest.TestCase):
     def test_persist_non_ostree_errors_without_files(self):
         """Non-ostree → errore senza scrivere nulla (path iniettabile mai
         toccato)."""
-        g = GPU40CUUnlock(mock=False, use_wrapper=False)
+        g = GPU40CUUnlock(mock=False, use_wrapper=False, extra_cu=True,
+                          verdict=UnlockVerdict(
+                              path=Path(self._tmp.name) / "verdict.json",
+                              sim=True))
         g.is_ostree = False
         g.boot_conf_path = self.conf
+        g.governor_conf_path = self.gov
         out = g.persist()
         self.assertFalse(out["persisted"])
         self.assertIn("ostree", out["error"])
