@@ -46,6 +46,37 @@ class TestOrchestrator(unittest.TestCase):
                       "apply", "validate", "complete"]:
             self.assertTrue(phases[phase]["completed"], f"fase {phase} non completata")
 
+    def test_unlock_already_done_no_reboot_no_ledger(self):
+        """Macchina già sbloccata: niente reboot inutile, niente ledger.
+
+        `CPUUnlock.unlock()` normalizza `changed`/`needs_reboot` a False quando
+        la maschera era già 0xFF: non è una modifica di questa run (il rollback
+        non deve annullarla) e non serve alcun reboot per attivarla.
+        """
+        orch = self._make(dry_run=False)
+        orch.cpu_unlock.unlock = lambda force=False: {
+            "mask": "0xFF", "unlocked": True, "needs_reboot": False,
+            "changed": False}
+        calls = []
+        orch._schedule_reboot = lambda reason: calls.append(reason)
+        out = orch._do_cpu_unlock()
+        self.assertFalse(out["needs_reboot"])
+        self.assertEqual(calls, [])
+        self.assertNotIn("cpu_core_unlock", orch._applied_steps())
+
+    def test_unlock_written_needs_reboot_and_ledger(self):
+        """Maschera scritta da QUESTA run: ledger (per il rollback) + reboot."""
+        orch = self._make(dry_run=False)
+        orch.cpu_unlock.unlock = lambda force=False: {
+            "mask": "0xFF", "unlocked": True, "needs_reboot": True,
+            "changed": True}
+        calls = []
+        orch._schedule_reboot = lambda reason: calls.append(reason)
+        out = orch._do_cpu_unlock()
+        self.assertTrue(out["needs_reboot"])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("cpu_core_unlock", orch._applied_steps())
+
     def test_apply_fixes_recorded(self):
         orch = self._make()
         orch.run()
