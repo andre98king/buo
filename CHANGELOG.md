@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.6.0 (2026-09-11)
 
 ### Aggiunto
 - **Agente di boot `buo boot-reconcile`** (incidente di campo 11/09/2026: cold boot →
