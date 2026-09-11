@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.5.0 (2026-09-11)
 
 ### Aggiunto
 - **T1 — riuso dello stato OC certificato in `unleash`**: `OCReuseGate` + fingerprint
