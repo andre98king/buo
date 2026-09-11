@@ -568,6 +568,163 @@ def recover(mock: bool) -> None:
         sys.exit(1)
 
 
+# -------------------------- boot-reconcile --------------------------- #
+
+def _boot_line(label: str, value: str, ok: Optional[bool] = None) -> None:
+    """Una riga di stato del boot-reconcile (ok / problema / ignoto)."""
+    if ok is True:
+        console.print(f"  {label:<16} [green]{value}[/]")
+    elif ok is False:
+        console.print(f"  {label:<16} [bold red]{value}[/]")
+    else:
+        console.print(f"  {label:<16} [yellow]{value}[/]")
+
+
+def _print_boot_state(state) -> None:
+    expected = 16
+    console.print("[bold]Stato reale al boot[/]")
+    _boot_line("Thread CPU", f"{state['threads']}/{expected}",
+               state["threads_ok"])
+    gov = state["governor_state"]
+    _boot_line("Governor GPU", "attivo" if gov == "active"
+               else (f"NON attivo ({gov})" if gov else "non determinabile"),
+               state["governor_ok"])
+    _boot_line("Tabelle ACPI", "caricate dalla entry bootata"
+               if state["acpi_ok"] else "NON caricate", state["acpi_ok"])
+    ran = state.get("services_ran", {})
+    for name, enabled in state["services"].items():
+        if enabled is False:
+            text, ok = f"{name}: NON abilitato", False
+        elif enabled is None:
+            text, ok = f"{name}: non determinabile", None
+        elif not ran.get(name, True):
+            text, ok = f"{name}: abilitato ma non eseguito in questo boot", False
+        else:
+            text, ok = f"{name}: abilitato e avviato", True
+        _boot_line("Servizio", text, ok)
+    kargs = state["kargs"]
+    _boot_line("kargs", "mitigations=off ok"
+               if kargs["mitigations_off"] else "mitigations=off assente",
+               kargs["mitigations_off"])
+    _boot_line("ttm", f"pages_limit={kargs['pages_limit']}",
+               bool(kargs["pages_limit"]))
+
+
+@cli.command("boot-reconcile")
+@click.option("--check", is_flag=True,
+              help="Solo verifica: nessuna riparazione e nessun reboot "
+                   "(exit 1 se lo stato non è quello certificato)")
+@click.option("--mock", is_flag=True, help="Usa hardware simulato")
+@click.option("--install", "install_flag", is_flag=True,
+              help="Installa e abilita l'agente di boot (gira a ogni "
+                   "accensione)")
+@click.option("--uninstall", is_flag=True, help="Rimuove l'agente di boot")
+def boot_reconcile(check: bool, mock: bool, install_flag: bool,
+                   uninstall: bool) -> None:
+    """Riallinea la macchina allo stato certificato dopo un cold boot.
+
+    Verifica l'EFFETTO REALE, non il ledger: thread CPU online (la maschera
+    core è volatile, un power-off la azzera → 12 thread), governor GPU attivo
+    (senza curva la GPU resta a stock), tabelle ACPI caricate dalla entry
+    BOOTATA (le entry si rigenerano a ogni transazione ostree), servizi di
+    boot abilitati. Ripara solo ciò che manca; se serve un reboot è UNO solo,
+    forzato warm e con tetto tentativi: mai un ciclo di reboot.
+    """
+    from .fix.acpi import ACPIFix
+    from .optimize.governor import GovernorWrapper
+    from .state.reconcile import BootReconciler, install_unit, uninstall_unit
+    from .unlock.cpu import CPUUnlock
+    from .utils.mock import MockHardware
+
+    show_header()
+    if uninstall:
+        out = uninstall_unit()
+        if out.get("removed"):
+            console.print("[bold green]Agente di boot rimosso[/]")
+            sys.exit(0)
+        console.print(f"[bold red]Rimozione fallita: {out.get('error')}[/]")
+        sys.exit(1)
+    if install_flag:
+        out = install_unit()
+        if not out.get("installed"):
+            console.print(f"[bold red]Installazione fallita: "
+                          f"{out.get('error')}[/]")
+            sys.exit(1)
+        console.print(f"[bold green]Agente di boot installato e abilitato[/] "
+                      f"[dim]({out['unit']})[/]")
+        console.print("[dim]A ogni accensione verifica e ripara: 8 core, "
+                      "governor GPU, tabelle ACPI, servizi di boot.[/]")
+        return
+
+    hw = MockHardware() if mock else None
+    # --mock = hardware simulato: NON si scrive e NON si riavvia (come il
+    # dry-run). Un mock che tocca SMU/reboot sarebbe un footgun, non un mock.
+    reconciler = BootReconciler(
+        cpu=CPUUnlock(mock=mock, mock_hardware=hw),
+        governor=GovernorWrapper(mock=mock, mock_hardware=hw),
+        acpi=ACPIFix(mock=mock, mock_hardware=hw),
+        dry_run=check or mock,
+    )
+    if check:
+        state = reconciler.check()
+        _print_boot_state(state)
+        problems = reconciler.degraded(state)
+        if problems:
+            console.print("\n[bold red]Stato NON certificato:[/] "
+                          + "; ".join(problems))
+            console.print("[dim]Ripara con: sudo buo boot-reconcile[/]")
+            sys.exit(1)
+        console.print("\n[bold green]Stato certificato.[/]")
+        return
+
+    report = reconciler.reconcile()
+    _print_boot_state(report["checked"])
+    for action in report["skipped"]:
+        console.print(f"\n[yellow]{action}[/]")
+    if report.get("unlock"):
+        up = report["unlock"]
+        if up.get("error"):
+            console.print(f"\n[bold red]Unlock 8 core non eseguito: "
+                          f"{up['error']}[/]")
+        elif up.get("unlocked"):
+            console.print("\n[yellow]Maschera 8 core riscritta "
+                          "(serve un reboot per attivarla)[/]")
+    if report.get("acpi"):
+        acpi_out = report["acpi"]
+        if acpi_out.get("applied"):
+            console.print("[yellow]Tabelle ACPI riapplicate "
+                          "(attive al reboot)[/]")
+        elif acpi_out.get("error") or acpi_out.get("warning"):
+            console.print(f"[bold red]ACPI non riapplicate: "
+                          f"{acpi_out.get('error') or acpi_out.get('warning')}[/]")
+    if report.get("governor", {}).get("ok"):
+        console.print("[green]Governor GPU avviato[/]")
+    for name, out in report.get("services", {}).items():
+        if out.get("fixed") or out.get("started"):
+            console.print(f"[green]Servizio sistemato: {name}[/]")
+    reboot = report.get("reboot") or {}
+    if reboot.get("blocked"):
+        console.print(f"\n[bold yellow]Reboot non eseguito "
+                      f"({reboot['blocked']})[/]")
+        if reboot["blocked"] == "sessione_gioco_attiva":
+            console.print("[dim]Chiudi il gioco e rilancia: "
+                          "sudo buo boot-reconcile[/]")
+        else:
+            console.print("[dim]Riavvia a mano: la maschera potrebbe non "
+                          "sopravvivere al reset[/]")
+        sys.exit(1)
+    if report.get("rebooted"):
+        console.print("\n[bold green]Reboot warm eseguito[/] [dim]— lo stato "
+                      "si completa al riavvio[/]")
+        return
+
+    problems = reconciler.degraded()
+    if problems:
+        console.print("\n[bold red]Restano problemi:[/] " + "; ".join(problems))
+        sys.exit(1)
+    console.print("\n[bold green]Stato certificato.[/]")
+
+
 # ------------------------------ config ------------------------------- #
 
 @cli.command()

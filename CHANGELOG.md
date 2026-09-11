@@ -1,5 +1,47 @@
 # Changelog
 
+## Unreleased
+
+### Aggiunto
+- **Agente di boot `buo boot-reconcile`** (incidente di campo 11/09/2026: cold boot →
+  12 thread e GPU a stock mentre il ledger diceva "applicato"). Verifica l'**effetto
+  reale**, non il ledger: thread CPU online (`/sys/devices/system/cpu/present`; la
+  maschera core è un registro volatile che un power-off azzera), governor GPU attivo,
+  tabelle ACPI caricate dalla entry **bootata**, servizi di boot abilitati **ed eseguiti**
+  in questo boot. Ripara solo ciò che manca; unità `buo-boot-reconcile.service`
+  installabile con `--install`, `--check` è sola lettura (exit 1 se lo stato non è
+  certificato). Guardie: un solo reboot **forzato warm** (la maschera sopravvive al warm
+  reset, non al cold), tetto tentativi persistente, kill-switch `bc250.nocoreunlock` da
+  cmdline, gate largo sulla sessione di gioco (mai reboot con un gioco/Steam attivo),
+  nessun accesso SMU se il governor non è **confermato** fermo.
+### Corretto
+- **Il ledger non è l'hardware: dopo un cold boot la macchina restava a 12 thread.**
+  La maschera core (SMN 0x5A870) è volatile — un power-off la azzera — mentre
+  `cpu_core_unlock` restava nel ledger: l'unlock veniva saltato e la validate
+  interpretava la maschera 0x77 come "revert già avvenuto". Ora la fase unlock
+  ricontrolla l'**effetto reale** (`_cpu_unlock_effective()`, thread online da
+  sysfs, nessun accesso SMU) e ri-sblocca; la validate distingue `unlock_lost`
+  (unlock perso, con ERROR e nota) da `mask_stock` (revert vero) e non condanna
+  il silicio per questo.
+- **Governor GPU ora verificato in validate**: `_verify_governor` (gated su
+  `is_installed()`, quindi nessun falso fallimento su macchine senza governor).
+  Prima un governor spento — GPU a stock, senza curva 800 mV — non faceva
+  fallire né la validate né il rollback: restava invisibile.
+- **Stato del governor in transito letto come "fermo" (rischio freeze SMU)**:
+  `systemctl is-active` esce con rc=3 anche per `activating`/`deactivating`, e
+  `_governor_confirmed_inactive` mappava rc=3 su "confermato inattivo" — quindi
+  un accesso SMU poteva partire mentre il governor stava scrivendo sull'SMU.
+  Ora un unico punto (`governor_states()` / `governor_confirmed_inactive()` in
+  `buo/optimize/governor.py`, via `systemctl show -p ActiveState`) considera
+  "fermo" **solo** `inactive`/`failed`; allineati `audit/hardware.py`,
+  `validate/verify.py`, `safety/reader.py` e `_governor_paused` (dove il guard
+  "stato sconosciuto" era irraggiungibile).
+- **Gate ACPI fail-open**: `ACPI.verify()` guarda la entry del deployment
+  **bootato**. Prima accettava qualunque entry: un blob residuo su una entry
+  vecchia faceva risultare il fix applicato mentre la macchina bootava senza
+  tabelle 8-core (ogni transazione ostree rigenera le entry e la più nuova,
+  senza blob, diventa quella di default).
+
 ## v1.5.0 (2026-09-11)
 
 ### Aggiunto
