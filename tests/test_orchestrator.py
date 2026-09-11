@@ -31,6 +31,11 @@ class TestOrchestrator(unittest.TestCase):
         cfg.benchmark_enabled = True
         orch = Orchestrator(config=cfg, mock=True, dry_run=dry_run,
                             mock_hardware=hw)
+        # Le 16 CU extra sono OPT-IN (default prudente = 24 CU stock): la
+        # classe verifica la pipeline end-to-end con l'unlock GPU, quindi
+        # l'opt-in è esplicito (il default è coperto in
+        # tests/test_gpu_extra_cu.py).
+        orch.gpu_unlock.extra_cu = True
         orch.checkpoint.clear()  # parte da zero
         return orch
 
@@ -76,6 +81,61 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(out["needs_reboot"])
         self.assertEqual(len(calls), 1)
         self.assertIn("cpu_core_unlock", orch._applied_steps())
+
+    def _real_orch(self):
+        """Orchestrator NON-mock (il check fault è saltato in mock, C1).
+
+        `_governor_paused` è sostituito: qui non si tocca l'SMU, serve solo la
+        logica di rollback.
+        """
+        from contextlib import contextmanager
+        from unittest import mock as m
+        from buo.config import BUOConfig
+        from buo.orchestrator import Orchestrator
+        orch = Orchestrator(config=BUOConfig(), mock=False, dry_run=False,
+                            interactive=False)
+        orch.gpu_unlock = m.Mock()
+        orch.gpu_unlock.rollback.return_value = True
+        orch.unlock_verdict = m.Mock()
+        orch._disable_40cu_persistence = m.Mock()
+        orch.results = {"applied_fixes": [], "notes": []}
+
+        @contextmanager
+        def _paused():
+            yield
+        orch._governor_paused = _paused
+        return orch
+
+    def test_gpu_fault_with_extra_cu_rolls_back_to_24(self):
+        """Firme di fault GPU con le CU extra attive ⇒ rollback a 24 CU (P4).
+
+        Su questa APU un fault GPU non è recuperabile (niente reset) e non è
+        attribuibile a una WGP: l'unico esito onesto è tornare a 24 CU e
+        ricordare che le extra non sono affidabili.
+        """
+        from unittest import mock as m
+        orch = self._real_orch()
+        with m.patch.object(orch, "_gpu_40cu_effective", return_value=False), \
+                m.patch("buo.validate.gpu_faults.gpu_fault_since_boot",
+                        return_value=["amdgpu: ring gfx timeout",
+                                      "GPU reset failed"]):
+            orch._gpu_fault_rollback({})
+        orch.gpu_unlock.rollback.assert_called_once()
+        orch._disable_40cu_persistence.assert_called_once()
+        args = orch.unlock_verdict.set.call_args
+        self.assertEqual(args.args[:2], ("gpu", "never_enable_all"))
+        self.assertTrue(any("24 CU" in n for n in orch.results["notes"]))
+
+    def test_gpu_fault_without_extra_cu_does_nothing(self):
+        """Fault senza CU extra attive: nessun rollback (24 CU è già stock)."""
+        from unittest import mock as m
+        orch = self._real_orch()
+        with m.patch.object(orch, "_gpu_40cu_effective", return_value=True), \
+                m.patch("buo.validate.gpu_faults.gpu_fault_since_boot",
+                        return_value=["GPU hang"]):
+            orch._gpu_fault_rollback({})
+        orch.gpu_unlock.rollback.assert_not_called()
+        orch.unlock_verdict.set.assert_not_called()
 
     def test_apply_fixes_recorded(self):
         orch = self._make()

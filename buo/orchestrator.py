@@ -1174,7 +1174,20 @@ class Orchestrator(LoggerMixin):
                 # passa da UMR ⇒ governor fermo confermato.
                 with self._governor_paused():
                     effective = self._gpu_40cu_effective()
-                if effective is False and \
+                target_extra = bool(getattr(self.gpu_unlock, "extra_cu", False))
+                if effective is False and not target_extra:
+                    # Target = 24 CU stock (CU extra opt-in, default prudente
+                    # dalla ricerca 2026) ma la macchina ha ancora le CU extra
+                    # instradate: NON è un routing perso da ripristinare e non
+                    # si spegne nulla in silenzio — si dice e basta.
+                    self.logger.warning(
+                        "GPU: le CU extra risultano instradate ma il target è "
+                        "24 CU (opt-in `phases.probe.gpu_extra_cu` = false): "
+                        "nessuna azione. Per tornare a stock: `sudo buo oc` "
+                        "(o `buo oc apply --stock`)")
+                    results.setdefault("gpu", {"applied": False,
+                                               "extra_cu_disabled": True})
+                elif effective is False and \
                         self.unlock_verdict.get("gpu") != "never_enable_all":
                     self.logger.warning(
                         "GPU: 40-CU NON attive pur essendo nel ledger "
@@ -1198,6 +1211,12 @@ class Orchestrator(LoggerMixin):
                     results.setdefault("gpu", {"applied": False,
                                                "already_active": effective})
 
+        # 2-bis. Fault GPU con le CU extra attive ⇒ rollback a 24 CU (P4).
+        try:
+            self._gpu_fault_rollback(results)
+        except Exception as e:
+            self.logger.warning("Check fault GPU non eseguito: %s", e)
+
         # 3. Health test CU (se abilitato) — "smart" (design
         # DESIGN_PORTABILITY_DEFAULTS 3.4): si RIUSANO i results.tsv
         # COMPLETI (macchina già testata → nessun reboot); assenti o
@@ -1219,15 +1238,20 @@ class Orchestrator(LoggerMixin):
                 else:
                     self.logger.warning(
                         "CU health test SALTATO: results.tsv "
-                        "assente/incompleto — il protocollo per-WGP "
-                        "richiede ~20 reboot (eseguirlo a parte: "
-                        "bc250-cu-health-test.sh start, o un run "
-                        "interattivo sul primo unlock 40-CU)")
+                        "assente/incompleto — due vie: (a) maratona "
+                        "per-WGP con presidio (bc250-cu-health-test.sh "
+                        "start: ~20 reboot, recovery documentato), "
+                        "(b) cumulativo live senza reboot (buo oc cu-live "
+                        "SE.SH.WGP: una WGP + test reale, poi la "
+                        "successiva). Restare a 24 CU è un esito valido.")
                     self.results["notes"].append(
                         "CU health test saltato: results.tsv assente/"
-                        "incompleto — eseguire bc250-cu-health-test.sh "
-                        "start (per-WGP, ~20 reboot) o un run interattivo "
-                        "sul primo unlock 40-CU")
+                        "incompleto — (a) maratona per-WGP con presidio "
+                        "(bc250-cu-health-test.sh start, ~20 reboot, "
+                        "recovery documentato) oppure (b) cumulativo live "
+                        "senza reboot (buo oc cu-live SE.SH.WGP: una WGP + "
+                        "test reale, poi la successiva). 24 CU = esito "
+                        "valido.")
                 if defective and "gpu_mask" not in self._applied_steps():
                     results["mask"] = self.cu_mask.apply(defective_cu=defective)
                     self.results["applied_fixes"].append("gpu_mask")
@@ -2029,7 +2053,8 @@ class Orchestrator(LoggerMixin):
         """Persistenza 40-CU al boot (auto nei run NON interattivi).
 
         Il runtime UMR è VOLATILE: al reboot le 40 CU tornano a 24. La
-        persistenza (conf full-die scritto DIRETTAMENTE da persist() +
+        persistenza (conf con la maschera DERIVATA (extra validate meno quelle condannate)
+        scritto da persist(), solo con `phases.probe.gpu_extra_cu` attivo, +
         servizio di boot abilitato — fix 05/09: mai snapshot della
         tabella live) richiede un reboot per l'attivazione.
         • GATE D9 (design POSTUNLOCK_VALIDATION): si persiste SOLO su
@@ -2047,7 +2072,7 @@ class Orchestrator(LoggerMixin):
         (write-service-table) leggeva la tabella WGP corrente via umr →
         a governor attivo falliva (rc=1) e su macchina a 24-CU live
         regrediva il conf di boot a 0x07. Ora persist() scrive il conf
-        full-die senza toccare la GPU; resta comunque dentro
+        la maschera derivata senza toccare la GPU; resta comunque dentro
         `_governor_paused` (regola SMU/GPU: stop confermato o abort,
         restart a fine accesso). Governor non confermato FERMO →
         persistenza ANNULLATA con warning: le 40-CU restano volatili,
@@ -2079,19 +2104,20 @@ class Orchestrator(LoggerMixin):
         else:
             self.logger.warning(
                 "40 CU attive ma VOLATILI: al prossimo reboot tornano a 24. "
-                "Persistenza disponibile (conf full-die scritto da buo + "
+                "Persistenza disponibile (conf con la maschera derivata scritto da buo, "
+                "solo con le CU extra opt-in abilitate + "
                 "servizio abilitato).")
         if self.mock or self.dry_run:
             results["gpu"]["persistence"] = {
                 "suggested": True,
                 "note": "Per rendere persistenti le 40 CU al boot su una "
                         "macchina reale: run non interattivo di buo (conf "
-                        "full-die 0x1f x4 scritto direttamente + servizio "
+                        "maschera derivata (mai 0x1f a mano) + servizio "
                         "abilitato)",
             }
             self.results["notes"].append(
                 "40 CU attive ma VOLATILI (runtime UMR): al reboot tornano "
-                "a 24. Persistenza al boot disponibile (conf full-die "
+                "a 24. Persistenza al boot disponibile (conf con la maschera "
                 "scritto da buo, servizio abilitato)"
             )
             return
@@ -2121,7 +2147,7 @@ class Orchestrator(LoggerMixin):
             self.results["notes"].append(
                 "Persistenza 40-CU non eseguita: governor non confermato "
                 "fermo — 40 CU volatili (persistenza al boot: conf "
-                "full-die scritto da buo + servizio abilitato)")
+                "derivata scritta da buo + servizio abilitato)")
             results["gpu"]["persistence"] = {
                 "persisted": False,
                 "error": str(e),
@@ -3583,6 +3609,47 @@ class Orchestrator(LoggerMixin):
             self.results["applied_fixes"].remove(name)
         except (KeyError, ValueError):
             pass
+
+    def _gpu_fault_rollback(self, results: Dict[str, Any]) -> None:
+        """Fault GPU con le CU extra attive ⇒ si torna a 24 CU (mai diagnosi per-WGP).
+
+        Su questa APU un fault della GPU NON è recuperabile (niente reset:
+        freeze/schermo nero) e `lower clocks can't fix genuinely defective
+        CUs`: le firme nel journal del kernel (ring timeout, `GPU reset
+        failed`, VM fault) con le CU extra instradate sono quindi un trigger
+        di ROLLBACK, non una diagnosi su quale WGP sia guasta (impossibile:
+        il fault è a livello di ring/driver).
+        """
+        if self.mock or self.dry_run:
+            return
+        from .validate.gpu_faults import gpu_fault_since_boot
+        faults = gpu_fault_since_boot()
+        if not faults:
+            return
+        with self._governor_paused():
+            extra_live = self._gpu_40cu_effective() is False
+        if not extra_live:
+            self.logger.warning(
+                "GPU: firme di fault nel journal (%d) ma le CU extra non sono "
+                "instradate — nessuna azione", len(faults))
+            return
+        self.logger.error(
+            "GPU: firme di fault con le CU extra attive (%s) — riporto la GPU "
+            "a 24 CU e marco le extra come non affidabili",
+            "; ".join(faults[:2]))
+        with self._governor_paused():
+            self.gpu_unlock.rollback()
+        # Senza questo il servizio di boot riabiliterebbe le CU extra alla
+        # prossima accensione: il rollback deve spegnere anche la persistenza.
+        self._disable_40cu_persistence()
+        self.unlock_verdict.set(
+            "gpu", "never_enable_all",
+            {"cause": "gpu_fault_with_extra_cu", "faults": faults[:3],
+             "note": "nessuna attribuzione per-WGP: il fault è di ring/driver"})
+        self.results["notes"].append(
+            "GPU riportata a 24 CU: firme di fault con le CU extra attive "
+            "(le WGP extra restano disabilitate finché non vengono validate "
+            "una per una con `buo oc cu-live`)")
 
     def _gpu_40cu_effective(self) -> Optional[bool]:
         """EFFETTO reale del routing 40-CU (None se non determinabile).
