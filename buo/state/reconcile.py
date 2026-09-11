@@ -455,18 +455,20 @@ class BootReconciler(LoggerMixin):
         return self._reboot_fn()
 
     def _force_warm_reset(self) -> Optional[str]:
-        """La maschera core sopravvive al WARM reset, non al cold."""
+        """La maschera core sopravvive al WARM reset, non al cold.
+
+        Punto unico: `state.reboot.force_warm_reset` (usato anche da
+        `RebootManager.schedule`), con il path iniettabile per i test.
+        """
         if self.dry_run:
             return None
-        try:
-            self.reboot_mode_path.write_text("warm\n", encoding="utf-8")
-        except OSError as e:
-            self.logger.warning(
-                "Reset NON forzato a warm (%s): se il reset è cold la maschera "
-                "può andare persa (il tetto tentativi evita il ciclo)", e)
-            return None
-        self.logger.info("Reset forzato warm prima del reboot")
-        return "warm"
+        from .reboot import force_warm_reset
+        if force_warm_reset(self.reboot_mode_path):
+            return "warm"
+        self.logger.warning(
+            "Reset NON forzato a warm: se il reset è cold la maschera può "
+            "andare persa (il tetto tentativi evita il ciclo)")
+        return None
 
     def _reboot_real(self) -> Dict[str, Any]:
         self.logger.info("Reboot per attivare lo stato riparato")

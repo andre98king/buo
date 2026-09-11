@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import Optional
 from pathlib import Path
 
 from ..constants import EXIT_REBOOT
@@ -519,6 +520,27 @@ if __name__ == "__main__":
 '''
 
 
+REBOOT_MODE_PATH = Path("/sys/kernel/reboot/mode")
+
+
+def force_warm_reset(mode_path: Path = REBOOT_MODE_PATH) -> bool:
+    """Forza il reset WARM prima di un reboot (True se scritto).
+
+    Scoperta di campo (11/09/2026): su questa macchina `/sys/kernel/reboot/mode`
+    è `cold` (`type=acpi`), e gli stati che vivono in registri volatili — la
+    maschera core 8-core, SMN 0x5A870 — **sopravvivono al warm reset ma non a
+    un cold reset**. Con un cold reset l'unlock andrebbe perso a ogni reboot:
+    è il boot-loop che ha colpito il port community con auto-reboot. Fail-soft:
+    se il file non è scrivibile si prosegue (i chiamanti hanno i propri guard:
+    tetto tentativi, verifica dell'effetto reale al risveglio).
+    """
+    try:
+        Path(mode_path).write_text("warm\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
 class RebootManager(LoggerMixin):
     """Gestisce i reboot automatici con ripresa."""
 
@@ -538,11 +560,13 @@ class RebootManager(LoggerMixin):
         Path("/usr/share/xsessions/plasma.desktop"),
     )
 
-    def __init__(self, resume_command: str = "buo resume"):
+    def __init__(self, resume_command: str = "buo resume",
+                 reboot_mode_path: Optional[Path] = None):
         # Fail-closed: niente newline/control char (iniezione unit systemd).
         if any(c in resume_command for c in "\r\n\x00"):
             raise ValueError("resume_command non valido (newline non ammesso)")
         self.resume_command = resume_command
+        self.reboot_mode_path = Path(reboot_mode_path or REBOOT_MODE_PATH)
 
     def schedule(self, reason: str = "reboot required",
                  delay: int = 5) -> None:
@@ -559,6 +583,15 @@ class RebootManager(LoggerMixin):
             self.logger.info("Reboot annullato dall'utente")
             self.cleanup()
             return
+
+        # Reset WARM: un cold reset azzererebbe la maschera core (unlock perso
+        # a ogni reboot → boot-loop). Fail-soft: si prosegue comunque.
+        if force_warm_reset(self.reboot_mode_path):
+            self.logger.info("Reset forzato warm (la maschera core sopravvive "
+                             "solo al warm reset)")
+        else:
+            self.logger.warning("Reset NON forzato a warm: se il reset è cold "
+                                "l'unlock 8-core andrà perso")
 
         # reboot effettivo se possibile, altrimenti exit code dedicato
         rc, _, _ = self._run(["systemctl", "reboot"], check=False)
