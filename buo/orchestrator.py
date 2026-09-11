@@ -1167,8 +1167,36 @@ class Orchestrator(LoggerMixin):
                         "GPU: validazione interrotta ma 40-CU non attive "
                         "(stock) — salto")
             else:
-                self.logger.info(
-                    "GPU: unlock 40-CU già eseguito (checkpoint) — salto")
+                # Il routing 40-CU (UMR) è VOLATILE: dopo un cold boot, o se
+                # il servizio non è partito, il ledger dice "fatto" mentre le
+                # CU attive sono 24 — stessa classe del bug CPU dell'11/09.
+                # Qui la verità è l'EFFETTO, non il checkpoint. La lettura
+                # passa da UMR ⇒ governor fermo confermato.
+                with self._governor_paused():
+                    effective = self._gpu_40cu_effective()
+                if effective is False and \
+                        self.unlock_verdict.get("gpu") != "never_enable_all":
+                    self.logger.warning(
+                        "GPU: 40-CU NON attive pur essendo nel ledger "
+                        "(routing volatile perso) — ri-abilito")
+                    with self._governor_paused():
+                        gpu = self.gpu_unlock.apply()
+                    results["gpu"] = gpu
+                    if gpu.get("applied"):
+                        self.results["notes"].append(
+                            "40-CU ri-abilitate: il routing UMR è volatile e "
+                            "risultava perso (verifica: `buo status`)")
+                else:
+                    if effective is False:
+                        self.logger.warning(
+                            "GPU: 40-CU non attive ma silicio marcato "
+                            "never_enable_all — nessun re-enable")
+                    else:
+                        self.logger.info(
+                            "GPU: unlock 40-CU già eseguito e VERIFICATO — "
+                            "salto")
+                    results.setdefault("gpu", {"applied": False,
+                                               "already_active": effective})
 
         # 3. Health test CU (se abilitato) — "smart" (design
         # DESIGN_PORTABILITY_DEFAULTS 3.4): si RIUSANO i results.tsv
@@ -1213,7 +1241,12 @@ class Orchestrator(LoggerMixin):
     def _do_cpu_unlock(self) -> Dict[str, Any]:
         """Esegue l'unlock CPU 8-core (volatile, richiede reboot)."""
         try:
-            cpu = self.cpu_unlock.unlock()
+            # Scrittura SMU (Q3 0x98 / SMN 0x5A870): governor fermo e
+            # CONFERMATO, come ogni accesso SMU (regola assoluta: accessi
+            # concorrenti = freeze del SoC). Il context abortisce se lo stato
+            # non è determinabile.
+            with self._governor_paused():
+                cpu = self.cpu_unlock.unlock()
             if cpu.get("changed", True):
                 self.results["applied_fixes"].append("cpu_core_unlock")
                 # MARCATO PRIMA del reboot: al resume non si ripete
@@ -1319,6 +1352,9 @@ class Orchestrator(LoggerMixin):
                     "online con `cpu_core_unlock` nel ledger — la maschera "
                     "core non sopravvive al cold boot (servirebbe un nuovo "
                     "unlock 8-core)" % (threads or 0))
+                # Il ledger non può restare marcato: la maschera è persa
+                # DAVVERO → il rientro della fase unlock deve ri-sbloccare.
+                self._unmark_step("cpu_core_unlock")
                 cpu_out["skipped"] = "unlock_lost"
             else:
                 self.logger.info(
@@ -1474,6 +1510,32 @@ class Orchestrator(LoggerMixin):
             raise  # governor non confermato fermo: abort, mai SMN
         except Exception:
             return None
+
+    def _governor_stop_verified(self) -> None:
+        """Ferma il governor VERIFICANDO lo stato (fail-closed).
+
+        Punto unico prima delle scritture SMN/SMU che non passano da
+        `_governor_paused()` (fasi lunghe che tengono il governor fermo per
+        tutta la durata: i test UV). `governor_confirmed_inactive()` è la sola
+        fonte attendibile: `systemctl is-active` esce con rc=3 anche per gli
+        stati transitori, quindi "non è active" NON significa "fermo".
+        """
+        confirmed = governor_confirmed_inactive()
+        if confirmed is None:
+            raise RuntimeError(
+                "Stato del governor non determinabile (in transito o "
+                "sconosciuto) — scritture SMU annullate (mai SMU con governor "
+                "attivo: freeze SoC).")
+        if confirmed:
+            return
+        try:
+            stopped = bool(self.governor.stop())
+        except Exception:
+            stopped = False
+        if not stopped or governor_confirmed_inactive() is not True:
+            raise RuntimeError(
+                "Governor non confermato FERMO — scritture SMU annullate "
+                "(mai SMU con governor attivo: freeze SoC).")
 
     @contextmanager
     def _governor_paused(self):
@@ -2146,6 +2208,18 @@ class Orchestrator(LoggerMixin):
                     self.results["applied_fixes"].append(name)
                     # Registra PRIMA del reboot: il resume non deve ripeterlo
                     self._mark_step(name)
+                    # `rpm-ostree kargs` (GTT) RIGENERA le entry BLS: il fix
+                    # ACPI appena applicato vive in una entry che il reboot non
+                    # userà più (la nuova diventa default e non ha il blob) ⇒
+                    # 16 thread SENZA tabelle (lo scenario di boot-loop che il
+                    # gate ACPI esiste per prevenire). Togliendolo dal ledger,
+                    # al rientro della fase viene riverificato sull'entry che
+                    # boota e riapplicato.
+                    if name == "gtt_tuning" and not result.get("already"):
+                        self._unmark_step("acpi_fix")
+                        self.results["notes"].append(
+                            "kargs GTT riscritti: fix ACPI da riapplicare "
+                            "(entry BLS rigenerate dalla transazione)")
                     if result.get("needs_reboot"):
                         self._schedule_reboot(f"{name} — reboot richiesto")
                         break  # al massimo UN reboot per rientro di fase
@@ -2577,10 +2651,13 @@ class Orchestrator(LoggerMixin):
                 "Sweep GPU delegato: buo oc sweep-gpu (base sicura: "
                 "tabella community GPU)")
 
-        # Il governor va fermato durante i test
+        # Il governor va fermato durante i test, con stato VERIFICATO:
+        # `stop()` a rc ignorato non basta (`is-active` esce con rc=3 anche
+        # per activating/deactivating → il governor poteva risultare "fermo"
+        # mentre scriveva ancora sull'SMU).
         self._capture_pre_validate_config()
         if not self.mock:
-            self.governor.stop()
+            self._governor_stop_verified()
 
         # CPU undervolt: ricerca a `cpu_search_freq` (default 3500 stock)
         # — mai parte da cpu_freq_max 4000 (il punto trovato È la
@@ -2826,7 +2903,11 @@ class Orchestrator(LoggerMixin):
                 return {"applied": False,
                         "warning": "bc250-apply non installato "
                                    "(esegui: sudo buo install-deps)"}
-            result = w.apply(str(conf))
+            # Apply SMU (bc250-apply): governor fermo e CONFERMATO. Se la
+            # fase lo ha già fermato il context è un no-op che VERIFICA lo
+            # stato (e abortisce se è ignoto/transitorio).
+            with self._governor_paused():
+                result = w.apply(str(conf))
             if result["returncode"] != 0:
                 return {"applied": False,
                         "error": (result.get("stderr") or "apply fallito")[:200]}
@@ -3401,6 +3482,28 @@ class Orchestrator(LoggerMixin):
                 "rollback.", err or rc)
             # marcatore tenuto: il prossimo run ritenta (self-healing)
 
+    def _auto_reboot_blocked(self) -> Optional[str]:
+        """Motivo per cui NON si deve riavviare automaticamente (None = ok).
+
+        Stesse regole di campo dell'agente di boot:
+        - kill-switch `bc250.nocoreunlock` in cmdline (convenzione community);
+        - un GIOCO in esecuzione: mai un reboot addosso a una partita
+          (incidente 10/09, stress partito durante la fase launcher). La sola
+          sessione Steam/gamescope NON blocca: su Bazzite Steam È la sessione,
+          bloccarla renderebbe impossibile completare una run.
+        """
+        try:
+            with open("/proc/cmdline", encoding="utf-8", errors="replace") as fh:
+                cmdline = fh.read()
+        except OSError:
+            cmdline = ""
+        from .state.reconcile import KILL_SWITCH, game_running
+        if KILL_SWITCH in cmdline:
+            return f"kill-switch {KILL_SWITCH} in cmdline"
+        if game_running():
+            return "gioco in esecuzione"
+        return None
+
     def _schedule_reboot(self, reason: str) -> None:
         """Salva checkpoint e programma il reboot (auto-ripresa)."""
         if self.dry_run:
@@ -3421,11 +3524,26 @@ class Orchestrator(LoggerMixin):
             self.logger.error("%s", msg)
             self._safety_abort(msg)
             return
+        blocked = self._auto_reboot_blocked()
+        if blocked:
+            msg = (f"Reboot automatico NON eseguito ({blocked}) — chiudi il "
+                   "gioco (o togli il kill-switch dalla cmdline), riavvia a "
+                   "mano e la run riprende con `buo resume`")
+            self.logger.error("%s", msg)
+            self._safety_abort(msg)
+            return
         self.checkpoint.increment_reboot_count()
         self.logger.info("Reboot programmato: %s", reason)
-        # In produzione: crea buo-resume.service e reboot
+        # In produzione: crea buo-resume.service e reboot. Fail-closed: senza
+        # unità di ripresa la run NON riprende da sola al boot (resterebbe a
+        # metà fix senza dirlo) → il reset si annulla e si spiega cosa fare.
         from .state.reboot import RebootManager
-        RebootManager().schedule(reason=reason, delay=5)
+        if RebootManager().schedule(reason=reason, delay=5) is False:
+            self._safety_abort(
+                "servizio di ripresa NON creato (buo-resume.service): la run "
+                "non riprenderebbe da sola al reboot — riavvia a mano e lancia "
+                "`buo resume`")
+            return
         sys.exit(EXIT_REBOOT)
 
     def _applied_steps(self) -> set:
@@ -3446,6 +3564,37 @@ class Orchestrator(LoggerMixin):
         steps = self._applied_steps()
         if steps:
             self.results["applied_fixes"] = sorted(steps)
+
+    def _unmark_step(self, name: str) -> None:
+        """Toglie una modifica dal ledger quando la REALTÀ la smentisce.
+
+        Due casi reali: l'unlock 8-core perso a un cold boot (la maschera è
+        volatile) e il fix ACPI invalidato da una transazione ostree avvenuta
+        dopo il suo apply (le entry BLS vengono rigenerate). Senza, la fase
+        salterebbe il fix al rientro dichiarando "già fatto".
+        """
+        steps = self._applied_steps()
+        if name not in steps:
+            return
+        steps.discard(name)
+        if not self.dry_run:
+            self.checkpoint.set("applied_steps", sorted(steps))
+        try:
+            self.results["applied_fixes"].remove(name)
+        except (KeyError, ValueError):
+            pass
+
+    def _gpu_40cu_effective(self) -> Optional[bool]:
+        """EFFETTO reale del routing 40-CU (None se non determinabile).
+
+        Da usare DENTRO `_governor_paused()`: la lettura passa dallo status del
+        live-manager (UMR/SMN).
+        """
+        try:
+            return bool(self.gpu_unlock.is_enabled())
+        except Exception as e:
+            self.logger.warning("Stato 40-CU non determinabile: %s", e)
+            return None
 
     def _mark_step(self, name: str) -> None:
         """Registra una modifica come eseguita (PRIMA di eventuali reboot)."""

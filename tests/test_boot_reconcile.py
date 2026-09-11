@@ -102,10 +102,11 @@ class Responder:
             if state is None:
                 return (1, "", "stato non determinabile")
             return (0, state + "\n", "")
-        if "ActiveEnterTimestamp" in cmd:
+        if any("ActiveEnterTimestamp" in c for c in cmd):
+            # Timestamp MONOTONIC (µs dall'avvio): un valore basso = girato in
+            # questo boot; "0" = mai girato (o solo in un boot precedente).
             name = cmd[-1]
-            return (0, ("Fri 2026-09-11 15:54:21 CEST\n"
-                        if name in self.ran else "\n"), "")
+            return (0, ("5000000\n" if name in self.ran else "0\n"), "")
         if cmd[:1] == ["systemctl"] and "is-enabled" in cmd:
             name = cmd[-1]
             return ((0, "enabled\n", "") if name in self.enabled

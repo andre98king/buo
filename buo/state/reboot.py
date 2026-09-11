@@ -570,9 +570,19 @@ class RebootManager(LoggerMixin):
 
     def schedule(self, reason: str = "reboot required",
                  delay: int = 5) -> None:
-        """Crea il servizio di ripresa e riavvia (exit code 50)."""
+        """Crea il servizio di ripresa e riavvia (exit code 50).
+
+        Ritorna `False` (senza riavviare) se l'unità di ripresa non è stata
+        creata: senza di essa la run non riprenderebbe da sola al boot e la
+        macchina resterebbe a metà fix. Il chiamante decide come uscirne
+        (fail-closed).
+        """
         self.logger.info("Reboot programmato: %s", reason)
-        self._create_resume_service()
+        if not self._create_resume_service():
+            self.logger.error(
+                "Servizio di ripresa NON creato: la run non riprenderebbe da "
+                "sola. Reset ANNULLATO — riavvia a mano e lancia `buo resume`.")
+            return False
 
         self.logger.info("Riavvio in %d secondi… (Ctrl+C per annullare)",
                          delay)

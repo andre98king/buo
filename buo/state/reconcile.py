@@ -63,6 +63,22 @@ GAME_PATTERNS = (r"\.exe", "pressure-vessel")
 SESSION_PATTERNS = ("steam", "gamescope")
 
 
+def game_running(patterns=GAME_PATTERNS) -> bool:
+    """True se un gioco è in esecuzione (gate condiviso, regola di campo).
+
+    Unico punto: usato dall'agente di boot e dall'orchestratore prima di un
+    reboot. Un `.exe` Proton/launcher o il runtime `pressure-vessel` = una
+    partita in corso ⇒ mai riavviare (incidente 10/09: uno stress partì
+    durante la fase launcher e crashò il gioco). La sola sessione
+    Steam/gamescope NON è un gioco (su Bazzite Steam È la sessione).
+    """
+    for pattern in tuple(patterns):
+        rc, out, _ = run_command(["pgrep", "-f", pattern], timeout=10)
+        if rc == 0 and out.strip():
+            return True
+    return False
+
+
 class BootReconciler(LoggerMixin):
     """Verifica e ripristina lo stato certificato a ogni accensione."""
 
@@ -185,11 +201,7 @@ class BootReconciler(LoggerMixin):
         """True se un gioco è in esecuzione (gate largo, regola di campo)."""
         patterns = (GAME_PATTERNS if self.boot_run
                     else GAME_PATTERNS + SESSION_PATTERNS)
-        for pattern in patterns:
-            rc, out, _ = run_command(["pgrep", "-f", pattern], timeout=10)
-            if rc == 0 and out.strip():
-                return True
-        return False
+        return game_running(patterns)
 
     def _kargs(self) -> Dict[str, Any]:
         try:
@@ -211,11 +223,27 @@ class BootReconciler(LoggerMixin):
         return None
 
     def _service_ran_this_boot(self, name: str) -> bool:
-        """True se il servizio oneshot è già girato in questo boot."""
+        """True se il servizio oneshot è girato in QUESTO boot.
+
+        Non basta "timestamp non vuoto": systemd conserva l'ora di attivazione
+        anche dei boot precedenti, quindi un oneshot eseguito ieri risulterebbe
+        "già fatto" e OC CPU / 40 CU non verrebbero applicati. Il timestamp
+        **monotonic** è misurato dall'avvio del sistema: se è maggiore del tempo
+        di attività corrente appartiene a un boot precedente.
+        """
         rc, out, _ = run_command(
-            ["systemctl", "show", "-p", "ActiveEnterTimestamp", "--value",
-             name], timeout=15)
-        return bool(rc == 0 and out.strip())
+            ["systemctl", "show", "-p", "ActiveEnterTimestampMonotonic",
+             "--value", name], timeout=15)
+        if rc != 0 or not out.strip().isdigit():
+            return False
+        started_us = int(out.strip())
+        try:
+            with open("/proc/uptime", encoding="utf-8") as fh:
+                uptime_us = int(float(fh.read().split()[0]) * 1_000_000)
+        except (OSError, ValueError, IndexError):
+            return started_us > 0
+        # un margine di 1s copre l'arrotondamento fra le due letture
+        return started_us > 0 and started_us <= uptime_us + 1_000_000
 
     # ------------------------------------------------------------------ #
     # Verifica
