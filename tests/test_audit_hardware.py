@@ -320,6 +320,36 @@ class TestAcpiAudit(unittest.TestCase):
         # Il blob sulla entry non è il segnale su queste distro
         self.assertFalse(acpi["boot_fix_present"])
 
+class GttConditionalTestCase(unittest.TestCase):
+    """`gtt_limited` dipende dall'EFFETTO (ttm.pages_limit runtime).
+
+    Campo 12/09/2026: `buo probe` dichiarava "GTT limitato a ~7.4 GiB" mentre
+    il karg era attivo e `mem_info_gtt_total` valeva 11.50 GiB — un problema
+    affermato a priori, come i sensori SuperIO.
+    """
+
+    def _ids(self, pages):
+        from unittest import mock as m
+        from buo.audit.problems import ProblemDetector
+        with m.patch("buo.audit.problems.gtt_pages_limit",
+                     return_value=(pages, "sysfs (rt)")):
+            return [(p["id"], p["title"]) for p in ProblemDetector().detect({})]
+
+    def test_no_problem_when_karg_is_effective(self):
+        ids = [i for i, _ in self._ids(3014656)]
+        self.assertNotIn("gtt_limited", ids)
+
+    def test_problem_when_gtt_is_still_limited(self):
+        found = [t for i, t in self._ids(1944679) if i == "gtt_limited"]
+        self.assertTrue(found)
+        self.assertIn("7.4 GiB", found[0])
+
+    def test_problem_is_honest_when_not_readable(self):
+        found = [t for i, t in self._ids(None) if i == "gtt_limited"]
+        self.assertTrue(found)
+        self.assertIn("non verificabile", found[0])
+
+
 class SuperIOConditionalTestCase(unittest.TestCase):
     """`superio_missing` dipende dall'EFFETTO, non è un problema "a priori".
 

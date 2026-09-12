@@ -24,6 +24,26 @@ from typing import Any, Dict, List
 from ..utils.logging import LoggerMixin
 
 
+# Soglia del fix documentato: 3014656 pagine = 12 GiB (karg
+# `ttm.pages_limit=3014656`); sotto questa soglia il tetto dinamico limita i
+# giochi che chiedono >=8 GB di VRAM.
+GTT_PAGES_OK = 3014656
+
+
+def gtt_pages_limit(param_path: str = "/sys/module/ttm/parameters/pages_limit"
+                    ) -> "tuple[Optional[int], str]":
+    """(pagine, fonte) del limite GTT REALE (None = non determinabile).
+
+    Legge il parametro RUNTIME del modulo ttm: è l'unico dato che dice se il
+    karg ha avuto effetto (su ostree un conf in modprobe.d è inerte).
+    """
+    try:
+        with open(param_path, encoding="utf-8") as fh:
+            return int(fh.read().strip()), "sysfs (rt)"
+    except (OSError, ValueError):
+        return None, "non leggibile"
+
+
 class ProblemDetector(LoggerMixin):
     """Rileva i problemi noti a partire dall'audit hardware."""
 
@@ -182,13 +202,29 @@ class ProblemDetector(LoggerMixin):
             "detail": "Async compute corrompe i frame — serve bc250-gfx1013-fix",
             "fix": "ace",
         })
-        problems.append({
-            "id": "gtt_limited",
-            "severity": "media",
-            "title": "GTT limitato a ~7.4 GiB",
-            "detail": "Aumentare ttm.pages_limit per usare più memoria",
-            "fix": "gtt",
-        })
+        # GTT: NON è un problema "sempre presente" — dipende dall'EFFETTO. Il
+        # karg `ttm.pages_limit=3014656` (12 GB, meccanismo documentato) alza
+        # il tetto dinamico: dichiarare il limite a priori era la stessa classe
+        # di bug dei sensori SuperIO (report che afferma un difetto inesistente,
+        # campo 12/09/2026: probe diceva "~7.4 GiB" con gtt_total=11.50 GiB).
+        gtt_pages, gtt_source = gtt_pages_limit()
+        if gtt_pages is None:
+            problems.append({
+                "id": "gtt_limited",
+                "severity": "bassa",
+                "title": "Limite GTT non verificabile",
+                "detail": "ttm.pages_limit non leggibile: controlla a mano",
+                "fix": "gtt",
+            })
+        elif gtt_pages < GTT_PAGES_OK:
+            problems.append({
+                "id": "gtt_limited",
+                "severity": "media",
+                "title": f"GTT limitato a ~{gtt_pages * 4096 / 2**30:.1f} GiB",
+                "detail": ("Aumentare ttm.pages_limit (karg: 3014656 = 12 GB) "
+                           f"— fonte: {gtt_source}"),
+                "fix": "gtt",
+            })
         # Sensori/PWM: NON è un problema "sempre presente" — dipende
         # dall'effetto reale (punto unico `fix.fan.sensor_effect`: hwmon
         # nct668* con ventola o PWM attivi). Dichiararlo a priori era la
