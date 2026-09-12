@@ -11,7 +11,7 @@ strumenti standard, veloci e riproducibili:
     • GPU stress:  vkmark (primario, carico realistico) → furmark solo se
       vkmark manca (selezione condivisa: `utils/gpu_stress`)
     • CPU stress:  stress-ng (fallback: stress)
-    • CPU bench:   sysbench
+    • CPU bench:   sysbench (fallback: stress-ng, se sysbench manca)
     • Compute:     vkmark (verifica anche il fix ACE)
     • AI inference: onnxruntime (opzionale)
 
@@ -44,7 +44,8 @@ class BenchmarkRunner(LoggerMixin):
         for name, fn in [
             ("gpu_stress", lambda: self.run_gpu_stress(gpu_duration)),
             ("cpu_stress", lambda: self.run_cpu_stress(cpu_duration)),
-            ("cpu_bench", self.run_cpu_benchmark),
+            ("cpu_bench", lambda: self.run_cpu_benchmark(
+                cpu_stress=results.get("cpu_stress"))),
             ("compute_bench", lambda: self.run_compute_benchmark(compute_duration)),
             ("ai_inference", self.run_ai_inference),
         ]:
@@ -94,7 +95,7 @@ class BenchmarkRunner(LoggerMixin):
                 cwd=stress_cwd())
             errors = 0 if rc == 0 else 1
             return {"available": True, "errors": errors, "tool": "stress-ng",
-                    "bogo_ops": self._parse_float(r"Bogo ops/s\s+([\d.]+)", out)}
+                    "bogo_ops": self._parse_stress_ng_bogo(out)}
         if which("stress"):
             rc, _, _ = run_command(
                 ["stress", "--cpu", "0", "--timeout", str(duration)],
@@ -102,7 +103,16 @@ class BenchmarkRunner(LoggerMixin):
             return {"available": True, "errors": 0 if rc == 0 else 1, "tool": "stress"}
         return {"available": False}
 
-    def run_cpu_benchmark(self, duration: int = 30) -> Dict[str, Any]:
+    def run_cpu_benchmark(self, duration: int = 30,
+                          cpu_stress: Optional[Dict[str, Any]] = None
+                          ) -> Dict[str, Any]:
+        """CPU benchmark: sysbench, altrimenti la metrica di stress-ng.
+
+        `cpu_stress` = risultato del CPU stress della STESSA run: se sysbench
+        manca (su Bazzite non si installa senza layering ostree) si riusa la
+        sua metrica bogo ops/s invece di dichiarare "non disponibile" — senza
+        carico aggiuntivo (stessa durata, stesso tool già eseguito).
+        """
         if self.mock:
             return {"available": True, "events_per_sec": 125000.0}
 
@@ -111,8 +121,18 @@ class BenchmarkRunner(LoggerMixin):
                 ["sysbench", "cpu", "run", "--threads=8", f"--time={duration}"],
                 timeout=duration + 30)
             eps = self._parse_float(r"events per second:\s*([\d.]+)", out)
-            return {"available": rc == 0, "events_per_sec": eps}
-        return {"available": False}
+            return {"available": rc == 0, "events_per_sec": eps,
+                    "metric": "events_per_sec", "tool": "sysbench"}
+
+        if cpu_stress is None:
+            cpu_stress = self.run_cpu_stress(duration)
+        bogo = cpu_stress.get("bogo_ops")
+        if cpu_stress.get("available") and bogo is not None:
+            return {"available": True, "tool": cpu_stress.get("tool"),
+                    "metric": "bogo_ops/s", "bogo_ops": bogo,
+                    "note": "sysbench assente: metrica bogo ops/s di stress-ng"}
+        return {"available": False,
+                "note": "sysbench assente e metrica stress-ng non ricavabile"}
 
     # -------------------------- COMPUTE ------------------------------- #
 
@@ -154,6 +174,32 @@ class BenchmarkRunner(LoggerMixin):
         return {"available": False, "note": "richiede un modello ONNX (es. ResNet-18)"}
 
     # -------------------------- helper -------------------------------- #
+
+    @staticmethod
+    def _parse_stress_ng_bogo(out: str) -> Optional[float]:
+        """bogo ops/s (REAL TIME) dalla riga `metrc` di stress-ng.
+
+        Output reale (stress-ng di Bazzite):
+            stress-ng: metrc: [15802] stressor  bogo ops real time ...
+            stress-ng: metrc: [15802] cpu  37784  2.00  31.92  0.02  18877.93  1182.92
+
+        Togliendo il `[pid]`, le colonne numeriche sono: bogo ops, real time,
+        usr time, sys time, bogo ops/s (real time, TOTALE dei worker),
+        bogo ops/s (usr+sys, per-CPU) → si prende la 5ª. La vecchia regex
+        cercava `Bogo ops/s` (maiuscola, e presente solo nell'header): nel
+        corpo non compare MAI → `bogo_ops: null` sempre (bug di campo 12/09).
+        """
+        for line in out.splitlines():
+            if "metrc" not in line:
+                continue
+            body = re.sub(r"\[\s*\d+\]", "", line)
+            nums = re.findall(r"\d+\.\d+|\d+", body)
+            if len(nums) >= 6:
+                try:
+                    return float(nums[4])
+                except ValueError:  # pragma: no cover - difesa
+                    return None
+        return None
 
     @staticmethod
     def _parse_float(pattern: str, text: str) -> Optional[float]:

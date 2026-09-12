@@ -30,6 +30,55 @@ class TestBenchmarkRunner(unittest.TestCase):
         self.assertEqual(BenchmarkRunner._parse_float(r"([\d.]+)", "FPS 42.5"), 42.5)
         self.assertIsNone(BenchmarkRunner._parse_float(r"([\d.]+)", "niente"))
 
+    def test_bogo_ops_parser_su_output_reale(self):
+        """Regressione 12/09: `bogo_ops` era SEMPRE null.
+
+        La vecchia regex cercava `Bogo ops/s` (maiuscola) che nel corpo
+        dell'output non compare mai — solo nell'header, senza numeri. Output
+        reale copiato dal campo (stress-ng di Bazzite).
+        """
+        out = (
+            "stress-ng: info:  [15802] dispatching hogs: 16 cpu\n"
+            "stress-ng: metrc: [15802] stressor       bogo ops real time  "
+            "usr time  sys time   bogo ops/s     bogo ops/s\n"
+            "stress-ng: metrc: [15802]                           (secs)    "
+            "(secs)    (secs)   (real time) (usr+sys time)\n"
+            "stress-ng: metrc: [15802] cpu               37784      2.00     "
+            "31.92      0.02     18877.93        1182.92\n"
+        )
+        # 5ª colonna = bogo ops/s REAL TIME (totale dei worker), non la
+        # per-CPU (usr+sys) né il tempo di sistema.
+        self.assertEqual(BenchmarkRunner._parse_stress_ng_bogo(out), 18877.93)
+
+    def test_bogo_ops_parser_senza_righe_metrc(self):
+        for out in ("", "stress-ng: info: [1] dispatching hogs: 1 cpu",
+                    "stress-ng: metrc: [1] stressor bogo ops real time"):
+            self.assertIsNone(BenchmarkRunner._parse_stress_ng_bogo(out), out)
+
+    def test_cpu_bench_fallback_stress_ng_senza_sysbench(self):
+        """sysbench assente → si riusa la metrica dello stress-ng GIÀ eseguito
+        (nessun carico aggiuntivo, metrica dichiarata esplicitamente)."""
+        from unittest import mock as m
+        runner = BenchmarkRunner(mock=False)
+        stress = {"available": True, "tool": "stress-ng", "bogo_ops": 18877.93}
+        with m.patch("buo.benchmark.runner.which", return_value=None):
+            with m.patch.object(runner, "run_cpu_stress") as fake:
+                res = runner.run_cpu_benchmark(30, cpu_stress=stress)
+                fake.assert_not_called()   # nessuna seconda esecuzione
+        self.assertTrue(res["available"], res)
+        self.assertEqual(res["bogo_ops"], 18877.93)
+        self.assertEqual(res["metric"], "bogo_ops/s")
+        self.assertNotIn("events_per_sec", res)
+
+    def test_cpu_bench_nessuna_metrica_non_inventa_valori(self):
+        from unittest import mock as m
+        runner = BenchmarkRunner(mock=False)
+        with m.patch("buo.benchmark.runner.which", return_value=None):
+            res = runner.run_cpu_benchmark(
+                30, cpu_stress={"available": True, "bogo_ops": None})
+        self.assertFalse(res["available"])
+        self.assertIn("note", res)
+
 
 class TestBenchmarkCapture(unittest.TestCase):
     """L'orchestratore deve catturare sia before sia after."""

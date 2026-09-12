@@ -3,6 +3,19 @@
 ## Non rilasciato
 
 ### Corretto
+- **`bogo_ops` del CPU stress sempre `null`** (bug di campo 12/09/2026): la regex
+  cercava `Bogo ops/s` (con la maiuscola) che nel corpo dell'output di `stress-ng
+  --metrics-brief` **non compare mai** (esiste solo nell'header, senza numeri). Ora la
+  metrica è letta dalla riga `metrc` (5ª colonna = *bogo ops/s real time*, il totale dei
+  worker, non la per-CPU `usr+sys`), con un test che usa l'output reale copiato dalla
+  macchina: sul campo `bogo_ops = 18861.66` (prima `null`).
+- **`cpu_bench` "non disponibile" senza `sysbench`**: su Bazzite `sysbench` non c'è e non
+  si installa senza layering ostree → il benchmark si dichiarava non disponibile. Ora
+  riusa la metrica di `stress-ng` **già eseguita dal CPU stress della stessa run**
+  (nessun carico aggiuntivo, `run_all` le passa il risultato) e dichiara la metrica
+  (`metric: "bogo_ops/s"`, con `tool` e `note`) invece di confrontare unità diverse
+  (sysbench `events_per_sec` vs stress-ng bogo ops/s); se nemmeno quella è ricavabile
+  resta `available: false` con una nota, mai un numero inventato.
 - **`buo rollback` lasciava la GPU senza curva** (bug di campo 12/09/2026, riprodotto
   su hardware reale): l'handler del livello `gpu_governor` era `governor.stop()` senza
   controparte → la cascata fermava il servizio (restava `enabled` ma `inactive`, nessuna
