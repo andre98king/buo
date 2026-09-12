@@ -69,6 +69,31 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("cpu_core_unlock", orch._applied_steps())
 
+    def test_rollback_non_lascia_il_governor_fermo(self):
+        """`buo rollback` non deve fermare il governor (GPU senza curva).
+
+        Bug 12/09 (riprodotto sul campo): l'handler di `gpu_governor` era
+        `governor.stop()` senza riavvio → la cascata lasciava il servizio
+        `enabled` ma `inactive` (GPU senza curva, nessun presidio termico)
+        dichiarando "la macchina è tornata allo stato originale".
+        """
+        orch = self._make(dry_run=False)
+        self.assertNotIn("gpu_governor", orch.rollback._handlers)
+
+    def test_rollback_40cu_disabilita_la_persistenza(self):
+        """Il rollback 40-CU deve togliere ANCHE il presidio di boot.
+
+        Senza `disable` della unit, `/etc/bc250-cu-live-manager.conf`
+        (0x1f) riapplica le 40 CU al riavvio successivo → rollback
+        apparente ma non effettivo.
+        """
+        orch = self._make(dry_run=False)
+        calls = []
+        orch.gpu_unlock.rollback = lambda: True
+        orch._disable_40cu_persistence = lambda: calls.append(True)
+        self.assertTrue(orch._rollback_gpu_40cu())
+        self.assertEqual(calls, [True])
+
     def test_unlock_written_needs_reboot_and_ledger(self):
         """Maschera scritta da QUESTA run: ledger (per il rollback) + reboot."""
         orch = self._make(dry_run=False)

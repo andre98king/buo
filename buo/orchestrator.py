@@ -238,8 +238,14 @@ class Orchestrator(LoggerMixin):
         """Registra i rollback di ogni livello (ordine dal design)."""
         handlers: Dict[str, Callable[[], bool]] = {
             "cpu_overclock": lambda: self._rollback_cpu_overclock(),
-            "gpu_governor": lambda: self.governor.stop(),
-            "gpu_40cu": lambda: self.gpu_unlock.rollback(),
+            # NESSUN handler per gpu_governor: la cascata NON ferma il
+            # governor. Il vecchio handler era `governor.stop()` senza
+            # controparte → `buo rollback` lasciava la GPU SENZA curva
+            # (governor enabled ma inactive) e lo dichiarava "stato
+            # originale" (bug 12/09, riprodotto sul campo). Gli accessi
+            # SMN/SMU della cascata (gpu_unlock.rollback) si proteggono da
+            # soli con `_governor_paused()` (stop confermato → op → restart).
+            "gpu_40cu": lambda: self._rollback_gpu_40cu(),
             "gpu_mask": lambda: self.cu_mask.rollback(),
             "cpu_core_unlock": lambda: self.cpu_unlock.rollback(),
             "acpi_fix": lambda: self.fix_acpi.rollback(),
@@ -267,6 +273,19 @@ class Orchestrator(LoggerMixin):
                                    sudo=True, check=False)
             return rc == 0
         return True
+
+    def _rollback_gpu_40cu(self) -> bool:
+        """Riporta la GPU a 24 CU: maschera LIVE + persistenza al boot.
+
+        La sola `GPU40CUUnlock.rollback()` scrive la maschera stock via UMR
+        (volatile): senza disabilitare il servizio di boot la conf
+        `/etc/bc250-cu-live-manager.conf` (0x1f) viene RIAPPLICATA al
+        riavvio successivo → la macchina non tornava affatto a 24 CU pur
+        dichiarando "Rollback completato" (bug 12/09, riprodotto sul campo).
+        """
+        ok = self.gpu_unlock.rollback()
+        self._disable_40cu_persistence()
+        return ok
 
     # ================================================================== #
     # RUN — macchina a stati

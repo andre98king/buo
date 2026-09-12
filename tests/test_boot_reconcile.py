@@ -12,11 +12,14 @@ gate gioco, fail-closed sul governor in stato transitorio, riavvio del
 governor su OGNI percorso di uscita.
 """
 
+import os
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from buo.constants import SMU_OC_SERVICE
 from buo.state.reconcile import (BOOT_UNIT, KILL_SWITCH, BootReconciler,
                                  unit_content)
 
@@ -219,6 +222,40 @@ class ReconcilerTestCase(unittest.TestCase):
         self.assertTrue(state["services_ok"])
         self.assertTrue(state["kargs"]["mitigations_off"])
         self.assertEqual(state["kargs"]["pages_limit"], "3014656")
+
+    def test_oc_applicato_da_una_run_non_e_uno_shot_mancato(self):
+        """Regressione 12/09: l'uno-shot OC non è girato, ma una RUN ha reso
+        effettivo l'OC in questo boot (unità scritta dopo l'avvio: sul campo
+        core a 3817 MHz) → non è "stato non certificato"."""
+        unit = self.root / "bc250-smu-oc.service"
+        unit.write_text("[Unit]\n")          # scritta ORA, dopo l'avvio
+        rec = self.make()
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            with patch.object(rec, "_service_ran_this_boot",
+                              lambda name: name != SMU_OC_SERVICE):
+                with patch("buo.state.reconcile.SMU_OC_UNIT", unit):
+                    state = rec.check()
+        self.assertTrue(state["services_ran"][SMU_OC_SERVICE])
+        self.assertTrue(state["services_ok"])
+
+    def test_oc_non_eseguito_e_non_riapplicato_resta_non_certificato(self):
+        """Unità OC vecchia (boot precedente) + uno-shot non girato = OC NON
+        applicato in questo boot → la certificazione deve fallire."""
+        unit = self.root / "old-smu-oc.service"
+        unit.write_text("[Unit]\n")
+        # "boot precedente" = scritta PRIMA dell'avvio del sistema (l'uptime
+        # della macchina di test non è piccolo: va misurato, non assunto).
+        with open("/proc/uptime", encoding="utf-8") as fh:
+            uptime = float(fh.read().split()[0])
+        old = time.time() - uptime - 3600
+        os.utime(unit, (old, old))
+        rec = self.make()
+        with patch("buo.state.reconcile.run_command", self.responder()):
+            with patch.object(rec, "_service_ran_this_boot",
+                              lambda name: name != SMU_OC_SERVICE):
+                with patch("buo.state.reconcile.SMU_OC_UNIT", unit):
+                    state = rec.check()
+        self.assertFalse(state["services_ok"])
 
     def test_healthy_run_does_nothing_and_resets_attempts(self):
         self.attempts.write_text("2\n")

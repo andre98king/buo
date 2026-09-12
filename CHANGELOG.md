@@ -1,5 +1,38 @@
 # Changelog
 
+## Non rilasciato
+
+### Corretto
+- **`buo rollback` lasciava la GPU senza curva** (bug di campo 12/09/2026, riprodotto
+  su hardware reale): l'handler del livello `gpu_governor` era `governor.stop()` senza
+  controparte → la cascata fermava il servizio (restava `enabled` ma `inactive`, nessuna
+  curva, nessun presidio termico) e stampava "la macchina è tornata allo stato originale".
+  Il livello non ha più handler: gli accessi SMN/SMU della cascata si proteggono da soli
+  con `_governor_paused()` (stop **confermato** → operazione → restart).
+- **Rollback 40-CU solo apparente**: `gpu_unlock.rollback()` riscrive la maschera **live**
+  (volatile) ma non toccava la persistenza al boot → `/etc/bc250-cu-live-manager.conf`
+  (`0x1f`) riapplicava le 40 CU al riavvio successivo, mentre il log diceva "Rollback
+  completato: gpu_40cu". Ora il livello chiama anche `_disable_40cu_persistence()`
+  (riuso del presidio già esistente, usato dal rollback su fault GPU).
+- **Rollback GTT: falso successo per lettura non attendibile** (bug di campo 12/09/2026):
+  `GTTTuning._current_kargs()` leggeva i kargs con `_run_ostree_txn`, che esegue l'unità
+  con lo stdout rediretto su file → il client vede **sempre** `out=''` → il karg
+  `ttm.pages_limit` risultava assente, la transazione di delete non partiva e il livello
+  dichiarava "completato" (karg ancora sulla boot entry: verificato). La lettura ora è un
+  `rpm-ostree kargs` **diretto** (read-only, non una transazione) e lettura non attendibile
+  (rc≠0 o output vuoto) → `False` con warning, mai "fatto". I test coprivano il bug perché
+  il runner finto restituiva lo stdout che quello reale non può restituire.
+- **Messaggio di `buo rollback` onesto**: non promette più "stato originale" (maschera
+  core, kargs e ACPI si completano al riavvio; la maschera core è volatile → serve uno
+  spegnimento completo).
+- **`boot-reconcile --check`: falso "non certificato" per l'OC CPU** (campo 12/09/2026):
+  se l'OC viene reso effettivo da una **run** (unità scritta dopo l'avvio, core a
+  3817 MHz verificato) l'uno-shot `bc250-smu-oc` non risulta girato in quel boot e il
+  check dichiarava la macchina non certificata. Ora l'OC è considerato applicato anche
+  quando l'unità è stata riscritta **dopo** l'avvio del sistema (`os.stat` vs
+  `/proc/uptime`, nessun accesso SMU); un'unità del boot precedente resta invece un
+  vero "non applicato".
+
 ## v1.6.0 (2026-09-11)
 
 ### Aggiunto

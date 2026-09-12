@@ -533,8 +533,11 @@ def rollback(phase: Optional[str], mock: bool) -> None:
                                         reason="comando utente")
     if ok:
         console.print("[bold green]Rollback completato[/]")
-        console.print("[dim]La macchina è tornata allo stato originale — "
-                      "log: /var/log/buo/buo.log[/]")
+        console.print("[dim]Modifiche annullate — log: /var/log/buo/buo.log[/]")
+        console.print(
+            "[dim]Nota: maschera core, kargs e ACPI si completano al riavvio "
+            "(la maschera core è volatile: per tornare a 6 core serve uno "
+            "spegnimento COMPLETO, il reboot caldo la conserva).[/]")
     else:
         console.print("[bold red]ATTENZIONE: alcuni livelli di rollback "
                       "non sono riusciti — consulta "

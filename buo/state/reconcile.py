@@ -37,6 +37,7 @@ Regole di sicurezza rispettate qui:
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -57,6 +58,9 @@ THREADS_EXPECTED = 16
 # Servizio 40-CU e OC CPU: devono essere abilitati al boot (i loro conf in
 # /etc possono perdersi cambiando deployment ostree).
 BOOT_SERVICES = (SMU_OC_SERVICE, "bc250-cu-live-manager")
+# Unità dell'OC CPU: la sua data di scrittura dice se una RUN (non il boot) ha
+# applicato l'OC in questo avvio (vedi `_oc_applied_live_this_boot`).
+SMU_OC_UNIT = Path("/etc/systemd/system") / f"{SMU_OC_SERVICE}.service"
 # Stati systemd che significano "davvero fermo" (fail-closed su activating).
 INACTIVE_STATES = frozenset({"inactive", "failed"})
 # Gate: un GIOCO in esecuzione blocca sempre (un .exe Proton/launcher o il
@@ -259,6 +263,26 @@ class BootReconciler(LoggerMixin):
         # un margine di 1s copre l'arrotondamento fra le due letture
         return started_us > 0 and started_us <= uptime_us + 1_000_000
 
+    def _oc_applied_live_this_boot(self) -> bool:
+        """True se l'OC CPU è stato reso EFFETTIVO da una run in questo boot.
+
+        L'uno-shot `bc250-smu-oc` applica l'OC all'avvio, ma una run che
+        applica l'OC a sistema già avviato (`--apply` volatile, poi
+        `--install`) lo rende effettivo SUBITO: l'unità viene scritta dopo
+        l'avvio. Caso reale 12/09/2026: dopo il reboot programmato dalla run,
+        l'OC è stato riapplicato alle 13:45 (core a 3817 MHz sotto carico,
+        verificato) ma `--check` diceva "non certificato" perché l'uno-shot
+        non era girato in quel boot. Segnale: unità scritta DOPO l'avvio del
+        sistema (`os.stat` vs `/proc/uptime`, nessun accesso SMU).
+        """
+        try:
+            age = time.time() - os.stat(SMU_OC_UNIT).st_mtime
+            with open("/proc/uptime", encoding="utf-8") as fh:
+                uptime = float(fh.read().split()[0])
+        except (OSError, ValueError, IndexError):
+            return False
+        return 0 <= age < uptime
+
     # ------------------------------------------------------------------ #
     # Verifica
     # ------------------------------------------------------------------ #
@@ -274,6 +298,10 @@ class BootReconciler(LoggerMixin):
             acpi_ok = None
         services = {name: self._service_enabled(name) for name in self.services}
         ran = {name: self._service_ran_this_boot(name) for name in self.services}
+        # Una run può aver reso effettivo l'OC DOPO l'avvio (unità riscritta in
+        # questo boot): l'effetto c'è, l'uno-shot non è "mancato".
+        if not ran.get(SMU_OC_SERVICE) and self._oc_applied_live_this_boot():
+            ran[SMU_OC_SERVICE] = True
         return {
             "threads": threads,
             "threads_ok": (threads is not None

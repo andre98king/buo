@@ -93,9 +93,19 @@ class GTTTuning(LoggerMixin):
             return False
 
     def _current_kargs(self) -> Optional[str]:
-        rc, out, _err = self._run(["rpm-ostree", "kargs"],
-                                  "buo-gtt-kargs-read", 60)
-        return out if rc == 0 else None
+        """Kargs del deployment corrente (LETTURA read-only diretta).
+
+        MAI via `_run`/`_run_ostree_txn`: quello esegue l'unità con lo
+        stdout rediretto su `/var/log/buo/ostree-txn.log`, quindi il client
+        vede SEMPRE `out=''` → un karg PRESENTE risultava assente (bug di
+        campo 12/09/2026: `buo rollback` dichiarava "Rollback completato:
+        gtt_tuning" senza rimuovere `ttm.pages_limit`, rimasto sulla boot
+        entry). I test erano verdi perché il runner finto restituiva lo
+        stdout che quello reale non può restituire.
+        """
+        rc, out, _err = run_command(["rpm-ostree", "kargs"], sudo=True,
+                                    timeout=60, check=False)
+        return out if rc == 0 and out.strip() else None
 
     def _cleanup_legacy_conf(self) -> None:
         """Rimuove il conf modprobe.d del meccanismo vecchio (inerte)."""
@@ -146,13 +156,22 @@ class GTTTuning(LoggerMixin):
                 "needs_reboot": True}
 
     def rollback(self) -> bool:
-        """Rimuove il karg (e il vecchio conf modprobe.d)."""
+        """Rimuove il karg (e il vecchio conf modprobe.d).
+
+        Lettura non attendibile → `False` (MAI "fatto"): il karg resta
+        sulla boot entry e va rimosso a mano od riprovato.
+        """
         if self.mock and self.mock_hw is not None:
             return True
         ok = True
         try:
             current = self._current_kargs()
-            if current and GTT_KARG in current:
+            if current is None:
+                self.logger.warning(
+                    "Rollback GTT: kargs non leggibili — nessuna modifica "
+                    "dichiarata (verificare `rpm-ostree kargs` a mano)")
+                return False
+            if GTT_KARG in current:
                 rc, _o, _e = self._run(
                     ["rpm-ostree", "kargs", f"--delete={GTT_KARG}"],
                     "buo-gtt-kargs-rollback", 600)
