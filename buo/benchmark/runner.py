@@ -76,9 +76,7 @@ class BenchmarkRunner(LoggerMixin):
                             "(vkmark/furmark)"}
         rc, out, _ = run_command(cmd, timeout=duration + 30,
                                  cwd=stress_cwd())
-        fps = self._parse_float(r"FPS:\s*([\d.]+)", out) \
-            or self._parse_float(r"([\d.]+)\s*FPS", out) \
-            or self._parse_float(r"([\d.]+)\s*fps", out)
+        fps = self._parse_fps(out)
         return {"available": rc == 0, "fps": fps, "tool": cmd[0]}
 
     # --------------------------- CPU ---------------------------------- #
@@ -148,7 +146,7 @@ class BenchmarkRunner(LoggerMixin):
                  "-b", f"desktop:duration={duration}"],
                 timeout=duration + 30, cwd=stress_cwd())
             score = self._parse_float(r"Score:\s*([\d.]+)", out)
-            fps = self._parse_float(r"([\d.]+)\s*fps", out)
+            fps = self._parse_fps(out)
             return {"available": rc == 0, "score": score, "fps": fps}
         return {"available": False, "note": "vkmark non installato"}
 
@@ -174,6 +172,25 @@ class BenchmarkRunner(LoggerMixin):
         return {"available": False, "note": "richiede un modello ONNX (es. ResNet-18)"}
 
     # -------------------------- helper -------------------------------- #
+
+    @staticmethod
+    def _parse_fps(out: str) -> Optional[float]:
+        """FPS dal report del tool (vkmark `FPS: 22781`, FurMark `xx.x fps`).
+
+        I tool NON concordano sulla capitalizzazione: il match deve essere
+        case-insensitive, altrimenti la metrica resta `null` — bug di campo
+        12/09 (`compute_bench.fps: null` mentre `gpu_stress.fps` funzionava:
+        due regex DIVERSE per lo stesso dato, una sola corretta).
+        """
+        for pattern in (r"FPS:\s*([\d.]+)", r"([\d.]+)\s*FPS\b",
+                        r"([\d.]+)\s*fps\b"):
+            m = re.search(pattern, out, re.IGNORECASE)
+            if m:
+                try:
+                    return float(m.group(1))
+                except ValueError:  # pragma: no cover - difesa
+                    return None
+        return None
 
     @staticmethod
     def _parse_stress_ng_bogo(out: str) -> Optional[float]:

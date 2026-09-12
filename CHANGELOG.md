@@ -1,5 +1,16 @@
 # Changelog
 
+## Non rilasciato
+
+### Corretto
+- **`compute_bench.fps` sempre `null`** (bug di campo 12/09/2026, trovato nella run E2E
+  su v1.6.1): vkmark stampa `FPS:` in **maiuscolo** (`[desktop] duration=3: FPS: 22781`)
+  mentre `compute_bench` lo cercava minuscolo — `gpu_stress` aveva invece una regex
+  corretta, cioe' lo **stesso dato era parsato due volte in modi diversi**. Ora esiste un
+  solo `BenchmarkRunner._parse_fps()` case-insensitive (vkmark `FPS:` e FurMark `fps`),
+  usato da entrambi; test con l'output reale di vkmark copiato dalla macchina. Sul campo:
+  `fps = 22595.0` (prima `null`), lo `score` resta.
+
 ## v1.6.1 (2026-09-12)
 
 ### Corretto

@@ -70,6 +70,23 @@ class TestBenchmarkRunner(unittest.TestCase):
         self.assertEqual(res["metric"], "bogo_ops/s")
         self.assertNotIn("events_per_sec", res)
 
+    def test_fps_parser_case_insensitive_su_output_vkmark(self):
+        """Regressione 12/09: `compute_bench.fps` era null.
+
+        vkmark stampa `FPS:` in MAIUSCOLO; la regex di compute_bench cercava
+        `fps` minuscolo (gpu_stress ne usava una corretta: due parse diversi
+        per lo stesso dato). Output reale copiato dalla macchina.
+        """
+        out = ("[desktop] duration=3: FPS: 22781 FrameTime: 0.044 ms\n"
+               "=======================================================\n"
+               "                                   vkmark Score: 22781\n")
+        self.assertEqual(BenchmarkRunner._parse_fps(out), 22781.0)
+        self.assertEqual(BenchmarkRunner._parse_float(r"Score:\s*([\d.]+)", out),
+                         22781.0)
+        # FurMark scrive minuscolo: stesso helper, entrambi i tool
+        self.assertEqual(BenchmarkRunner._parse_fps("FurMark: 72.5 fps"), 72.5)
+        self.assertIsNone(BenchmarkRunner._parse_fps("nessun fps qui"))
+
     def test_cpu_bench_nessuna_metrica_non_inventa_valori(self):
         from unittest import mock as m
         runner = BenchmarkRunner(mock=False)
