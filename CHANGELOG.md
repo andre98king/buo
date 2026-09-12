@@ -1,6 +1,6 @@
 # Changelog
 
-## Non rilasciato
+## v1.6.2 (2026-09-12)
 
 ### Corretto
 - **`compute_bench.fps` sempre `null`** (bug di campo 12/09/2026, trovato nella run E2E
