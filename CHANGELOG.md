@@ -1,6 +1,6 @@
 # Changelog
 
-## Non rilasciato
+## v1.6.1 (2026-09-12)
 
 ### Corretto
 - **`bogo_ops` del CPU stress sempre `null`** (bug di campo 12/09/2026): la regex

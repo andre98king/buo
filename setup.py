@@ -9,7 +9,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="buo",
-    version="1.6.0",
+    version="1.6.1",
     description="BC-250 Ultimate Orchestrator — ottimizzazione automatica "
                 "per ASRock BC-250",
     long_description=long_description,
