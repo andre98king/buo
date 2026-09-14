@@ -60,11 +60,14 @@ SMOKE_FREQ_MARGIN = 50           # freq_min >= freq - 50 (clock stretching)
 VID_CAP_HARD = 1325              # hard limit assoluto del tool SMU (mV)
 SCALE_MIN = -50
 SCALE_MAX = 0
-F_SEARCH_MAX = 3850              # tetto di ricerca del motore
-WALL_FREQ = 3860                 # muro: MAI freq >= 3860
+F_SEARCH_MAX = 4000              # tetto ricerca motore (ricetta community: 4000@1275)
+WALL_FREQ = 4100                 # muro oltre la ricetta community (limiti tool: 4500)
 HANG_ZONE_MIN_FREQ = 3725        # anti-zona utente (dati campo 31/08)
 HANG_ZONE_MIN_VID = 1050         # mai VID < 1050 su clock >= 3725 (02/09: 3725@1000 HANG)
 # Mirror tier-2 dell'engine (02/09, incidente profilo avvelenato): la banda
+# 3800-3900 richiede VID ALTO (community: 1200-1275 mV fino a 4 GHz; MAI > 1325):
+# la vecchia lettura di questa banda come muro di frequenza era ERRATA (era sotto-alimentazione).
+# Riferimento: bc250-collective/bc250_smu_oc bc250_limits.py (freq 3500-4500, vid 950-1325).
 # 3800-3870@<=1050 è zona di hang/wedge ALLA SCRITTURA — mai VID < 1125 su
 # clock >= 3800 (regola statica TIERED, vale in tutti i punti dove vale la
 # base 3725/1050: probe/claim/apply/BKG). Engine: HANG_ZONE2_MIN_FREQ/VID.
