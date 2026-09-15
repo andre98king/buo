@@ -701,18 +701,81 @@ class TestSmuFloor(_SweepBase):
             "\t1081 mV (VDDNB)\n"
         )
         opt = GPUUndervoltOptimizer(mock=True)
-        with mock.patch("buo.utils.shell.run_command",
-                        return_value=(0, real_output, "")):
+        with mock.patch("buo.safety.reader.drm_pm_info_path",
+                        return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+                mock.patch("buo.utils.shell.run_command",
+                           return_value=(0, real_output, "")) as rc_mock:
             value = opt._read_vddgfx(800)
         self.assertEqual(value, 824)
+        # il percorso risolto (0, non 1) deve essere quello del `cat`
+        self.assertEqual(rc_mock.call_args[0][0][1],
+                         "/sys/kernel/debug/dri/0/amdgpu_pm_info")
         # output senza la riga VDDGFX → None (fail-soft)
-        with mock.patch("buo.utils.shell.run_command",
-                        return_value=(0, "0 MHz (PSTATE_MCLK)\n", "")):
+        with mock.patch("buo.safety.reader.drm_pm_info_path",
+                        return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+                mock.patch("buo.utils.shell.run_command",
+                           return_value=(0, "0 MHz (PSTATE_MCLK)\n", "")):
             self.assertIsNone(opt._read_vddgfx(800))
         # comando fallito → None
-        with mock.patch("buo.utils.shell.run_command",
-                        return_value=(1, "", "err")):
+        with mock.patch("buo.safety.reader.drm_pm_info_path",
+                        return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+                mock.patch("buo.utils.shell.run_command",
+                           return_value=(1, "", "err")):
             self.assertIsNone(opt._read_vddgfx(800))
+        # FIX 16/09/2026: nessun amdgpu_pm_info in debugfs (indice DRM diverso
+        # o debugfs non montato) → None SENZA eseguire comandi
+        with mock.patch("buo.safety.reader.drm_pm_info_path",
+                        return_value=None), \
+                mock.patch("buo.utils.shell.run_command") as rc_mock2:
+            self.assertIsNone(opt._read_vddgfx(800))
+        rc_mock2.assert_not_called()
+
+
+class TestDrmPmInfoPath(unittest.TestCase):
+    """FIX di campo 16/09/2026: l'indice DRM non è stabile fra i boot (la GPU
+    era card0, non card1) e il percorso era cablato. La risoluzione deve
+    funzionare con QUALUNQUE indice, e non inventare nulla se non c'è."""
+
+    def _tree(self, tmpdir, minors):
+        for minor in minors:
+            d = Path(tmpdir) / "dri" / minor
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "amdgpu_pm_info").write_text("0 MHz (PSTATE_MCLK)\n")
+
+    def test_picks_card0_when_gpu_is_card0(self):
+        from buo.safety.reader import drm_pm_info_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tree(tmp, ["0"])
+            self.assertEqual(drm_pm_info_path(tmp),
+                             f"{tmp}/dri/0/amdgpu_pm_info")
+
+    def test_picks_card1_when_that_is_the_gpu(self):
+        from buo.safety.reader import drm_pm_info_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tree(tmp, ["1"])
+            self.assertEqual(drm_pm_info_path(tmp),
+                             f"{tmp}/dri/1/amdgpu_pm_info")
+
+    def test_prefers_first_sorted_minor(self):
+        from buo.safety.reader import drm_pm_info_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tree(tmp, ["0", "1"])
+            self.assertEqual(drm_pm_info_path(tmp),
+                             f"{tmp}/dri/0/amdgpu_pm_info")
+
+    def test_accepts_pci_alias_directory(self):
+        """debugfs espone anche l'alias PCI (dri/0000:01:00.0)."""
+        from buo.safety.reader import drm_pm_info_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tree(tmp, ["0000:01:00.0"])
+            self.assertEqual(drm_pm_info_path(tmp),
+                             f"{tmp}/dri/0000:01:00.0/amdgpu_pm_info")
+
+    def test_none_when_debugfs_empty(self):
+        from buo.safety.reader import drm_pm_info_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(drm_pm_info_path(tmp))
+            self.assertIsNone(drm_pm_info_path(f"{tmp}/inesistente"))
 
 
 class TestSweepAutoprovision(_SweepBase):

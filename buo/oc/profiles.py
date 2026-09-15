@@ -436,8 +436,11 @@ def _hex_id(path: Path) -> str:
 
 
 def _gpu_pci_id() -> str:
-    """vendor:device della prima GPU amdgpu; fallback sul PCI 0000:01:00.0
-    (la BC-250 ha la GPU su card1, /sys/class/drm/card1/device)."""
+    """vendor:device della prima GPU amdgpu; fallback sul PCI 0000:01:00.0.
+
+    La card si cerca con un glob (`card*/device`), mai con un indice fisso:
+    l'indice DRM NON è stabile fra i boot (verificato 16/09/2026, la GPU era
+    card0 mentre la memoria di progetto diceva card1)."""
     try:
         for dev in sorted(Path("/sys/class/drm").glob("card*/device")):
             try:

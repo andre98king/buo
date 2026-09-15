@@ -730,10 +730,16 @@ class GPUUndervoltOptimizer(LoggerMixin):
             except Exception:
                 return None
         try:
+            from ..safety.reader import drm_pm_info_path
             from ..utils.shell import run_command
-            rc, out, _ = run_command(
-                ["cat", "/sys/kernel/debug/dri/1/amdgpu_pm_info"],
-                sudo=True, check=False)
+            # FIX 16/09/2026: il percorso era cablato a .../dri/1/... e dopo
+            # un boot in cui la GPU era card0 (l'indice DRM non è stabile) la
+            # lettura falliva SEMPRE → VDDGFX None → floor mai rilevato.
+            # Ora si risolve a runtime (stesso helper del reader).
+            path = drm_pm_info_path()
+            if path is None:
+                return None
+            rc, out, _ = run_command(["cat", path], sudo=True, check=False)
             if rc != 0 or not out:
                 return None
             # Formato REALE della riga (verificato sul campo, 30/08):

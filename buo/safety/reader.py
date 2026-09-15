@@ -103,6 +103,27 @@ def _bc250_smu_import():
     return None
 
 
+def drm_pm_info_path(debugfs_base: str = "/sys/kernel/debug") -> Optional[str]:
+    """Percorso del primo `amdgpu_pm_info` in debugfs, risolto A RUNTIME.
+
+    L'indice DRM NON è stabile fra i boot: verificato sul campo il
+    16/09/2026, la GPU era `card0` mentre la memoria di progetto diceva
+    `card1` — e con l'indice sbagliato `/sys/kernel/debug/dri/1/...` non
+    esiste, quindi VDDGFX risultava "non rilevabile" (fail-closed, ma un
+    segnale perso per sweep e probe). Si cerca perciò qualunque
+    `dri/*/amdgpu_pm_info` esistente, il che copre anche l'alias
+    `dri/0000:01:00.0`. Nessun file → None (fail-soft, MAI un percorso
+    inventato).
+    """
+    try:
+        for path in sorted(glob.glob(f"{debugfs_base}/dri/*/amdgpu_pm_info")):
+            if os.path.exists(path):
+                return path
+    except Exception:  # pragma: no cover - glob/os non sollevano in pratica
+        pass
+    return None
+
+
 class RealHardwareReader:
     """Letture reali via hwmon/sysfs/debugfs (interfaccia compatibile con
     MockHardware). Tutti i percorsi sono iniettabili per i test (mai
@@ -247,10 +268,11 @@ class RealHardwareReader:
         if self._governor_active() is not False:
             return None
         try:
-            for path in sorted(
-                    glob.glob(f"{self._debugfs}/dri/*/amdgpu_pm_info")):
-                with open(path) as f:
-                    return f.read()
+            path = drm_pm_info_path(self._debugfs)
+            if path is None:
+                return None
+            with open(path) as f:
+                return f.read()
         except Exception:
             self.logger.debug("Lettura amdgpu_pm_info non riuscita "
                               "(debugfs=%s)", self._debugfs, exc_info=True)
