@@ -693,7 +693,6 @@ class TestSmuFloor(_SweepBase):
         riga REALE di amdgpu_pm_info è '\\t824 mV (VDDGFX)' (label DOPO il
         valore, senza prefisso) → il reader restituiva SEMPRE None → floor
         mai rilevato. Il parsing deve leggere il formato reale."""
-        import re as _re
         from buo.optimize.gpu import GPUUndervoltOptimizer
         real_output = (
             "0 MHz (PSTATE_MCLK)\n"
@@ -701,8 +700,13 @@ class TestSmuFloor(_SweepBase):
             "\t1081 mV (VDDNB)\n"
         )
         opt = GPUUndervoltOptimizer(mock=True)
-        with mock.patch("buo.safety.reader.drm_pm_info_path",
-                        return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+        # hwmon assente = si usa il debugfs (e il test resta deterministico
+        # anche se girasse su una macchina con hwmon amdgpu vero)
+        nessun_hwmon = mock.patch("buo.safety.reader.hwmon_vddgfx_path",
+                                  return_value=None)
+        with nessun_hwmon, \
+                mock.patch("buo.safety.reader.drm_pm_info_path",
+                           return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
                 mock.patch("buo.utils.shell.run_command",
                            return_value=(0, real_output, "")) as rc_mock:
             value = opt._read_vddgfx(800)
@@ -711,24 +715,110 @@ class TestSmuFloor(_SweepBase):
         self.assertEqual(rc_mock.call_args[0][0][1],
                          "/sys/kernel/debug/dri/0/amdgpu_pm_info")
         # output senza la riga VDDGFX → None (fail-soft)
-        with mock.patch("buo.safety.reader.drm_pm_info_path",
-                        return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+        with nessun_hwmon, \
+                mock.patch("buo.safety.reader.drm_pm_info_path",
+                           return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
                 mock.patch("buo.utils.shell.run_command",
                            return_value=(0, "0 MHz (PSTATE_MCLK)\n", "")):
             self.assertIsNone(opt._read_vddgfx(800))
         # comando fallito → None
-        with mock.patch("buo.safety.reader.drm_pm_info_path",
-                        return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+        with nessun_hwmon, \
+                mock.patch("buo.safety.reader.drm_pm_info_path",
+                           return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
                 mock.patch("buo.utils.shell.run_command",
                            return_value=(1, "", "err")):
             self.assertIsNone(opt._read_vddgfx(800))
         # FIX 16/09/2026: nessun amdgpu_pm_info in debugfs (indice DRM diverso
         # o debugfs non montato) → None SENZA eseguire comandi
-        with mock.patch("buo.safety.reader.drm_pm_info_path",
-                        return_value=None), \
+        with nessun_hwmon, \
+                mock.patch("buo.safety.reader.drm_pm_info_path",
+                           return_value=None), \
                 mock.patch("buo.utils.shell.run_command") as rc_mock2:
             self.assertIsNone(opt._read_vddgfx(800))
         rc_mock2.assert_not_called()
+
+    def test_read_vddgfx_prefers_hwmon_without_touching_smu(self):
+        """16/09/2026: la fonte PRIMARIA è hwmon (metrics table, nessun
+        mailbox SMU). Con l'hwmon disponibile il debugfs non va nemmeno
+        letto — è il punto della modifica: il campionamento avviene con il
+        governor ATTIVO e non deve toccare l'SMU."""
+        from buo.optimize.gpu import GPUUndervoltOptimizer
+        opt = GPUUndervoltOptimizer(mock=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            hw = Path(tmp) / "in0_input"
+            hw.write_text("843\n")
+            with mock.patch("buo.safety.reader.hwmon_vddgfx_path",
+                            return_value=str(hw)), \
+                    mock.patch("buo.safety.reader.drm_pm_info_path") as drm_mock, \
+                    mock.patch("buo.utils.shell.run_command") as rc_mock:
+                self.assertEqual(opt._read_vddgfx(850), 843)
+        drm_mock.assert_not_called()
+        rc_mock.assert_not_called()
+
+    def test_read_vddgfx_hwmon_illeggibile_torna_al_debugfs(self):
+        """hwmon presente ma valore non numerico → fallback debugfs, mai un
+        valore inventato."""
+        from buo.optimize.gpu import GPUUndervoltOptimizer
+        opt = GPUUndervoltOptimizer(mock=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            hw = Path(tmp) / "in0_input"
+            hw.write_text("n/d\n")
+            with mock.patch("buo.safety.reader.hwmon_vddgfx_path",
+                            return_value=str(hw)), \
+                    mock.patch("buo.safety.reader.drm_pm_info_path",
+                               return_value="/sys/kernel/debug/dri/0/amdgpu_pm_info"), \
+                    mock.patch("buo.utils.shell.run_command",
+                               return_value=(0, "\t824 mV (VDDGFX)\n", "")):
+                self.assertEqual(opt._read_vddgfx(800), 824)
+
+    def test_read_vddgfx_nessuna_fonte(self):
+        from buo.optimize.gpu import GPUUndervoltOptimizer
+        opt = GPUUndervoltOptimizer(mock=True)
+        with mock.patch("buo.safety.reader.hwmon_vddgfx_path",
+                        return_value=None), \
+                mock.patch("buo.safety.reader.drm_pm_info_path",
+                           return_value=None):
+            self.assertIsNone(opt._read_vddgfx(800))
+
+
+class TestHwmonVddgfxPath(unittest.TestCase):
+    """La VDDGFX si sceglie per LABEL (`vddgfx`), mai per indice: la
+    numerazione degli `in*` non è garantita."""
+
+    def _hwmon(self, tmp, entry, name, labels, values=None):
+        d = Path(tmp) / entry
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "name").write_text(name + "\n")
+        for attr, label in labels.items():
+            (d / f"{attr}_label").write_text(label + "\n")
+            (d / f"{attr}_input").write_text(str((values or {}).get(attr, 0)) + "\n")
+
+    def test_trova_vddgfx_per_label(self):
+        from buo.safety.reader import hwmon_vddgfx_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._hwmon(tmp, "hwmon0", "k10temp", {"in0": "Tctl"})
+            self._hwmon(tmp, "hwmon1", "amdgpu",
+                        {"in0": "vddgfx", "in1": "vddnb"})
+            self.assertEqual(hwmon_vddgfx_path(tmp), f"{tmp}/hwmon1/in0_input")
+
+    def test_label_su_attributo_non_zero(self):
+        """Se vddgfx è su in1 (ordine non garantito) va trovato lo stesso."""
+        from buo.safety.reader import hwmon_vddgfx_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._hwmon(tmp, "hwmon3", "amdgpu",
+                        {"in0": "vddnb", "in1": "vddgfx"})
+            self.assertEqual(hwmon_vddgfx_path(tmp), f"{tmp}/hwmon3/in1_input")
+
+    def test_none_senza_label_vddgfx(self):
+        from buo.safety.reader import hwmon_vddgfx_path
+        with tempfile.TemporaryDirectory() as tmp:
+            self._hwmon(tmp, "hwmon0", "k10temp", {"in0": "Tctl"})
+            self._hwmon(tmp, "hwmon1", "nct6687", {"in0": "+12V"})
+            self.assertIsNone(hwmon_vddgfx_path(tmp))
+
+    def test_none_su_base_inesistente(self):
+        from buo.safety.reader import hwmon_vddgfx_path
+        self.assertIsNone(hwmon_vddgfx_path("/non/esiste"))
 
 
 class TestDrmPmInfoPath(unittest.TestCase):

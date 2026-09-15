@@ -124,6 +124,42 @@ def drm_pm_info_path(debugfs_base: str = "/sys/kernel/debug") -> Optional[str]:
     return None
 
 
+def hwmon_vddgfx_path(hwmon_base: str = "/sys/class/hwmon") -> Optional[str]:
+    """Percorso dell'attributo hwmon che espone la **VDDGFX** (mV).
+
+    PERCHÉ PRIMA DEL DEBUGFS (16/09/2026): `amdgpu_pm_info` interroga l'SMU via
+    driver (mailbox UNICO) e lo sweep lo legge mentre il governor SCRIVE — la
+    ricetta dell'incidente del 30/08. L'hwmon amdgpu invece viene dalla metrics
+    table cached (nessun mailbox), quindi è sicuro con il governor attivo, non
+    serve root e non dipende dall'indice della card. Verificato sul campo: con
+    curva a 800 mV `in0_input` = 793 mV, a 850 mV = 843 mV — stessa grandezza e
+    stesso scarto del valore letto dal debugfs (774-793 / 824-843).
+
+    L'attributo si sceglie per **label** (`vddgfx`), mai per indice: la
+    numerazione degli `in*` non è garantita (`in0`=vddgfx, `in1`=vddnb su questa
+    macchina). Nessun attributo con quella label → None (fail-soft)."""
+    try:
+        for entry in sorted(os.listdir(hwmon_base)):
+            d = f"{hwmon_base}/{entry}"
+            try:
+                with open(f"{d}/name") as f:
+                    if f.read().strip() != "amdgpu":
+                        continue
+            except OSError:
+                continue
+            for attr in sorted(glob.glob(f"{d}/in*_input")):
+                try:
+                    with open(attr.replace("_input", "_label")) as f:
+                        if f.read().strip().lower() != "vddgfx":
+                            continue
+                except OSError:
+                    continue
+                return attr
+    except Exception:  # pragma: no cover - os.listdir non solleva in pratica
+        pass
+    return None
+
+
 class RealHardwareReader:
     """Letture reali via hwmon/sysfs/debugfs (interfaccia compatibile con
     MockHardware). Tutti i percorsi sono iniettabili per i test (mai

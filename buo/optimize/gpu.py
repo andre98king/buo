@@ -721,21 +721,34 @@ class GPUUndervoltOptimizer(LoggerMixin):
     def _read_vddgfx(self, target_mv: int) -> Optional[int]:
         """VDDGFX REALE (mV) applicata dall'SMU per il rilevamento del
         floor (30/08): il target scritto in config.toml NON è affidabile
-        sotto ~800 mV (l'SMU non scende). Override nei test; in
-        produzione via debugfs amdgpu_pm_info (serve root → run_command
-        con sudo). None = non leggibile → fail-soft, nessun blocco."""
+        sotto ~800 mV (l'SMU non scende). Override nei test.
+
+        ORDINE DELLE FONTI (16/09/2026):
+        1. **hwmon** `in*_input` con label `vddgfx` — metrics table cached,
+           nessun accesso SMU (sicuro col governor attivo, che è lo stato in
+           cui questo campionamento avviene), nessun root, indipendente
+           dall'indice della card. Verificato sul campo: 793 mV a curva 800,
+           843 mV a curva 850 (stessa grandezza del debugfs).
+        2. **debugfs** `amdgpu_pm_info` — solo se l'hwmon non c'è (altre
+           macchine/kernel). Percorso risolto a runtime: era cablato a
+           `dri/1` e con la GPU su `card0` la lettura falliva SEMPRE (VDDGFX
+           None → floor mai rilevato).
+        None = non leggibile → fail-soft, nessun blocco."""
         if self._vddgfx_reader is not None:
             try:
                 return self._vddgfx_reader(target_mv)
             except Exception:
                 return None
         try:
-            from ..safety.reader import drm_pm_info_path
+            from ..safety.reader import drm_pm_info_path, hwmon_vddgfx_path
             from ..utils.shell import run_command
-            # FIX 16/09/2026: il percorso era cablato a .../dri/1/... e dopo
-            # un boot in cui la GPU era card0 (l'indice DRM non è stabile) la
-            # lettura falliva SEMPRE → VDDGFX None → floor mai rilevato.
-            # Ora si risolve a runtime (stesso helper del reader).
+            hw = hwmon_vddgfx_path()
+            if hw is not None:
+                try:
+                    with open(hw) as f:
+                        return int(f.read().strip())
+                except (OSError, ValueError):
+                    pass  # valore illeggibile → si prova il debugfs
             path = drm_pm_info_path()
             if path is None:
                 return None
