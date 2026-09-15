@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.6.3 (2026-09-16)
+
+### Corretto
+- **Lo sweep leggeva la VDDGFX dal debugfs con il governor ATTIVO** (la ricetta
+  dell'incidente SMU del 30/08): il campionamento della tensione reale avviene durante
+  `_run_loaded(on_tick=_sample_vddgfx)`, cioe' con la curva in funzione, e
+  `amdgpu_pm_info` interroga l'SMU via driver sullo stesso mailbox che il governor sta
+  scrivendo — il gate che `RealHardwareReader` applica a quella lettura era di fatto
+  bypassato. Ora la fonte **primaria** e' hwmon amdgpu (l'attributo `in*` con label
+  **`vddgfx`**: metrics table cached, nessun mailbox, nessun root) e il debugfs resta
+  come **fallback** per kernel che non lo espongono; valore illeggibile → fallback, mai
+  un numero inventato. Verificato sul campo che e' la stessa grandezza: curva a 800 mV
+  → legge **793 mV**, a 850 mV → **843 mV** (stesso scarto del debugfs, 774-793/824-843).
+- **Indice DRM cablato** (`card1`): dopo il boot del 16/09 la GPU era `card0` e
+  `/sys/kernel/debug/dri/1/amdgpu_pm_info` non esisteva → VDDGFX sempre `None` → il floor
+  SMU non veniva mai rilevato nello sweep (fail-closed, nessun valore inventato, ma un
+  segnale perso che serve proprio a non scendere sotto il pavimento). Nuovo helper
+  `drm_pm_info_path()` in `buo/safety/reader.py`: risolve il primo `dri/*/amdgpu_pm_info`
+  esistente (copre anche l'alias PCI `dri/0000:01:00.0`) ed e' riusato da
+  `RealHardwareReader._pm_info_text()` (che aveva il glob duplicato inline) e da
+  `GPUUndervoltOptimizer._read_vddgfx()` (che aveva il percorso cablato). **Regola:
+  l'indice DRM non e' stabile fra i boot, mai cablarlo.**
+- **Tetto di frequenza CPU allineato ai limiti reali**: il "muro a 3860 MHz" era una
+  costante NOSTRA, derivata da test che salivano tenendo il VID basso (1125) e finivano in
+  sotto-alimentazione tra 3800 e 3900 — non un limite del silicio. Il tool SMU della
+  community dichiara freq 3500-4500, vid 950-1325 e ricetta 4000 MHz @ 1275 mV ("mai oltre
+  1325"). `F_SEARCH_MAX` 3850 → **4000**, `WALL_FREQ` 3860 → **4100**. Sul campo 3900 @
+  scale 0 si e' tenuto in game senza crash ma non ha dato FPS misurabili costando +4 °C e
+  ventola al 100% di duty: **3825 resta il punto di lavoro**.
+
+### Test
+- 1260 test, 4 fallimenti ambientali noti (`test_deps_offline`), 0 regressioni.
+
 ## v1.6.2 (2026-09-12)
 
 ### Corretto
