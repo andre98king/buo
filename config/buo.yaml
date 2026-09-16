@@ -19,7 +19,11 @@ safety:
   cpu_freq_max: 4000              # MHz
   gpu_voltage_recommended_max: 1050  # mV (hard limit immutabile: 1100)
   gpu_temp_max: 105               # °C — HARD abort real-time
-  gpu_freq_max: 2200              # MHz
+  gpu_freq_max: 1200              # MHz — cap IN GIOCO scelto con l'A/B del 16/09/2026:
+                                  # in Marvel 1080p (CPU-bound) 1500 dava +1,9% fps ma
+                                  # +7,8% di watt e +8/9 °C → W/fps peggiore del 5%.
+                                  # Il cap è anche ciò che BUO cabla nel governor
+                                  # (`frequency-range max`): tenerli allineati.
   power_budget: 300               # W (margine per PSU 350W)
 
 vram_estimation:
