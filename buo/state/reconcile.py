@@ -49,14 +49,16 @@ from ..utils.shell import run_command
 # Unità systemd dell'agente di boot.
 BOOT_UNIT = "buo-boot-reconcile.service"
 UNIT_PATH = Path("/etc/systemd/system") / BOOT_UNIT
-# Timer che ARMA l'agente FUORI dalla catena di boot. Perché non
-# `WantedBy=graphical.target`: quell'enablement implica un
-# `Before=graphical.target` (systemd ordina i volani di un target PRIMA del
-# target) e l'agente, per verificare le CU, ferma e riavvia il governor GPU —
-# ~10 s, contro 0,3 s di controllo (misurato il 23/09/2026 con
-# `systemd-analyze critical-chain`: graphical.target aspettava tutto il ciclo).
-# L'agente è una rete di sicurezza, non un prerequisito della sessione: 20 s
-# dopo l'avvio la sessione è su e lui lavora senza trattenere nessuno.
+# Timer che ARMA l'agente FUORI dalla catena di boot. Perché non un
+# `[Install] WantedBy=graphical.target` sul servizio: con un `Before=
+# graphical.target` ESPLICITO l'agente tratteneva la scrivania per tutto il
+# ciclo stop/riavvio del governor GPU (~10 s, verificato il 23/09/2026:
+# `graphical.target @17,35 s └─ buo-boot-reconcile.service @7,06 s +10,29 s`).
+# Il solo `WantedBy=` NON tratteneva (misurato: graphical @17,51 s mentre
+# l'agente finiva a 27,3 s) anche se `systemctl show -p Before` elenca il
+# target: è semantica di systemd sottile e non garantita. Il timer non dipende
+# da quella semantica, e l'agente resta una rete di sicurezza, mai un
+# prerequisito della sessione.
 BOOT_TIMER = "buo-boot-reconcile.timer"
 TIMER_PATH = Path("/etc/systemd/system") / BOOT_TIMER
 BOOT_TIMER_DELAY = 20
@@ -701,6 +703,12 @@ def timer_content(delay: int = BOOT_TIMER_DELAY) -> str:
     Un timer arma in un istante (nessuna attesa nel boot) e il servizio parte
     quando la sessione è già su; `OnBootSec` conta da CLOCK_MONOTONIC, quindi
     il ritardo reale è ~`delay` meno il tempo di initramfs già trascorso.
+
+    Alternativa scartata: tenere il servizio nella catena con un
+    `[Install] WantedBy=graphical.target` — con un `Before=graphical.target`
+    esplicito l'agente tratteneva la sessione per ~10 s (ciclo del governor
+    GPU), e affidarsi al fatto che il solo `WantedBy=` non trattiene è
+    dipendere da una semantica di systemd non garantita.
     """
     return f"""# BUO boot reconcile — timer, generato da `buo boot-reconcile --install`
 [Unit]
