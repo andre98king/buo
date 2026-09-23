@@ -592,7 +592,7 @@ def _print_boot_state(state) -> None:
     _boot_line("Governor GPU", "attivo" if gov == "active"
                else (f"NON attivo ({gov})" if gov else "non determinabile"),
                state["governor_ok"])
-    _boot_line("Tabelle ACPI", "caricate dalla entry bootata"
+    _boot_line("Tabelle ACPI", "attive (firmware o entry bootata)"
                if state["acpi_ok"] else "NON caricate", state["acpi_ok"])
     ran = state.get("services_ran", {})
     for name, enabled in state["services"].items():

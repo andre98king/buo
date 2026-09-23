@@ -132,7 +132,8 @@ class FixVerifier(LoggerMixin):
 
         Il kernel fonde gli override negli slot SSDT1..N → cercare "CST" nei
         nomi dà un falso negativo col fix attivo. Fonte unica: ACPIFix.verify()
-        (entry del deployment BOOTATO), la stessa cosa che guarda il gate.
+        (tabelle attive: dal firmware moddato o dalla entry del deployment
+        BOOTATO), la stessa cosa che guarda il gate.
         """
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.state.is_acpi_fixed, "CST presente (mock)"
@@ -140,8 +141,8 @@ class FixVerifier(LoggerMixin):
         fix = ACPIFix()
         if fix.distro.initramfs_tool == "ostree":
             ok = bool(fix.verify())
-            return ok, ("tabelle ACPI sulla entry bootata" if ok
-                        else "nessuna tabella ACPI sulla entry bootata")
+            return ok, ("tabelle ACPI attive (firmware o entry bootata)" if ok
+                        else "nessuna tabella ACPI (entry bootata o firmware)")
         tables = Path("/sys/firmware/acpi/tables")
         try:
             ssdt = [p.name for p in tables.glob("SSDT*")] if tables.exists() else []

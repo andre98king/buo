@@ -62,7 +62,8 @@ class TestAcpiTablesMarker(unittest.TestCase):
         self.marker = self.root / "acpi-applied.json"
         self.fix = ACPIFix(mock=False, aml_dir=str(self.aml),
                            boot_dir=str(self.root),
-                           marker_path=str(self.marker))
+                           marker_path=str(self.marker),
+                           cpu_sysfs=str(self.root / "cpu"))
         self.fix.distro.initramfs_tool = "ostree"
 
     def tearDown(self):
@@ -75,14 +76,16 @@ class TestAcpiTablesMarker(unittest.TestCase):
         self.assertRegex(h1, r"^[0-9a-f]{64}$")
         self.assertEqual(h1, ACPIFix(mock=False, aml_dir=str(self.aml),
                                      boot_dir=str(self.root),
-                                     marker_path=str(self.marker))
+                                     marker_path=str(self.marker),
+                                     cpu_sysfs=str(self.root / "cpu"))
                          .tables_hash())
         (self.aml / "SSDT-CST.aml").write_bytes(_aml(size=101))
         self.assertNotEqual(h1, self.fix.tables_hash())
 
     def test_tables_hash_none_without_aml(self):
         fix = ACPIFix(mock=False, aml_dir=str(self.root / "vuoto"),
-                      boot_dir=str(self.root), marker_path=str(self.marker))
+                      boot_dir=str(self.root), marker_path=str(self.marker),
+                      cpu_sysfs=str(self.root / "cpu"))
         self.assertIsNone(fix.tables_hash())
 
     # ---------------------------- marker ----------------------------- #
@@ -129,6 +132,109 @@ class TestAcpiTablesMarker(unittest.TestCase):
         self.assertNotEqual(old_blob, new_blob)
         data = json.loads(self.marker.read_text())
         self.assertEqual(data["tables_sha256"], self.fix.tables_hash())
+
+
+class TestFirmwareSuppliesTables(unittest.TestCase):
+    """Tabelle fornite dal FIRMWARE moddato (campo 23/09/2026).
+
+    Il BIOS community v2.2 (menu con "ACPI patch") spedisce le proprie tabelle
+    per gli 8 core: ACPICA respinge in blocco gli oggetti del nostro blob
+    (136 `AE_ALREADY_EXISTS` su P000-P00F) e gli idle state arrivano dal
+    firmware. Il gate deve riconoscerlo dall'EFFETTO (idle state dei thread
+    extra) e saltare il fix invece di riapplicare 252 MB di initramfs.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.cpu = self.root / "cpu"
+        self.cpu.mkdir()
+        self.boot = self.root / "boot"
+        (self.boot / "loader" / "entries").mkdir(parents=True)
+        self.aml = self.root / "aml"
+        self.aml.mkdir()
+        (self.aml / "SSDT-CST.aml").write_bytes(_aml(size=100))
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _cpu(self, index: int, states: int = 0) -> None:
+        """Un core in sysfs finto, con `states` idle state (0 = nessuno)."""
+        d = self.cpu / f"cpu{index}"
+        d.mkdir()
+        for s in range(states):
+            (d / "cpuidle" / f"state{s}").mkdir(parents=True)
+
+    def _fix(self) -> ACPIFix:
+        fix = ACPIFix(mock=False, aml_dir=str(self.aml),
+                      boot_dir=str(self.boot),
+                      marker_path=str(self.root / "marker.json"),
+                      cpu_sysfs=str(self.cpu))
+        fix.distro.initramfs_tool = "ostree"
+        return fix
+
+    def _boot_tree(self) -> Path:
+        """Initramfs + entry BLS minimi per far girare `apply` su ostree."""
+        (self.boot / f"initramfs-{KERNEL}.img").write_bytes(
+            b"X" * INITRAMFS_SIZE)
+        entry = self.boot / "loader" / "entries" / "ostree-1.conf"
+        entry.write_text(ENTRY_TEXT)
+        return entry
+
+    def test_no_extra_threads_is_not_firmware_fix(self):
+        for i in range(12):
+            self._cpu(i, states=4)
+        self.assertFalse(self._fix().firmware_supplies_tables())
+
+    def test_extra_threads_without_idle_states(self):
+        """8 core sbloccati ma senza tabelle (firmware stock): fix NECESSARIA."""
+        for i in range(16):
+            self._cpu(i, states=4 if i < 12 else 0)
+        self.assertFalse(self._fix().firmware_supplies_tables())
+
+    def test_extra_threads_with_idle_states(self):
+        for i in range(16):
+            self._cpu(i, states=4)
+        self.assertTrue(self._fix().firmware_supplies_tables())
+
+    def test_verify_true_without_our_blob(self):
+        """Entry SENZA blob ma firmware che fornisce le tabelle → attivo."""
+        for i in range(16):
+            self._cpu(i, states=4)
+        (self.boot / "loader" / "entries" / "ostree-1.conf").write_text(
+            "title Bazzite\n"
+            "options ostree=/ostree/boot.1/default/abc/1\n"
+            f"linux /ostree/default-abc/vmlinuz-{KERNEL}\n"
+            f"initrd /initramfs-{KERNEL}.img\n")
+        fix = self._fix()
+        self.assertFalse(fix._is_acpi_blob(f"/initramfs-{KERNEL}.img"))
+        self.assertTrue(fix.verify())
+
+    def test_is_stale_false_with_firmware_tables(self):
+        """Niente di nostro da certificare → nessuna ricostruzione.
+
+        Stessa situazione di `test_is_stale_when_provenance_unknown` (blob
+        sulla entry + marker assente = di norma «ricostruisci»), ma con le
+        tabelle fornite dal firmware: ricostruire 252 MB di initramfs per
+        oggetti che ACPICA respinge sarebbe solo un riavvio a vuoto.
+        """
+        for i in range(16):
+            self._cpu(i, states=4)
+        entry = self._boot_tree()
+        fix = self._fix()
+        self.assertTrue(fix.apply()["applied"])
+        (self.root / "marker.json").unlink()
+        self.assertIn("initramfs-acpi-", entry.read_text())   # blob nostro
+        self.assertFalse(fix.is_stale())
+
+    def test_apply_still_used_without_firmware_tables(self):
+        """Controprova: senza idle state il fix resta la strada normale."""
+        for i in range(16):
+            self._cpu(i, states=4 if i < 12 else 0)
+        self._boot_tree()
+        fix = self._fix()
+        self.assertFalse(fix.verify())
+        self.assertTrue(fix.apply()["applied"])
 
 
 if __name__ == "__main__":

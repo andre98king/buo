@@ -47,9 +47,12 @@ AGGIORNAMENTO 3 (30/08/2026 — ricerca community, repo ATTIVO):
     ⚠️ WARNING BIOS MODDATI: le tabelle BUO possono CONFLIGGERE con
       tabelle già fornite dal firmware moddato (es. 8-core via BIOS con
       tabelle proprie). I duplicati falliscono il load (README e-tho:
-      "duplicates will fail to load"): su un BIOS moddato verificare che
-      il firmware non fornisca già le tabelle prima di applicare il fix
-      BUO, o rimuovere quelle di BUO.
+      "duplicates will fail to load"). CONFERMATO SUL CAMPO (23/09/2026,
+      firmware community v2.2 con "ACPI patch" attiva): ACPICA respinge TUTTI
+      gli oggetti del blob — 136 `AE_ALREADY_EXISTS` su P000-P00F — e gli idle
+      state dei 16 thread arrivano dal firmware. Il gate ora lo rileva da solo
+      (`firmware_supplies_tables`: effetto su cpu12-15) e salta il fix, invece
+      di riapplicare 252 MB di initramfs per un riavvio a vuoto.
 """
 
 import hashlib
@@ -74,6 +77,9 @@ AML_CST = "SSDT-CST.aml"
 # Marker (in state_dir) con l'hash delle tabelle APPLICATE: il gate ostree
 # verifica che la entry punti a un blob, non QUALI tabelle contiene.
 APPLIED_MARKER = "acpi-applied-tables.json"
+# Thread delle CPU PRIMA dell'unlock (6 core × 2 SMT): i thread con indice
+# >= a questo sono quelli che il fix ACPI deve dotare di idle/P-state.
+STOCK_THREADS = 12
 
 
 class ACPIFix(LoggerMixin):
@@ -82,11 +88,16 @@ class ACPIFix(LoggerMixin):
     def __init__(self, mock: bool = False, mock_hardware=None,
                  aml_dir: Optional[str] = None,
                  boot_dir: Optional[str] = None,
-                 marker_path: Optional[str] = None):
+                 marker_path: Optional[str] = None,
+                 cpu_sysfs: Optional[str] = None):
         self.mock = mock
         self.mock_hw = mock_hardware
         # Root del boot (ESP): /boot di default, iniettabile nei test
         self.boot_dir = Path(boot_dir) if boot_dir else Path("/boot")
+        # Radice sysfs delle CPU: iniettabile nei test (l'ermeticità della
+        # suite dipende dal NON leggere l'hardware vero).
+        self.cpu_sysfs = (Path(cpu_sysfs) if cpu_sysfs
+                          else Path("/sys/devices/system/cpu"))
         # Default: cartella .aml scaricata da `buo install-deps` (se presente)
         if aml_dir is None:
             from ..utils.paths import deps_dir
@@ -136,6 +147,25 @@ class ACPIFix(LoggerMixin):
         value = data.get("tables_sha256")
         return value if isinstance(value, str) and value else None
 
+    def firmware_supplies_tables(self) -> bool:
+        """True se C-State/P-State degli 8 core arrivano dal FIRMWARE moddato.
+
+        Verifica dell'EFFETTO, non della provenienza: i thread oltre gli
+        STOCK_THREADS stock devono avere idle state in cpuidle. Con un BIOS
+        che fornisce le proprie tabelle (menu con "ACPI patch") gli oggetti
+        del nostro blob vengono respinti da ACPICA (`AE_ALREADY_EXISTS`) e il
+        fix è inutile: applicarlo costerebbe un initramfs da 252 MB e un
+        riavvio a vuoto. Se invece gli idle state mancano (firmware stock, o
+        "ACPI patch" spenta) il fix resta necessario e la strada normale.
+        """
+        try:
+            extra = [p for p in self.cpu_sysfs.glob("cpu[0-9]*")
+                     if int(p.name[3:]) >= STOCK_THREADS]
+            return bool(extra) and all(
+                (p / "cpuidle" / "state1").exists() for p in extra)
+        except (OSError, ValueError):  # pragma: no cover - difesa I/O
+            return False
+
     def is_stale(self) -> bool:
         """True se le tabelle APPLICATE non sono certificabili come correnti.
 
@@ -147,7 +177,11 @@ class ACPIFix(LoggerMixin):
           delle tabelle resterebbe inerte per sempre (il gate guarda la
           entry, non il contenuto del blob).
         Nessun fix presente → False (ci pensa il normale `apply`).
+        Tabelle fornite dal FIRMWARE → False: non c'è nulla di nostro da
+        certificare (e ricostruire il blob sarebbe un lavoro inutile).
         """
+        if self.firmware_supplies_tables():
+            return False
         applied = self.applied_tables_hash()
         current = self.tables_hash()
         if applied and current:
@@ -179,7 +213,7 @@ class ACPIFix(LoggerMixin):
     # ------------------------------------------------------------------ #
 
     def verify(self) -> bool:
-        """True se le tabelle C-State sono caricate DAL DEPLOYMENT BOOTATO.
+        """True se le tabelle C-State sono ATTIVE (dal boot o dal firmware).
 
         Su ostree (initramfs concatenato) l'unico segnale onesto è la entry
         del deployment **bootato** che punta a un nostro blob: la versione
@@ -190,9 +224,16 @@ class ACPIFix(LoggerMixin):
         default (campo 11/09/2026). Sulle distro dracut/initramfs-tools il
         segnale resta il nome delle tabelle in /sys (lì gli override NON
         vengono rinominati in SSDT1..N).
+
+        PRIMA di tutto questo: se le tabelle le fornisce il firmware moddato
+        (`firmware_supplies_tables`) il fix è già in effetto e non c'è nulla
+        da applicare — è il caso del BIOS community v2.2 col menu "ACPI
+        patch", dove il nostro blob viene respinto in blocco.
         """
         if self.mock and self.mock_hw is not None:
             return self.mock_hw.state.is_acpi_fixed
+        if self.firmware_supplies_tables():
+            return True
         if self.distro.initramfs_tool == "ostree":
             loader = self.boot_dir / "loader" / "entries"
             if not loader.is_dir():
