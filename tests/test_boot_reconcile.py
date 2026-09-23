@@ -20,8 +20,9 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from buo.constants import SMU_OC_SERVICE
-from buo.state.reconcile import (BOOT_UNIT, KILL_SWITCH, BootReconciler,
-                                 unit_content)
+from buo.state.reconcile import (BOOT_TIMER, BOOT_UNIT, KILL_SWITCH,
+                                 BootReconciler, install_unit, timer_content,
+                                 unit_content, uninstall_unit)
 
 
 class FakeCPU:
@@ -573,25 +574,71 @@ class ReconcilerTestCase(unittest.TestCase):
 
 
 class UnitTestCase(unittest.TestCase):
-    """Contenuto dell'unità di boot (nessun systemd reale)."""
+    """Contenuto delle unità di boot (nessun systemd reale)."""
+
+    @staticmethod
+    def _direttive(text: str):
+        return [ln.strip() for ln in text.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
 
     def test_unit_uses_python_module_entrypoint(self):
         text = unit_content("/var/opt/buo-venv/bin/python")
         self.assertIn("ExecStart=/var/opt/buo-venv/bin/python -m buo "
                       "boot-reconcile", text)
-        self.assertIn("WantedBy=graphical.target", text)
-        # Campo 23/09/2026: la verifica CU ferma/riavvia il governor GPU
-        # (~10 s) — se l'unità torna a ordinarsi PRIMA di graphical.target la
-        # scrivania riaspetta quel ciclo a ogni boot. Solo le direttive
-        # (i commenti che spiegano il perché citano la stringa).
-        direttive = [ln.strip() for ln in text.splitlines()
-                     if ln.strip() and not ln.strip().startswith("#")]
-        self.assertNotIn("Before=graphical.target", direttive)
         self.assertIn("boot-reconcile --boot", text)
         self.assertIn("WorkingDirectory=/tmp", text)
 
+    def test_service_is_not_in_the_boot_chain(self):
+        """Niente [Install]: l'enablement implica `Before=graphical.target`
+        (systemd ordina i volani di un target PRIMA del target) e la verifica
+        CU ferma/riavvia il governor GPU per ~10 s — la scrivania non deve
+        aspettarla (campo 23/09/2026). L'agente parte dal timer."""
+        direttive = self._direttive(unit_content("/usr/bin/python3"))
+        self.assertNotIn("[Install]", direttive)
+        self.assertNotIn("WantedBy=graphical.target", direttive)
+        self.assertNotIn("Before=graphical.target", direttive)
+
+    def test_timer_starts_the_agent_off_chain(self):
+        text = timer_content(20)
+        self.assertIn("[Timer]", text)
+        self.assertIn("OnBootSec=20s", text)
+        self.assertIn("WantedBy=timers.target", text)
+        self.assertNotIn("graphical.target", text)
+
+    def test_install_writes_both_and_enables_the_timer(self):
+        with TemporaryDirectory() as d:
+            unit, timer = Path(d) / BOOT_UNIT, Path(d) / BOOT_TIMER
+            calls = []
+
+            def fake(cmd, timeout=60, sudo=False, capture=True, cwd=None,
+                     **kwargs):
+                calls.append(list(cmd))
+                return (0, "", "")
+
+            with patch("buo.state.reconcile.run_command", fake):
+                out = install_unit("/usr/bin/python3", unit_path=unit,
+                                   timer_path=timer)
+            self.assertTrue(out["installed"], out)
+            self.assertTrue(unit.exists() and timer.exists())
+            # Il timer è la sorgente dell'avvio; l'enablement vecchio del
+            # servizio va tolto o systemd lo rimetterebbe in catena.
+            self.assertIn(["systemctl", "enable", BOOT_TIMER], calls)
+            self.assertIn(["systemctl", "disable", BOOT_UNIT], calls)
+
+    def test_uninstall_removes_both(self):
+        with TemporaryDirectory() as d:
+            unit, timer = Path(d) / BOOT_UNIT, Path(d) / BOOT_TIMER
+            unit.write_text("x", encoding="utf-8")
+            timer.write_text("x", encoding="utf-8")
+            with patch("buo.state.reconcile.run_command",
+                       lambda *a, **k: (0, "", "")):
+                out = uninstall_unit(unit_path=unit, timer_path=timer)
+            self.assertTrue(out["removed"], out)
+            self.assertFalse(unit.exists() or timer.exists())
+
     def test_unit_name_and_no_boot_block_protection(self):
         self.assertEqual(BOOT_UNIT, "buo-boot-reconcile.service")
+        self.assertEqual(BOOT_TIMER, "buo-boot-reconcile.timer")
         # Un fallimento dell'agente non deve bloccare il boot
         # Il reboot di riparazione termina l'agente con SIGTERM: non deve
         # risultare "failed" nel journal (era cosi' nel primo test sul campo).

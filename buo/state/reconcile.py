@@ -49,6 +49,17 @@ from ..utils.shell import run_command
 # Unità systemd dell'agente di boot.
 BOOT_UNIT = "buo-boot-reconcile.service"
 UNIT_PATH = Path("/etc/systemd/system") / BOOT_UNIT
+# Timer che ARMA l'agente FUORI dalla catena di boot. Perché non
+# `WantedBy=graphical.target`: quell'enablement implica un
+# `Before=graphical.target` (systemd ordina i volani di un target PRIMA del
+# target) e l'agente, per verificare le CU, ferma e riavvia il governor GPU —
+# ~10 s, contro 0,3 s di controllo (misurato il 23/09/2026 con
+# `systemd-analyze critical-chain`: graphical.target aspettava tutto il ciclo).
+# L'agente è una rete di sicurezza, non un prerequisito della sessione: 20 s
+# dopo l'avvio la sessione è su e lui lavora senza trattenere nessuno.
+BOOT_TIMER = "buo-boot-reconcile.timer"
+TIMER_PATH = Path("/etc/systemd/system") / BOOT_TIMER
+BOOT_TIMER_DELAY = 20
 # Kill-switch da cmdline (convenzione community: bc250.nocoreunlock).
 KILL_SWITCH = "bc250.nocoreunlock"
 # Tetto tentativi: 2 = al massimo un reboot automatico in più dopo un cold
@@ -666,12 +677,6 @@ Description=BUO boot reconcile (BC-250: 16 thread, governor GPU, CU, ACPI)
 Documentation=man:buo(1)
 After=bc250-cu-live-manager.service
 Wants=bc250-cu-live-manager.service
-# NIENTE `Before=graphical.target` (campo 23/09/2026): la verifica delle CU
-# ferma e riavvia il governor GPU per la lettura UMR, e l'avvio del governor
-# costa ~10 s (SMU+UMR) — con l'ordinamento la scrivania aspettava TUTTO il
-# ciclo per un controllo che da solo dura 0,3 s. L'agente è una rete di
-# sicurezza, non un prerequisito della sessione: `WantedBy=graphical.target`
-# lo fa partire comunque, ma graphic.target non lo aspetta più.
 
 [Service]
 Type=oneshot
@@ -684,39 +689,77 @@ RemainAfterExit=yes
 # Il reboot per attivare l'unlock è deciso dall'agente (tetto tentativi +
 # gate gioco): un fallimento dell'agente NON deve bloccare il boot.
 SuccessExitStatus=0 1 SIGTERM
+# NIENTE [Install]: l'agente è avviato dal timer `{BOOT_TIMER}`, non dalla
+# catena di boot (la verifica CU ferma il governor GPU per ~10 s e la
+# scrivania non deve aspettarla — campo 23/09/2026).
+"""
+
+
+def timer_content(delay: int = BOOT_TIMER_DELAY) -> str:
+    """Unità timer che avvia l'agente poco dopo il boot, fuori catena.
+
+    Un timer arma in un istante (nessuna attesa nel boot) e il servizio parte
+    quando la sessione è già su; `OnBootSec` conta da CLOCK_MONOTONIC, quindi
+    il ritardo reale è ~`delay` meno il tempo di initramfs già trascorso.
+    """
+    return f"""# BUO boot reconcile — timer, generato da `buo boot-reconcile --install`
+[Unit]
+Description=Avvia l'agente di boot BUO poco dopo l'avvio
+Documentation=man:buo(1)
+
+[Timer]
+OnBootSec={delay}s
+AccuracySec=1s
 
 [Install]
-WantedBy=graphical.target
+WantedBy=timers.target
 """
 
 
 def install_unit(python: Optional[str] = None,
-                 unit_path: Path = UNIT_PATH) -> Dict[str, Any]:
-    """Scrive e abilita l'unità dell'agente (idempotente, serve root)."""
+                 unit_path: Path = UNIT_PATH,
+                 timer_path: Path = TIMER_PATH) -> Dict[str, Any]:
+    """Scrive servizio + timer e abilita il TIMER (idempotente, serve root).
+
+    Non avvia nulla adesso: l'agente gira al prossimo boot (`--now` è
+    deliberatamente assente — installare l'agente non deve far partire una
+    verifica/riparazione a macchina in uso).
+    """
     py = python or sys.executable
+    sudo = os.geteuid() != 0
     try:
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         unit_path.write_text(unit_content(py), encoding="utf-8")
+        timer_path.write_text(timer_content(), encoding="utf-8")
     except OSError as e:
         return {"installed": False, "error": f"{e} (serve root?)"}
     rc, _, err = run_command(["systemctl", "daemon-reload"], timeout=60,
-                             sudo=os.geteuid() != 0)
+                             sudo=sudo)
     if rc != 0:
         return {"installed": False, "error": err or "daemon-reload fallito"}
-    rc, _, err = run_command(["systemctl", "enable", BOOT_UNIT], timeout=60,
-                             sudo=os.geteuid() != 0)
+    # Enablement VECCHIO (unità nella catena di boot): va tolto, altrimenti
+    # systemd continua a ordinarla prima di graphical.target (il `Before=`
+    # implicito del volano) e la scrivania riaspetta il ciclo del governor.
+    run_command(["systemctl", "disable", BOOT_UNIT], timeout=60, sudo=sudo)
+    rc, _, err = run_command(["systemctl", "enable", BOOT_TIMER], timeout=60,
+                             sudo=sudo)
     if rc != 0:
-        return {"installed": False, "error": err or "enable fallito"}
-    return {"installed": True, "unit": str(unit_path), "python": py}
+        return {"installed": False, "error": err or "enable del timer fallito"}
+    return {"installed": True, "unit": str(unit_path),
+            "timer": str(timer_path), "python": py}
 
 
-def uninstall_unit(unit_path: Path = UNIT_PATH) -> Dict[str, Any]:
-    """Disabilita e rimuove l'unità dell'agente."""
+def uninstall_unit(unit_path: Path = UNIT_PATH,
+                   timer_path: Path = TIMER_PATH) -> Dict[str, Any]:
+    """Disabilita e rimuove timer e unità dell'agente."""
     sudo = os.geteuid() != 0
+    run_command(["systemctl", "disable", "--now", BOOT_TIMER], timeout=60,
+                sudo=sudo)
     run_command(["systemctl", "disable", "--now", BOOT_UNIT], timeout=60,
                 sudo=sudo)
     try:
         unit_path.unlink(missing_ok=True)
+        timer_path.unlink(missing_ok=True)
     except OSError as e:
         return {"removed": False, "error": str(e)}
     rc, _, err = run_command(["systemctl", "daemon-reload"], timeout=60,
