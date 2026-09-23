@@ -665,8 +665,13 @@ def unit_content(python: str) -> str:
 Description=BUO boot reconcile (BC-250: 16 thread, governor GPU, CU, ACPI)
 Documentation=man:buo(1)
 After=bc250-cu-live-manager.service
-Before=graphical.target
 Wants=bc250-cu-live-manager.service
+# NIENTE `Before=graphical.target` (campo 23/09/2026): la verifica delle CU
+# ferma e riavvia il governor GPU per la lettura UMR, e l'avvio del governor
+# costa ~10 s (SMU+UMR) — con l'ordinamento la scrivania aspettava TUTTO il
+# ciclo per un controllo che da solo dura 0,3 s. L'agente è una rete di
+# sicurezza, non un prerequisito della sessione: `WantedBy=graphical.target`
+# lo fa partire comunque, ma graphic.target non lo aspetta più.
 
 [Service]
 Type=oneshot

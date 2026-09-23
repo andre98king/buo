@@ -580,7 +580,13 @@ class UnitTestCase(unittest.TestCase):
         self.assertIn("ExecStart=/var/opt/buo-venv/bin/python -m buo "
                       "boot-reconcile", text)
         self.assertIn("WantedBy=graphical.target", text)
-        self.assertIn("Before=graphical.target", text)
+        # Campo 23/09/2026: la verifica CU ferma/riavvia il governor GPU
+        # (~10 s) — se l'unità torna a ordinarsi PRIMA di graphical.target la
+        # scrivania riaspetta quel ciclo a ogni boot. Solo le direttive
+        # (i commenti che spiegano il perché citano la stringa).
+        direttive = [ln.strip() for ln in text.splitlines()
+                     if ln.strip() and not ln.strip().startswith("#")]
+        self.assertNotIn("Before=graphical.target", direttive)
         self.assertIn("boot-reconcile --boot", text)
         self.assertIn("WorkingDirectory=/tmp", text)
 
